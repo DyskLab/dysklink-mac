@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum Theme {
-    static let logo = Color(hex: 0x2B3A57)
+    static let logo = Color(hex: 0x14B8A6)
     static let ink = Color(hex: 0x090D13)
     static let panel = Color(hex: 0x121822)
     static let panelRaised = Color(hex: 0x1A2230)

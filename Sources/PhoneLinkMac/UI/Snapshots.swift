@@ -143,8 +143,8 @@ enum Snapshots {
     /// Renders a 1024x1024 PNG for the app icon, with the standard macOS icon margin.
     static func renderIcon(to path: String) {
         let icon = ZStack {
-            RoundedRectangle(cornerRadius: 185, style: .continuous).fill(Theme.logo)
-            LogoGlyph().fill(Color.white).frame(width: 640, height: 640)
+            RoundedRectangle(cornerRadius: 198).fill(Theme.logo)
+            LogoGlyph().fill(Color.white).frame(width: 824, height: 824)
         }
         .frame(width: 824, height: 824)
         .frame(width: 1024, height: 1024)

@@ -115,8 +115,8 @@ struct LogoMark: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.3, style: .continuous).fill(Theme.logo)
-            LogoGlyph().fill(Color.white).frame(width: size * 0.78, height: size * 0.78)
+            RoundedRectangle(cornerRadius: size * 0.24).fill(Theme.logo)
+            LogoGlyph().fill(Color.white).frame(width: size, height: size)
         }
         .frame(width: size, height: size)
     }

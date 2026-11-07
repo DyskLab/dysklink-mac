@@ -31,8 +31,8 @@ You need macOS 15 or later on Apple Silicon.
    **Open Anyway**.
 3. [Install the Android app](https://github.com/DyskLab/dysklink-android#download) and open it on the same network.
 
-This download has an ad-hoc signature, so macOS asks for Accessibility again after you install a newer version. To
-avoid that, or to run on Intel, [build it from source](#build-and-run).
+This download uses a self-signed certificate, not one from Apple. To run on Intel,
+[build it from source](#build-and-run).
 
 | Pairing | Clipboard History |
 | --- | --- |
