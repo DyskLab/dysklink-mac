@@ -1,14 +1,44 @@
-# DyskLink for Mac
+<p align="center">
+  <img src="docs/icon.png" width="88" alt="DyskLink">
+</p>
 
-Connects your Mac and Android phone over local Wi-Fi, with no cloud and no account. It also adds a set of
-optional tools to the Mac, each off until you turn it on.
+<h1 align="center">DyskLink for Mac</h1>
+
+<p align="center">Connects your Mac and Android phone over local Wi-Fi, with no cloud and no account.</p>
+
+<p align="center">
+  <a href="https://github.com/DyskLab/dysklink-mac/releases/latest"><img src="https://img.shields.io/github/v/release/DyskLab/dysklink-mac?include_prereleases" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/DyskLab/dysklink-mac" alt="MIT License"></a>
+  <a href="https://www.fanny.dev/dysklab"><img src="https://img.shields.io/badge/part%20of-DyskLab-2DD4A7" alt="Part of DyskLab"></a>
+  <a href="https://buymeacoffee.com/fannydevz"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=000" alt="Buy Me a Coffee"></a>
+</p>
+
+![Phone notifications on the Mac](docs/screenshots/02-notifications.png)
+
+DyskLink also adds a set of optional tools to the Mac, each off until you turn it on.
 
 **This is the Mac app. The phone app is [DyskLink for Android](https://github.com/DyskLab/dysklink-android).**
 You need both to use the phone features. The Advanced tools work on the Mac alone.
 
-[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-fannydevz-ffdd00?logo=buymeacoffee&logoColor=000)](https://buymeacoffee.com/fannydevz)
+> DyskLink is in early development, so expect rough edges.
 
-> DyskLink is in early development. There are no prebuilt downloads yet, so you build it from source.
+## Download
+You need macOS 15 or later on Apple Silicon.
+
+1. Download `DyskLink-mac-arm64.zip` from the [latest release](https://github.com/DyskLab/dysklink-mac/releases/latest),
+   unzip it, and move **DyskLink** to Applications.
+2. The app isn't notarized, so macOS blocks the first launch. Open **System Settings > Privacy & Security** and choose
+   **Open Anyway**.
+3. [Install the Android app](https://github.com/DyskLab/dysklink-android#download) and open it on the same network.
+
+This download has an ad-hoc signature, so macOS asks for Accessibility again after you install a newer version. To
+avoid that, or to run on Intel, [build it from source](#build-and-run).
+
+| Pairing | Clipboard History |
+| --- | --- |
+| ![Pairing with a code](docs/screenshots/01-pairing.png) | ![Clipboard History](docs/screenshots/03-clipboard-history.png) |
+| **Notch** | **Window Previews** |
+| ![Notch panel](docs/screenshots/04-notch.png) | ![Window Previews](docs/screenshots/05-window-previews.png) |
 
 ## With your phone
 - **Connection:** encrypted pairing, multiple devices, automatic reconnection, and phone status such as battery,
@@ -140,3 +170,8 @@ service, the Swift target, and the data folder, because changing them would eras
 ## Support
 DyskLink is free and open source under the [MIT License](LICENSE). If it helps you, you can
 [buy me a coffee](https://buymeacoffee.com/fannydevz).
+
+## Part of DyskLab
+DyskLink is part of [DyskLab](https://www.fanny.dev/dysklab), alongside
+[DyskFlow](https://github.com/DyskLab/dyskflow), [DyskFiles](https://github.com/DyskLab/dyskfiles), and
+[DyskFocus](https://github.com/DyskLab/dyskfocus).
