@@ -1,0 +1,197 @@
+import AppKit
+import Observation
+
+/// The optional tools on the Advanced page. Each one is off until the user turns it on,
+/// and does no work while off.
+@MainActor
+@Observable
+final class ToolsModel {
+    let monitor = SystemMonitor()
+    let awake = KeepAwake()
+    let clipboard: ClipboardHistory
+    let displays = DisplayControl()
+    let mouse = MouseTuner()
+    let previews = WindowPreviews()
+    let notch: NotchController
+    private(set) var shortcutProblem: String?
+
+    enum ShortcutSlot { case history, capture }
+    private(set) var recordingSlot: ShortcutSlot?
+    var historyShortcut: KeyCombo {
+        didSet { store(historyShortcut, "clipboard.historyShortcut"); applyClipboard() }
+    }
+    var captureShortcut: KeyCombo {
+        didSet { store(captureShortcut, "clipboard.captureShortcut"); applyClipboard() }
+    }
+    @ObservationIgnored private var recordingMonitor: Any?
+
+    var isMonitorOn: Bool {
+        didSet { save(isMonitorOn, "tool.monitor"); applyMonitor() }
+    }
+    var isAwakeOn: Bool {
+        didSet { save(isAwakeOn, "tool.keepAwake"); if !isAwakeOn { awake.stop() } }
+    }
+    var isClipboardOn: Bool {
+        didSet { save(isClipboardOn, "tool.clipboard"); applyClipboard() }
+    }
+
+    var isDisplaysOn: Bool {
+        didSet { save(isDisplaysOn, "tool.displays"); applyDisplays() }
+    }
+    var isMouseOn: Bool {
+        didSet { save(isMouseOn, "tool.mouse"); applyMouse() }
+    }
+    var isPreviewsOn: Bool {
+        didSet { save(isPreviewsOn, "tool.previews"); applyPreviews() }
+    }
+    var isNotchOn: Bool {
+        didSet { save(isNotchOn, "tool.notch"); applyNotch() }
+    }
+
+    /// Snapshots show the controls without touching the real mouse, monitors, or shortcuts.
+    @ObservationIgnored private let isInert: Bool
+
+    init(directory: URL = ToolsModel.defaultDirectory, isInert: Bool = false) {
+        self.isInert = isInert
+        clipboard = ClipboardHistory(directory: directory)
+        notch = NotchController(directory: directory)
+        let defaults = UserDefaults.standard
+        historyShortcut = Self.loadCombo("clipboard.historyShortcut") ?? .historyDefault
+        captureShortcut = Self.loadCombo("clipboard.captureShortcut") ?? .captureDefault
+        isMonitorOn = defaults.bool(forKey: "tool.monitor")
+        isAwakeOn = defaults.bool(forKey: "tool.keepAwake")
+        isClipboardOn = defaults.bool(forKey: "tool.clipboard")
+        isDisplaysOn = defaults.bool(forKey: "tool.displays")
+        isMouseOn = defaults.bool(forKey: "tool.mouse")
+        isPreviewsOn = defaults.bool(forKey: "tool.previews")
+        isNotchOn = defaults.bool(forKey: "tool.notch")
+    }
+
+    func start() {
+        applyMonitor()
+        applyClipboard()
+        applyDisplays()
+        applyMouse()
+        applyPreviews()
+        applyNotch()
+    }
+
+    /// Mouse settings outlive the app unless they are put back.
+    func shutDown() {
+        mouse.stop()
+    }
+
+    private func applyDisplays() {
+        guard !isInert else { return }
+        if isDisplaysOn { displays.start() } else { displays.stop() }
+    }
+
+    private func applyMouse() {
+        guard !isInert else { return }
+        if isMouseOn { mouse.start() } else { mouse.stop() }
+    }
+
+    private func applyPreviews() {
+        guard !isInert else { return }
+        if isPreviewsOn { previews.start() } else { previews.stop() }
+    }
+
+    private func applyNotch() {
+        guard !isInert else { return }
+        if isNotchOn { notch.start() } else { notch.stop() }
+    }
+
+    private func save(_ value: Bool, _ key: String) {
+        guard !isInert else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func applyMonitor() {
+        guard !isInert else { return }
+        if isMonitorOn { monitor.start() } else { monitor.stop() }
+    }
+
+    private func applyClipboard() {
+        guard !isInert else { return }
+        guard isClipboardOn else {
+            clipboard.stop()
+            HotKeys.removeAll()
+            ClipboardPanel.close()
+            shortcutProblem = nil
+            return
+        }
+        clipboard.start()
+        let history = HotKeys.register(id: 1, keyCode: historyShortcut.keyCode, modifiers: historyShortcut.modifiers) {
+            ClipboardPanel.toggle(Shared.tools.clipboard)
+        }
+        let capture = HotKeys.register(id: 2, keyCode: captureShortcut.keyCode, modifiers: captureShortcut.modifiers) {
+            TextCapture.run(into: Shared.tools.clipboard)
+        }
+        shortcutProblem = history && capture ? nil : "Another app is using this shortcut. Choose a different one."
+    }
+
+    // MARK: Shortcut recording
+
+    private static func loadCombo(_ key: String) -> KeyCombo? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(KeyCombo.self, from: $0) }
+    }
+
+    private func store(_ combo: KeyCombo, _ key: String) {
+        guard !isInert else { return }
+        UserDefaults.standard.set(try? JSONEncoder().encode(combo), forKey: key)
+    }
+
+    /// The window takes the next key press. The current shortcuts pause so pressing them doesn't run them.
+    func startRecording(_ slot: ShortcutSlot) {
+        cancelRecording()
+        recordingSlot = slot
+        shortcutProblem = nil
+        HotKeys.remove(id: 1)
+        HotKeys.remove(id: 2)
+        recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated { self?.record(event) }
+            return nil
+        }
+    }
+
+    func cancelRecording() {
+        guard recordingSlot != nil else { return }
+        if let recordingMonitor { NSEvent.removeMonitor(recordingMonitor) }
+        recordingMonitor = nil
+        recordingSlot = nil
+        applyClipboard()
+    }
+
+    private func record(_ event: NSEvent) {
+        guard let slot = recordingSlot else { return }
+        if event.keyCode == 53 { return cancelRecording() }
+        let combo = KeyCombo(event: event)
+        guard combo.isUsable else {
+            shortcutProblem = "Include Command, Control, or Option, or use a function key."
+            return
+        }
+        let other = slot == .history ? captureShortcut : historyShortcut
+        guard combo != other else {
+            shortcutProblem = "The other Clipboard History shortcut already uses \(combo.label)."
+            return
+        }
+        if let recordingMonitor { NSEvent.removeMonitor(recordingMonitor) }
+        recordingMonitor = nil
+        recordingSlot = nil
+        if slot == .history { historyShortcut = combo } else { captureShortcut = combo }
+    }
+
+    func resetShortcuts() {
+        cancelRecording()
+        historyShortcut = .historyDefault
+        captureShortcut = .captureDefault
+    }
+
+    nonisolated static var defaultDirectory: URL {
+        if let custom = ProcessInfo.processInfo.environment["PHONELINK_DATA_DIR"] {
+            return URL(fileURLWithPath: custom, isDirectory: true).appendingPathComponent("Tools", isDirectory: true)
+        }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return support.appendingPathComponent("DyskLink/Tools", isDirectory: true)
+    }
+}
