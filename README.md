@@ -48,7 +48,8 @@ menu bar when you log in. If you move the app afterward, turn it off and on agai
   scroll sideways, faster, or slower, zoom, or change volume or brightness. Settings go back when you turn this off
   or quit, and after a crash they go back when the mouse reconnects or the Mac restarts.
 - **Window Previews:** point at a Dock icon to see that app's windows, then click to focus, minimize, or close one.
-  **Option + Tab** switches between windows. It lists windows on the current Space and minimized windows.
+  **Option + Tab** switches between windows. It lists windows on the current Space and minimized windows. To catch
+  this shortcut, the app checks which key each press is, without storing or sending it.
 - **Notch:** point at or click the top of the built-in screen, or a thin bar on the main screen with the lid closed,
   for music controls, a 25-minute focus timer, Mac and phone batteries, a file shelf, and recent copies. Song titles
   come from Music and Spotify only, while the buttons control whichever player is active. The shelf only remembers

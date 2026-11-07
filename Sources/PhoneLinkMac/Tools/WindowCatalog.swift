@@ -25,6 +25,8 @@ enum WindowCatalog {
 
     static func windows(of app: NSRunningApplication) -> [WindowItem] {
         let element = AXUIElementCreateApplication(app.processIdentifier)
+        // An app that has stopped responding must not hold up the whole list.
+        AXUIElementSetMessagingTimeout(element, 0.25)
         guard let list: [AXUIElement] = attribute(element, kAXWindowsAttribute) else { return [] }
         return list.compactMap { window in
             let subrole: String? = attribute(window, kAXSubroleAttribute)
@@ -68,6 +70,8 @@ enum WindowCatalog {
             AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
         NSRunningApplication(processIdentifier: window.pid)?.activate()
+        // macOS can ignore activate() from an app in the background, so ask through Accessibility too.
+        AXUIElementSetAttributeValue(AXUIElementCreateApplication(window.pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
     }

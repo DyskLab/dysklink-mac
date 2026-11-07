@@ -3,12 +3,7 @@ import Carbon.HIToolbox
 /// Global shortcuts. This Carbon API needs no permission and doesn't watch other keystrokes.
 @MainActor
 enum HotKeys {
-    static let keyTab = UInt32(kVK_Tab)
     static let controlCommand = UInt32(controlKey | cmdKey)
-    static let option = UInt32(optionKey)
-    static let optionShift = UInt32(optionKey | shiftKey)
-    static let switcherID: UInt32 = 3
-    static let switcherBackID: UInt32 = 4
     private static var actions: [UInt32: () -> Void] = [:]
     private static var references: [UInt32: EventHotKeyRef] = [:]
     private static var isInstalled = false

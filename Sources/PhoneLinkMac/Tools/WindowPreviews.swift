@@ -149,7 +149,7 @@ final class WindowPreviews {
     @ObservationIgnored private var switcherPanel: NSPanel?
     @ObservationIgnored private var dockTimer: Timer?
     @ObservationIgnored private var switcherTimer: Timer?
-    @ObservationIgnored private var keyMonitor: Any?
+    @ObservationIgnored private var tapRetryTimer: Timer?
     @ObservationIgnored private var iconFrame = CGRect.zero
     @ObservationIgnored private var shownPid: pid_t = 0
     @ObservationIgnored private var isDockVisible = false
@@ -182,24 +182,50 @@ final class WindowPreviews {
         dockPanel = nil
         imageCache = [:]
         closeSwitcher(commit: false)
-        HotKeys.remove(id: HotKeys.switcherID)
-        HotKeys.remove(id: HotKeys.switcherBackID)
-        shortcutProblem = nil
+        stopSwitcherKeys()
     }
 
     private func applySwitcher() {
         guard isOn else { return }
-        HotKeys.remove(id: HotKeys.switcherID)
-        HotKeys.remove(id: HotKeys.switcherBackID)
+        guard usesSwitcher else {
+            closeSwitcher(commit: false)
+            stopSwitcherKeys()
+            return
+        }
+        guard !startSwitcherKeys() else { return }
+        shortcutProblem = "Option + Tab needs Accessibility."
+        guard tapRetryTimer == nil else { return }
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.startSwitcherKeys() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        tapRetryTimer = timer
+    }
+
+    private func startSwitcherKeys() -> Bool {
+        let isStarted = SwitcherTap.shared.start { [weak self] command in self?.run(command) }
+        if isStarted {
+            tapRetryTimer?.invalidate()
+            tapRetryTimer = nil
+            shortcutProblem = nil
+        }
+        return isStarted
+    }
+
+    private func stopSwitcherKeys() {
+        tapRetryTimer?.invalidate()
+        tapRetryTimer = nil
+        SwitcherTap.shared.stop()
         shortcutProblem = nil
-        guard usesSwitcher else { return }
-        let forward = HotKeys.register(id: HotKeys.switcherID, keyCode: HotKeys.keyTab, modifiers: HotKeys.option) { [weak self] in
-            self?.advanceSwitcher(by: 1)
+    }
+
+    private func run(_ command: SwitcherCommand) {
+        switch command {
+        case .forward: advanceSwitcher(by: 1)
+        case .back: advanceSwitcher(by: -1)
+        case .commit: closeSwitcher(commit: true)
+        case .cancel: closeSwitcher(commit: false)
         }
-        let back = HotKeys.register(id: HotKeys.switcherBackID, keyCode: HotKeys.keyTab, modifiers: HotKeys.optionShift) { [weak self] in
-            self?.advanceSwitcher(by: -1)
-        }
-        if !forward || !back { shortcutProblem = "Another app is using Option + Tab." }
     }
 
     // MARK: Dock
@@ -352,23 +378,13 @@ final class WindowPreviews {
         let area = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         panel.setFrame(CGRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
                               width: size.width, height: size.height), display: true)
-        panel.makeKeyAndOrderFront(nil)
+        // The app in front keeps its keyboard focus, and the tap handles keys while this is open.
+        panel.orderFrontRegardless()
         switcherPanel = panel
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                switch Int(event.keyCode) {
-                case 53: self?.closeSwitcher(commit: false)
-                case 36, 76: self?.closeSwitcher(commit: true)
-                case 123, 126: self?.advanceSwitcher(by: -1)
-                case 124, 125: self?.advanceSwitcher(by: 1)
-                default: break
-                }
-            }
-            return nil
-        }
+        SwitcherTap.shared.setOpen(true)
         let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                if !NSEvent.modifierFlags.contains(.option) { self?.closeSwitcher(commit: true) }
+                if !CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate) { self?.closeSwitcher(commit: true) }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -384,8 +400,7 @@ final class WindowPreviews {
     private func closeSwitcher(commit: Bool) {
         switcherTimer?.invalidate()
         switcherTimer = nil
-        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
-        keyMonitor = nil
+        SwitcherTap.shared.setOpen(false)
         guard let panel = switcherPanel else { return }
         panel.orderOut(nil)
         switcherPanel = nil
