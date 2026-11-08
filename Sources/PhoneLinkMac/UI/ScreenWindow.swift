@@ -33,7 +33,11 @@ final class ScreenSurface: NSView {
     private static let scrollMargin: Float = 0.2
 
     var onControl: ((ControlEvent) -> Void)?
-    var videoSize = CGSize(width: 9, height: 16)
+    var videoSize = CGSize(width: 9, height: 16) { didSet { needsLayout = true } }
+    /// Turns the picture clockwise in steps of 90 degrees. The phone itself doesn't change.
+    var quarterTurns = 0 { didSet { needsLayout = true } }
+
+    private let video = CALayer()
 
     private var isPressed = false
     private var lastSentAt: TimeInterval = 0
@@ -45,7 +49,8 @@ final class ScreenSurface: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
-        layer?.contentsGravity = .resizeAspect
+        video.contentsGravity = .resizeAspect
+        layer?.addSublayer(video)
     }
 
     @available(*, unavailable)
@@ -54,24 +59,61 @@ final class ScreenSurface: NSView {
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The size of the picture as it appears, after turning.
+    var displaySize: CGSize {
+        quarterTurns % 2 == 0 ? videoSize : CGSize(width: videoSize.height, height: videoSize.width)
+    }
+
     func display(_ buffer: CVPixelBuffer) {
         guard let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
+        show(surface)
+    }
+
+    func show(_ contents: Any) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer?.contents = surface
+        video.contents = contents
         CATransaction.commit()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let rect = AVMakeRect(aspectRatio: displaySize, insideRect: bounds)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        video.bounds = CGRect(origin: .zero, size: quarterTurns % 2 == 0 ? rect.size : CGSize(width: rect.height, height: rect.width))
+        video.position = CGPoint(x: rect.midX, y: rect.midY)
+        // The layer's y axis points up, so a negative angle turns clockwise.
+        video.setAffineTransform(CGAffineTransform(rotationAngle: -CGFloat(quarterTurns) * .pi / 2))
+        CATransaction.commit()
+    }
+
+    /// Maps a point on the turned picture, from the top left, back to the phone screen.
+    static func phonePoint(_ point: (x: Float, y: Float), quarterTurns: Int) -> (x: Float, y: Float) {
+        switch (quarterTurns % 4 + 4) % 4 {
+        case 1: return (point.y, 1 - point.x)
+        case 2: return (1 - point.x, 1 - point.y)
+        case 3: return (1 - point.y, point.x)
+        default: return point
+        }
     }
 
     private func normalized(_ event: NSEvent) -> (x: Float, y: Float) {
         let point = convert(event.locationInWindow, from: nil)
-        let rect = AVMakeRect(aspectRatio: videoSize, insideRect: bounds)
+        let rect = AVMakeRect(aspectRatio: displaySize, insideRect: bounds)
         let x = (point.x - rect.minX) / max(rect.width, 1)
         let y = 1 - (point.y - rect.minY) / max(rect.height, 1)
         return (Float(min(max(x, 0), 1)), Float(min(max(y, 0), 1)))
     }
 
     private func touch(_ kind: String, _ point: (x: Float, y: Float)) {
-        onControl?(ControlEvent(kind: kind, x: point.x, y: point.y))
+        let phone = Self.phonePoint(point, quarterTurns: quarterTurns)
+        onControl?(ControlEvent(kind: kind, x: phone.x, y: phone.y))
     }
 
     /// Movement is sent while it happens, at most about 90 times a second.
@@ -104,7 +146,7 @@ final class ScreenSurface: NSView {
 
     /// The wheel and trackpad act as a finger dragging on the phone, so scrolling follows them directly.
     override func scrollWheel(with event: NSEvent) {
-        let rect = AVMakeRect(aspectRatio: videoSize, insideRect: bounds)
+        let rect = AVMakeRect(aspectRatio: displaySize, insideRect: bounds)
         guard !isPressed, rect.width > 0, rect.height > 0 else { return }
         if scrollFinger == nil {
             let at = normalized(event)
@@ -178,6 +220,12 @@ private struct ScreenWindowContent: View {
                         .font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(2)
                 }
                 Spacer(minLength: 4)
+                Button { ScreenWindow.rotate() } label: {
+                    Image(systemName: "rotate.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        .frame(width: 34, height: 28).background(Theme.panelRaised, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Rotate the picture. The phone doesn't rotate.")
                 Button("Stop") { model.stopScreen() }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.coral)
             }
@@ -210,20 +258,34 @@ enum ScreenWindow {
 
     static var isVisible: Bool { window?.isVisible == true }
 
+    private static let turnsKey = "screen.quarterTurns"
+
+    /// The window follows the picture's aspect ratio, portrait or landscape.
+    static func contentSize(for picture: CGSize) -> CGSize {
+        picture.height >= picture.width
+            ? CGSize(width: 720 * picture.width / picture.height, height: 720 + barHeight)
+            : CGSize(width: 960, height: 960 * picture.height / picture.width + barHeight)
+    }
+
+    /// The turn is remembered for the next session.
+    static func rotate() {
+        guard let window, let surface else { return }
+        surface.quarterTurns = (surface.quarterTurns + 1) % 4
+        UserDefaults.standard.set(surface.quarterTurns, forKey: turnsKey)
+        window.setContentSize(contentSize(for: surface.displaySize))
+    }
+
     static func show(model: AppModel, peerId: String, name: String, info: ScreenInfo) {
         let videoSize = CGSize(width: info.width, height: info.height)
-        // The initial size follows the phone's aspect ratio, portrait or landscape.
-        let isPortrait = info.height >= info.width
-        let content = isPortrait
-            ? CGSize(width: 720 * videoSize.width / videoSize.height, height: 720 + barHeight)
-            : CGSize(width: 960, height: 960 * videoSize.height / videoSize.width + barHeight)
         if let window, let surface {
             surface.videoSize = videoSize
-            window.setContentSize(content)
+            window.setContentSize(contentSize(for: surface.displaySize))
             return
         }
         let view = ScreenSurface(frame: .zero)
         view.videoSize = videoSize
+        view.quarterTurns = UserDefaults.standard.integer(forKey: turnsKey) % 4
+        let content = contentSize(for: view.displaySize)
         view.onControl = { [weak model] event in model?.sendControl(event, to: peerId) }
         let created = NSWindow(
             contentRect: NSRect(origin: .zero, size: content),

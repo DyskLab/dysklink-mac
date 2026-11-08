@@ -59,6 +59,37 @@ enum Snapshots {
         save([phone], nil, "11-screen", folder, phone: demo, tab: .screen)
         save([phone], nil, "10-off", folder, phone: off, tab: .messages)
         renderTools(to: folder)
+        renderTurns(to: folder)
+    }
+
+    /// The phone picture at each quarter turn. The phone's top left corner is red and its top edge is green.
+    private static func renderTurns(to folder: String) {
+        let phone = CGSize(width: 90, height: 160)
+        guard let draw = CGContext(data: nil, width: Int(phone.width), height: Int(phone.height), bitsPerComponent: 8,
+                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        draw.setFillColor(NSColor.darkGray.cgColor); draw.fill(CGRect(origin: .zero, size: phone))
+        draw.setFillColor(NSColor.green.cgColor); draw.fill(CGRect(x: 0, y: phone.height - 12, width: phone.width, height: 12))
+        draw.setFillColor(NSColor.red.cgColor); draw.fill(CGRect(x: 0, y: phone.height - 30, width: 30, height: 30))
+        guard let picture = draw.makeImage() else { return }
+        let side = 200
+        guard let sheet = CGContext(data: nil, width: side * 4, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return }
+        for turns in 0..<4 {
+            let view = ScreenSurface(frame: CGRect(x: 0, y: 0, width: side, height: side))
+            view.videoSize = phone
+            view.quarterTurns = turns
+            view.show(picture)
+            view.layout()
+            sheet.saveGState()
+            sheet.translateBy(x: CGFloat(turns * side), y: 0)
+            view.layer?.render(in: sheet)
+            sheet.restoreGState()
+        }
+        guard let image = sheet.makeImage(),
+              let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("20-screen-turns.png"))
     }
 
     private static func renderTools(to folder: String) {
@@ -90,27 +121,56 @@ enum Snapshots {
         if let first = tools.clipboard.entries.last { tools.clipboard.togglePin(first) }
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1700)
             .background(Theme.ink).preferredColorScheme(.dark), "12-advanced", folder)
+        tools.isNotchOn = true
+        write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 2300)
+            .background(Theme.ink).preferredColorScheme(.dark), "22-advanced-notch", folder)
+        tools.isNotchOn = false
         let notch = NotchModel(directory: directory)
         notch.isOpen = true
         notch.closedSize = CGSize(width: 179, height: 32)
-        notch.loadSnapshot(playing: NowPlaying(title: "Paper Birds", artist: "Sample Artist", isPlaying: true),
-                           focus: Date().addingTimeInterval(1080))
+        let start = Date()
+        var timer = Pomodoro()
+        timer.start(at: start)
+        _ = timer.advance(at: start.addingTimeInterval(1500))
+        _ = timer.advance(at: start.addingTimeInterval(1800))
+        let snapshotNow = start.addingTimeInterval(3300 - 1122)
+        notch.loadSnapshot(playing: NowPlaying(title: "Paper Birds", artist: "Sample Artist", isPlaying: false,
+                                               duration: 256, position: 193),
+                           pomodoro: timer, now: snapshotNow)
         let samplePeer = Peer(id: "demo", name: "Sample Phone", platform: "android", model: "", isPaired: true,
                               isConnected: true, info: DeviceInfo(batteryPercent: 76, isCharging: true), lastSeen: nil)
         let notchFrame = { (model: NotchModel) in
             // The magenta block shows where the real camera sits, to check nothing is under it.
-            NotchView(model: model, tools: tools, phoneProvider: { [samplePeer] }).frame(width: 600, height: 292)
+            NotchView(model: model, tools: tools, phoneProvider: { [samplePeer] },
+                      transfersProvider: { [Transfer(id: "t", peerId: "demo", name: "Holiday photos.zip",
+                                                     size: 100, transferred: 62, outgoing: true)] },
+                      sendFile: { _, _ in }, scrolls: false).frame(width: 640, height: 292)
                 .overlay(alignment: .top) { Rectangle().fill(Color(hex: 0xC2185B)).frame(width: 179, height: 32) }
                 .background(Color(hex: 0x3A4658)).preferredColorScheme(.dark)
         }
-        write(notchFrame(notch), "14-notch-home", folder)
-        notch.page = .clipboard
-        write(notchFrame(notch), "15-notch-clipboard", folder)
+        write(notchFrame(notch), "14-notch-music", folder)
         notch.page = .shelf
+        notch.shelfMode = .clipboard
+        write(notchFrame(notch), "15-notch-clipboard", folder)
+        notch.shelfMode = .files
         write(notchFrame(notch), "16-notch-shelf", folder)
+        notch.page = .focus
+        write(notchFrame(notch), "21-notch-pomodoro", folder)
+        notch.pomodoroSettings = PomodoroSettings(focusMinutes: 50, shortBreakMinutes: 10, longBreakMinutes: 30, sessions: 3)
+        notch.resetPomodoro()
+        write(notchFrame(notch), "23-notch-pomodoro-custom", folder)
+        notch.pomodoroSettings = PomodoroSettings()
+        notch.resetPomodoro()
+        notch.loadSnapshot(playing: nil, pomodoro: timer, now: snapshotNow)
+        notch.setShown(.music, false)
+        notch.setShown(.files, false)
+        write(notchFrame(notch), "24-notch-two-pages", folder)
+        notch.setShown(.music, true)
+        notch.setShown(.files, true)
+        notch.page = .focus
         notch.isOpen = false
         write(notchFrame(notch), "17-notch-focus", folder)
-        notch.loadSnapshot(playing: nil, focus: nil)
+        notch.loadSnapshot(playing: nil, pomodoro: Pomodoro(), now: Date())
         write(notchFrame(notch), "18-notch-closed", folder)
         let strip = WindowListState()
         let sampleWindow = AXUIElementCreateApplication(getpid())

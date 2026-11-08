@@ -65,7 +65,7 @@ menu bar when you log in. If you move the app afterward, turn it off and on agai
   holds a macOS power assertion and changes no settings.
 - **Clipboard History:** **Control + Command + V** shows what you copied, and Return pastes it.
   **Control + Command + O** copies the text in part of the screen, and both shortcuts can be changed. Items stay in
-  Application Support on this Mac, readable only by your account, up to 200 items and 30 images plus anything
+  Application Support on this Mac, readable only by your account, up to 200 items and 30 images by default, which you can change, plus anything
   pinned. Content marked private or temporary is always skipped. **Ignore passwords**, on by default, also skips
   copies from password apps and one-word text that mixes letters, numbers, and symbols. A plain word used as a
   password can still be saved, and some codes can be skipped by mistake.
@@ -81,9 +81,12 @@ menu bar when you log in. If you move the app afterward, turn it off and on agai
   **Option + Tab** switches between windows. It lists windows on the current Space and minimized windows. To catch
   this shortcut, the app checks which key each press is, without storing or sending it.
 - **Notch:** point at or click the top of the built-in screen, or a thin bar on the main screen with the lid closed,
-  for music controls, a 25-minute focus timer, Mac and phone batteries, a file shelf, and recent copies. Song titles
-  come from Music and Spotify only, while the buttons control whichever player is active. The shelf only remembers
-  where files are. On a screen with a camera, the panel's menu starts below it. On a screen with no camera, the
+  for music controls, a Pomodoro timer, Mac and phone batteries, a file shelf, and recent copies. Each page can be
+  hidden, and the Pomodoro focus length, breaks, and number of sessions can be changed. Song titles come from Music
+  and Spotify, and from YouTube in Firefox, Safari, Chrome, and other browsers: while the panel is open, it reads
+  browser window titles with Accessibility, so a video shows when its tab is the one in front, without its length or
+  channel. The buttons control whichever player is active. The shelf only remembers where files are, and files dropped
+  on **Send to phone** go to the connected phone. On a screen with a camera, the panel's menu starts below it. On a screen with no camera, the
   closed bar is hidden unless you turn off **Hide the bar on screens without a camera**. **Fit more icons beside the
   camera** brings menu bar icons closer together after you log out and back in, without changing the screen size.
 

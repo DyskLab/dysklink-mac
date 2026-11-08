@@ -17,11 +17,16 @@ struct ClipEntry: Codable, Identifiable, Equatable {
 final class ClipboardHistory {
     private(set) var entries: [ClipEntry] = []
     var ignoresPasswords: Bool {
-        didSet { UserDefaults.standard.set(ignoresPasswords, forKey: "clipboard.ignorePasswords") }
+        didSet { defaults.set(ignoresPasswords, forKey: "clipboard.ignorePasswords") }
     }
+    /// Pinned entries don't count toward either limit.
+    private(set) var maxEntries: Int
+    private(set) var maxImages: Int
 
-    static let maxEntries = 200
-    static let maxImages = 30
+    static let entryChoices = [50, 100, 200, 500, 1000]
+    static let imageChoices = [10, 30, 60, 100]
+    static let defaultEntries = 200
+    static let defaultImages = 30
     private static let maxTextBytes = 1_048_576
     private static let maxImageBytes = 20_000_000
     private static let skippedTypes: Set<String> = [
@@ -30,6 +35,7 @@ final class ClipboardHistory {
     ]
 
     @ObservationIgnored private let directory: URL
+    @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var lastChange = NSPasteboard.general.changeCount
     @ObservationIgnored private var pendingSave: DispatchWorkItem?
@@ -37,10 +43,30 @@ final class ClipboardHistory {
 
     private var storeFile: URL { directory.appendingPathComponent("clipboard-history.json") }
 
-    init(directory: URL) {
+    init(directory: URL, defaults: UserDefaults = .standard) {
         self.directory = directory
-        ignoresPasswords = UserDefaults.standard.object(forKey: "clipboard.ignorePasswords") as? Bool ?? true
+        self.defaults = defaults
+        ignoresPasswords = defaults.object(forKey: "clipboard.ignorePasswords") as? Bool ?? true
+        let entries = defaults.integer(forKey: "clipboard.maxEntries")
+        let images = defaults.integer(forKey: "clipboard.maxImages")
+        maxEntries = Self.entryChoices.contains(entries) ? entries : Self.defaultEntries
+        maxImages = Self.imageChoices.contains(images) ? images : Self.defaultImages
         load()
+    }
+
+    /// How many saved entries new limits would remove, so lowering them can be confirmed first.
+    func removedCount(maxEntries: Int, maxImages: Int) -> Int {
+        Self.trimmed(entries, maxEntries: maxEntries, maxImages: maxImages).removed.count
+    }
+
+    /// Removes the oldest unpinned entries that no longer fit.
+    func setLimits(maxEntries: Int, maxImages: Int) {
+        guard Self.entryChoices.contains(maxEntries), Self.imageChoices.contains(maxImages) else { return }
+        self.maxEntries = maxEntries
+        self.maxImages = maxImages
+        defaults.set(maxEntries, forKey: "clipboard.maxEntries")
+        defaults.set(maxImages, forKey: "clipboard.maxImages")
+        trimAndSave()
     }
 
     func start() {
@@ -178,25 +204,33 @@ final class ClipboardHistory {
     }
 
     private func trimAndSave() {
+        let result = Self.trimmed(entries, maxEntries: maxEntries, maxImages: maxImages)
+        result.removed.forEach(removeImage)
+        entries = result.kept
+        scheduleSave()
+    }
+
+    /// Entries are newest first, so the oldest unpinned ones are removed.
+    static func trimmed(_ entries: [ClipEntry], maxEntries: Int, maxImages: Int) -> (kept: [ClipEntry], removed: [ClipEntry]) {
         var images = 0
         var total = 0
         var kept: [ClipEntry] = []
+        var removed: [ClipEntry] = []
         for entry in entries {
             if entry.isPinned {
                 kept.append(entry)
                 continue
             }
             let isImage = entry.imageFile != nil
-            if total >= Self.maxEntries || (isImage && images >= Self.maxImages) {
-                removeImage(of: entry)
+            if total >= maxEntries || (isImage && images >= maxImages) {
+                removed.append(entry)
                 continue
             }
             total += 1
             if isImage { images += 1 }
             kept.append(entry)
         }
-        entries = kept
-        scheduleSave()
+        return (kept, removed)
     }
 
     private func removeImage(of entry: ClipEntry) {

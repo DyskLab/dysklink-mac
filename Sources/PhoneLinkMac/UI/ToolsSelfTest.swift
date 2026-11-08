@@ -69,7 +69,10 @@ enum ToolsSelfTest {
     private static func testHistory(_ folder: URL) {
         let board = NSPasteboard(name: NSPasteboard.Name("dysklink.selftest"))
         defer { board.releaseGlobally() }
-        let history = ClipboardHistory(directory: folder)
+        let suite = "id.phonelink.selftest.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = ClipboardHistory(directory: folder, defaults: defaults)
 
         board.clearContents()
         board.setString("halo dunia", forType: .string)
@@ -113,14 +116,30 @@ enum ToolsSelfTest {
         if let kedua = history.entries.first(where: { $0.text == "kedua" }) { history.togglePin(kedua) }
         check("pinned entries sort first", history.matches("").first?.text == "kedua")
 
-        for index in 0..<(ClipboardHistory.maxEntries + 20) { history.add(text: "isi \(index)") }
-        check("the limit holds", history.entries.filter { !$0.isPinned }.count == ClipboardHistory.maxEntries)
+        check("the default limit is 200 items and 30 images", history.maxEntries == 200 && history.maxImages == 30)
+        for index in 0..<(history.maxEntries + 20) { history.add(text: "isi \(index)") }
+        check("the limit holds", history.entries.filter { !$0.isPinned }.count == history.maxEntries)
         check("a pinned entry survives the limit", history.entries.contains { $0.text == "kedua" })
         check("trimmed images are deleted", file.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
 
         history.saveNow()
-        let reloaded = ClipboardHistory(directory: folder)
+        let reloaded = ClipboardHistory(directory: folder, defaults: defaults)
         check("history reloads from disk", reloaded.entries == history.entries)
+
+        let lower = history.removedCount(maxEntries: 50, maxImages: 30)
+        check("a lower limit counts what it removes", lower == 150)
+        let newest = history.entries.first { !$0.isPinned }
+        history.setLimits(maxEntries: 50, maxImages: 30)
+        check("a lower limit keeps the newest", history.entries.filter { !$0.isPinned }.count == 50
+            && history.entries.first { !$0.isPinned } == newest)
+        check("a lower limit keeps pinned items", history.entries.contains { $0.text == "kedua" })
+        check("a higher limit removes nothing", history.removedCount(maxEntries: 1000, maxImages: 100) == 0)
+        history.setLimits(maxEntries: 75, maxImages: 30)
+        check("a value outside the choices is refused", history.maxEntries == 50)
+        let restored = ClipboardHistory(directory: folder, defaults: defaults)
+        check("limits are remembered", restored.maxEntries == 50 && restored.maxImages == 30)
+        let pictures = (0..<3).map { ClipEntry(imageFile: "\($0).png") }
+        check("the image limit is separate", ClipboardHistory.trimmed(pictures, maxEntries: 50, maxImages: 2).removed.map(\.imageFile) == ["2.png"])
         let store = folder.appendingPathComponent("clipboard-history.json").path
         let mode = (try? FileManager.default.attributesOfItem(atPath: store))?[.posixPermissions] as? Int
         check("the history file is private to this user", mode == 0o600)
@@ -272,6 +291,23 @@ enum ToolsSelfTest {
         let rows: [(item: Int, id: CGWindowID, isMinimized: Bool)] = [(1, 10, true), (2, 20, false), (3, 30, false), (4, 40, false)]
         let sorted = WindowCatalog.sortWindows(rows, order: [30, 20]).map(\.item)
         check("windows sort front to back, minimized last", sorted == [3, 2, 4, 1])
+        let corner: (x: Float, y: Float) = (0.1, 0.2)
+        let unturned = ScreenSurface.phonePoint(corner, quarterTurns: 0)
+        check("an unturned picture maps straight through", unturned.x == 0.1 && unturned.y == 0.2)
+        // Turned clockwise, the phone's top left corner appears at the top right.
+        let turnedRight = ScreenSurface.phonePoint((1, 0), quarterTurns: 1)
+        check("a quarter turn maps the top right to the phone's top left", turnedRight.x == 0 && turnedRight.y == 0)
+        let upside = ScreenSurface.phonePoint((1, 1), quarterTurns: 2)
+        check("a half turn maps the bottom right to the phone's top left", upside.x == 0 && upside.y == 0)
+        let turnedLeft = ScreenSurface.phonePoint((0, 1), quarterTurns: 3)
+        check("three quarter turns map the bottom left to the phone's top left", turnedLeft.x == 0 && turnedLeft.y == 0)
+        var roundTrip = true
+        for turns in 0..<4 {
+            var point = corner
+            for _ in 0..<4 { point = ScreenSurface.phonePoint(point, quarterTurns: turns) }
+            roundTrip = roundTrip && abs(point.x - corner.x) < 0.0001 && abs(point.y - corner.y) < 0.0001
+        }
+        check("four of the same turn come back to the start", roundTrip)
         let tab: Int64 = 48, letter: Int64 = 0
         check("Option + Tab opens the switcher", SwitcherKeys.result(keyCode: tab, flags: .maskAlternate, isOpen: false)
             == .init(command: .forward, swallows: true))
@@ -327,9 +363,9 @@ enum ToolsSelfTest {
         model.hasNotch = true
         model.closedSize = CGSize(width: 179, height: 32)
         check("the menu starts below the camera", NotchModel.contentTop(hasNotch: true, notchHeight: 32) > 32)
-        check("a camera makes the panel taller by its height", model.openSize.height == 272)
+        check("a camera makes the panel taller by its height", model.openSize.height == 225)
         model.hasNotch = false
-        check("no camera needs no extra room", model.openSize.height == 236)
+        check("no camera needs no extra room", model.openSize.height == 189)
         let wasHiding = model.hidesBar
         model.closedSize = CGSize(width: 170, height: 6)
         model.hidesBar = true
@@ -340,15 +376,125 @@ enum ToolsSelfTest {
         model.hidesBar = true
         check("the option doesn't affect a camera screen", model.closedHeight(statusHeight: 24) == 6)
         model.hasNotch = false
-        model.startFocus(minutes: 25)
+        model.togglePomodoro()
         check("a running timer still shows with the bar hidden", model.closedHeight(statusHeight: 24) == 30)
-        model.stopFocus()
+        model.resetPomodoro()
         model.hidesBar = wasHiding
+        let savedSettings = model.pomodoroSettings
+        let savedSound = model.playsPomodoroSound
+        let savedHidden = model.hiddenSections
+        model.pomodoroSettings = PomodoroSettings()
         check("focus starts idle", !model.isFocusing && model.focusText == "25:00")
-        model.startFocus(minutes: 25)
+        model.togglePomodoro()
         check("focus counts down", model.isFocusing && (model.focusText == "25:00" || model.focusText == "24:59"))
-        model.stopFocus()
-        check("focus stops", !model.isFocusing)
+        model.togglePomodoro()
+        check("focus pauses", !model.isFocusing && model.pomodoro.isStarted)
+        model.resetPomodoro()
+        check("focus resets", !model.pomodoro.isStarted)
+
+        model.pomodoroSettings.focusMinutes = 50
+        check("new lengths apply to an idle timer", model.focusText == "50:00")
+        model.togglePomodoro()
+        model.pomodoroSettings.focusMinutes = 30
+        check("a started cycle keeps its lengths", model.pomodoro.settings.focusMinutes == 50)
+        model.resetPomodoro()
+        check("a reset uses the new lengths", model.focusText == "30:00")
+
+        NotchModel.Section.allCases.forEach { model.setShown($0, true) }
+        model.page = .music
+        model.setShown(.music, false)
+        check("hiding the open page moves to the next one", model.page == .focus && model.pages == [.focus, .shelf])
+        model.togglePomodoro()
+        model.setShown(.pomodoro, false)
+        check("hiding Pomodoro stops its timer", !model.isFocusing && model.page == .shelf)
+        model.shelfMode = .files
+        model.setShown(.files, false)
+        check("the shelf shows clipboard alone", model.shelfMode == .clipboard && !model.hasShelfSwitch && model.pages == [.shelf])
+        check("the last section can't be hidden", !model.canHide(.clipboard))
+        model.setShown(.clipboard, false)
+        check("the panel keeps one page", model.isShown(.clipboard) && model.pages == [.shelf])
+        NotchModel.Section.allCases.forEach { model.setShown($0, !savedHidden.contains($0)) }
+        NotchModel.Section.allCases.forEach { model.setShown($0, !savedHidden.contains($0)) }
+        model.pomodoroSettings = savedSettings
+        model.playsPomodoroSound = savedSound
+        check("the settings are put back", model.hiddenSections == savedHidden && model.pomodoroSettings == savedSettings)
+        testPomodoro()
+        testBrowserMedia()
+        let folderToSend = folder.appendingPathComponent("send-folder")
+        try? FileManager.default.createDirectory(at: folderToSend, withIntermediateDirectories: true)
+        let fileToSend = folder.appendingPathComponent("send.txt")
+        try? Data("hi".utf8).write(to: fileToSend)
+        check("only files are sent to the phone",
+              NotchView.sendable([fileToSend, folderToSend, folder.appendingPathComponent("gone.txt")]) == [fileToSend])
+    }
+
+    private static func testBrowserMedia() {
+        let firefox = BrowserMedia.video(fromWindowTitle: "Lofi Beats to Study - YouTube — Mozilla Firefox")
+        check("a Firefox YouTube window is read", firefox == .init(title: "Lofi Beats to Study", artist: nil, isMusic: false))
+        check("a Chrome or Safari title is read",
+              BrowserMedia.video(fromWindowTitle: "Paper Birds - YouTube")?.title == "Paper Birds"
+              && BrowserMedia.video(fromWindowTitle: "Paper Birds - YouTube - Google Chrome")?.title == "Paper Birds")
+        check("the notification count is dropped", BrowserMedia.video(fromWindowTitle: "(12) Rain - Live - YouTube")?.title == "Rain - Live")
+        check("YouTube Music gives the artist",
+              BrowserMedia.video(fromWindowTitle: "Paper Birds • Sample Artist - YouTube Music — Mozilla Firefox")
+              == .init(title: "Paper Birds", artist: "Sample Artist", isMusic: true))
+        check("the YouTube home page and other sites are skipped",
+              BrowserMedia.video(fromWindowTitle: "YouTube — Mozilla Firefox") == nil
+              && BrowserMedia.video(fromWindowTitle: "Why YouTube - YouTube fans love it - Blog") == nil
+              && BrowserMedia.video(fromWindowTitle: "Inbox - Mail") == nil)
+        let windows = [
+            BrowserMedia.Window(bundleID: "com.apple.Safari", appName: "Safari", title: "Old Video - YouTube"),
+            BrowserMedia.Window(bundleID: "org.mozilla.firefox", appName: "Firefox", title: "New Song - YouTube — Mozilla Firefox"),
+        ]
+        let playing = BrowserMedia.choose(windows, audible: ["org.mozilla.firefox"])
+        check("the browser making sound wins", playing?.title == "New Song" && playing?.isPlaying == true
+              && playing?.artist == "YouTube in Firefox")
+        check("a silent video shows as paused", BrowserMedia.choose(windows, audible: [])?.isPlaying == false)
+        check("Safari plays through WebKit", BrowserMedia.isAudible("com.apple.Safari", in: ["com.apple.WebKit.GPU"])
+              && BrowserMedia.isAudible("com.google.Chrome", in: ["com.google.Chrome.helper"])
+              && !BrowserMedia.isAudible("com.google.Chrome", in: ["com.google.ChromeX"]))
+    }
+
+    private static func testPomodoro() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        var timer = Pomodoro()
+        check("a cycle is four rounds and a long break, 2 h 10 min", timer.steps.count == 8
+            && timer.steps.last?.phase == .longBreak && timer.settings.cycleLength == 7800)
+        let short = PomodoroSettings(focusMinutes: 50, shortBreakMinutes: 10, longBreakMinutes: 30, sessions: 2)
+        check("a custom cycle has its own steps", short.steps.map(\.phase) == [.focus, .shortBreak, .focus, .longBreak]
+            && short.cycleLength == 8400)
+        check("odd stored lengths fall back to the defaults",
+              PomodoroSettings(focusMinutes: 7, shortBreakMinutes: 5, longBreakMinutes: 99, sessions: 40).checked == PomodoroSettings())
+        check("an idle timer shows a full round", !timer.isStarted && timer.remaining(at: start) == 1500
+            && timer.remainingInCycle(at: start) == 7800)
+        timer.start(at: start)
+        check("a running round counts down", timer.remaining(at: start.addingTimeInterval(60)) == 1440)
+        timer.pause(at: start.addingTimeInterval(60))
+        check("a paused round keeps its time", timer.remaining(at: start.addingTimeInterval(600)) == 1440
+            && timer.isStarted && !timer.isRunning)
+        timer.start(at: start.addingTimeInterval(600))
+        check("a round doesn't end early", timer.advance(at: start.addingTimeInterval(2039)) == nil)
+        check("the end of focus starts a short break", timer.advance(at: start.addingTimeInterval(2040)) == .focus
+            && timer.phase == .shortBreak && timer.remaining(at: start.addingTimeInterval(2040)) == 300)
+        check("the end of a break starts the next round", timer.advance(at: start.addingTimeInterval(2340)) == .shortBreak
+            && timer.phase == .focus && timer.session == 2 && timer.stepIndex == 2)
+        var finished = 0
+        for _ in 0..<timer.steps.count where timer.advance(at: start.addingTimeInterval(20_000)) != nil { finished += 1 }
+        check("a Mac that slept catches up and ends the cycle", finished == 6 && !timer.isStarted && !timer.isRunning)
+        check("a long time reads in hours", NotchView.duration(7800) == "2 h 10 min" && NotchView.duration(600) == "10 min")
+        let now = Date()
+        check("a fresh copy reads just now", NotchView.ago(now.addingTimeInterval(-30), now: now) == "Just now")
+        check("an older copy reads in minutes", NotchView.ago(now.addingTimeInterval(-150), now: now) == "2 min ago")
+        let paused = NowPlaying(title: "A", artist: "B", isPlaying: false, duration: 200, position: 10, positionDate: now)
+        let started = NowPlaying(title: "A", artist: "B", isPlaying: true, duration: 200, position: 10, positionDate: now)
+        let stopped = started.toggled(at: now.addingTimeInterval(5))
+        check("a click pauses the song where it is", !stopped.isPlaying && stopped.elapsed(at: now.addingTimeInterval(60)) == 15)
+        check("a second click plays it on", stopped.toggled(at: now.addingTimeInterval(60)).isPlaying)
+        check("a paused song stays put", paused.elapsed(at: now.addingTimeInterval(30)) == 10)
+        let playing = NowPlaying(title: "A", artist: "B", isPlaying: true, duration: 200, position: 10, positionDate: now)
+        check("a playing song moves on", playing.elapsed(at: now.addingTimeInterval(5)) == 15)
+        check("a song never passes its end", playing.elapsed(at: now.addingTimeInterval(500)) == 200)
+        check("Music sends no position", NowPlaying(title: "A", artist: "B", isPlaying: true, duration: 200).elapsed(at: now) == nil)
     }
 
     private static func testBrightnessCurve() {

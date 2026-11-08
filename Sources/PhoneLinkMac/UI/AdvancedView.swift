@@ -232,7 +232,15 @@ struct AdvancedView: View {
                     Button("Remove them") { confirmRemovePasswords() }.buttonStyle(SecondaryButtonStyle(tint: Theme.coral))
                 }
             }
-            Text("Text and images you copy are saved on this Mac, up to \(ClipboardHistory.maxEntries) items, and text recognition runs on this Mac. Content that apps mark as private is always skipped. Reading text from the screen needs Screen Recording, and pasting needs Accessibility.")
+            HStack(spacing: 6) {
+                Text("Keep up to")
+                limitPicker(ClipboardHistory.entryChoices, tools.clipboard.maxEntries) { setClipboardLimits(entries: $0) }
+                Text("items and")
+                limitPicker(ClipboardHistory.imageChoices, tools.clipboard.maxImages) { setClipboardLimits(images: $0) }
+                Text("images. Pinned items don't count.")
+            }
+            .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+            Text("Text and images you copy are saved on this Mac, and text recognition runs on this Mac. Content that apps mark as private is always skipped. Reading text from the screen needs Screen Recording, and pasting needs Accessibility.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
@@ -243,6 +251,30 @@ struct AdvancedView: View {
                     .disabled(tools.clipboard.unpinnedCount == 0)
             }
         }
+    }
+
+    private func limitPicker(_ choices: [Int], _ value: Int, set: @escaping (Int) -> Void) -> some View {
+        Picker("", selection: Binding(get: { value }, set: set)) {
+            ForEach(choices, id: \.self) { Text("\($0)").tag($0) }
+        }
+        .labelsHidden().pickerStyle(.menu).fixedSize()
+    }
+
+    /// Lowering a limit removes the oldest unpinned items, so that is confirmed first.
+    private func setClipboardLimits(entries: Int? = nil, images: Int? = nil) {
+        let history = tools.clipboard
+        let newEntries = entries ?? history.maxEntries
+        let newImages = images ?? history.maxImages
+        let removed = history.removedCount(maxEntries: newEntries, maxImages: newImages)
+        if removed > 0 {
+            let alert = NSAlert()
+            alert.messageText = "Remove the \(removed) oldest clipboard items?"
+            alert.informativeText = "They don't fit the new limit. Pinned items stay. This can't be undone."
+            alert.addButton(withTitle: "Remove")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        history.setLimits(maxEntries: newEntries, maxImages: newImages)
     }
 
     private func confirmRemovePasswords() {
@@ -336,6 +368,9 @@ struct AdvancedView: View {
             }
             .frame(width: 330)
             .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+            notchSections
+            browserMusic
+            pomodoroSettings
             let _ = tools.notch.model.modeRevision
             Toggle("Hide the bar on screens without a camera", isOn: Bindable(tools.notch.model).hidesBar)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
@@ -350,10 +385,88 @@ struct AdvancedView: View {
             Text("Brings menu bar icons closer together so the camera hides fewer of them, without changing the screen size. It applies after you log out and back in, and turning it off puts the normal spacing back the same way.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("It uses the built-in screen, or a thin bar at the top of the main screen when the lid is closed. The song title comes from Music and Spotify, and the buttons control whichever player is active. Shelf files aren't copied or moved.")
+            Text("It uses the built-in screen, or a thin bar at the top of the main screen when the lid is closed. The song title comes from Music, Spotify, or YouTube in a browser, and the buttons control whichever player is active. Shelf files aren't copied or moved.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var notchSections: some View {
+        let notch = tools.notch.model
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Show in the notch").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            HStack(spacing: 16) {
+                ForEach(NotchModel.Section.allCases) { section in
+                    Toggle(section.label, isOn: Binding(
+                        get: { notch.isShown(section) },
+                        set: { notch.setShown(section, $0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .disabled(notch.isShown(section) && !notch.canHide(section))
+                }
+            }
+            .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+            Text("Hidden pages leave the arrows and dots. At least one stays on.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.top, 2)
+    }
+
+    @ViewBuilder private var browserMusic: some View {
+        let notch = tools.notch.model
+        if notch.isShown(.music) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Show YouTube from your browser", isOn: Bindable(notch).readsBrowsers)
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+                Text("Reads the window titles of Firefox, Safari, Chrome, and other browsers while the notch is open, and shows a YouTube video when its tab is the one in front. Whether it plays comes from which app is making sound. Song length and channel aren't shown. Nothing leaves this Mac.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if notch.readsBrowsers, !Shared.model.isInputTrusted {
+                    accessibilityRow("Reading browser windows needs Accessibility.")
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    @ViewBuilder private var pomodoroSettings: some View {
+        let notch = tools.notch.model
+        if notch.isShown(.pomodoro) {
+            let settings = Bindable(notch).pomodoroSettings
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Pomodoro").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                HStack(spacing: 6) {
+                    Text("Focus for")
+                    minutesPicker(PomodoroSettings.focusChoices, settings.focusMinutes)
+                    Text("with breaks of")
+                    minutesPicker(PomodoroSettings.shortBreakChoices, settings.shortBreakMinutes)
+                }
+                HStack(spacing: 6) {
+                    Text("After")
+                    Picker("", selection: settings.sessions) {
+                        ForEach(PomodoroSettings.sessionChoices, id: \.self) { Text("\($0)").tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.menu).fixedSize()
+                    Text("sessions, take a long break of")
+                    minutesPicker(PomodoroSettings.longBreakChoices, settings.longBreakMinutes)
+                }
+                Toggle("Play a sound when a round or break ends", isOn: Bindable(notch).playsPomodoroSound)
+                    .tint(Theme.mint)
+                Text(notch.pomodoro.isStarted && notch.pomodoro.settings != notch.pomodoroSettings
+                     ? "The timer that's running keeps its lengths until you reset it."
+                     : "One cycle takes \(NotchView.duration(notch.pomodoroSettings.cycleLength)).")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+            }
+            .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+            .padding(.top, 2)
+        }
+    }
+
+    private func minutesPicker(_ choices: [Int], _ value: Binding<Int>) -> some View {
+        Picker("", selection: value) {
+            ForEach(choices, id: \.self) { Text("\($0) min").tag($0) }
+        }
+        .labelsHidden().pickerStyle(.menu).fixedSize()
     }
 
     private func accessibilityRow(_ text: String) -> some View {
