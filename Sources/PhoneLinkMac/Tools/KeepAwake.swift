@@ -19,6 +19,12 @@ enum AwakeDecision: Equatable {
         }
         return onlyOnPower && power.isOnBattery ? .pause : .hold
     }
+
+    /// True when the battery is already under the limit, so starting would end at once.
+    static func isBelow(_ power: PowerStatus, limit: Int) -> Bool {
+        guard limit > 0, power.isOnBattery, let percent = power.percent else { return false }
+        return percent < limit
+    }
 }
 
 /// Holds a macOS power assertion, so nothing in the system's own settings changes
@@ -55,7 +61,11 @@ final class KeepAwake {
         didSet { defaults.set(onlyOnPower, forKey: "keepAwake.onlyOnPower"); evaluate() }
     }
     var stopBelow: Int {
-        didSet { defaults.set(stopBelow, forKey: "keepAwake.stopBelow"); evaluate() }
+        didSet {
+            defaults.set(stopBelow, forKey: "keepAwake.stopBelow")
+            if isActive { checkBatteryLimit() }
+            evaluate()
+        }
     }
     private(set) var isActive = false
     private(set) var isPaused = false
@@ -67,6 +77,8 @@ final class KeepAwake {
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var assertion: IOPMAssertionID = 0
+    /// The battery was already under the limit when the session began, so the limit is skipped.
+    @ObservationIgnored private var skipsBatteryLimit = false
 
     init() {
         let stored = UserDefaults.standard
@@ -117,6 +129,7 @@ final class KeepAwake {
     func start() {
         isActive = true
         note = nil
+        checkBatteryLimit()
         let length = sessionMinutes
         endsAt = length > 0 ? Date().addingTimeInterval(TimeInterval(length * 60)) : nil
         if timer == nil {
@@ -127,6 +140,13 @@ final class KeepAwake {
             self.timer = timer
         }
         evaluate()
+    }
+
+    private func checkBatteryLimit() {
+        skipsBatteryLimit = AwakeDecision.isBelow(PowerStatus.current(), limit: stopBelow)
+        note = skipsBatteryLimit
+            ? "The battery is already below \(stopBelow)%, so this time it won't end because of the battery."
+            : nil
     }
 
     func stop(note: String? = nil) {
@@ -144,8 +164,8 @@ final class KeepAwake {
         now = Date()
         idleSecondsNow = Self.idleSeconds
         let decision = AwakeDecision.decide(
-            now: now, endsAt: endsAt, power: PowerStatus.current(), onlyOnPower: onlyOnPower, stopBelow: stopBelow,
-            idleSeconds: idleSecondsNow, idleLimitMinutes: idleLimitMinutes
+            now: now, endsAt: endsAt, power: PowerStatus.current(), onlyOnPower: onlyOnPower,
+            stopBelow: skipsBatteryLimit ? 0 : stopBelow, idleSeconds: idleSecondsNow, idleLimitMinutes: idleLimitMinutes
         )
         switch decision {
         case .hold:
