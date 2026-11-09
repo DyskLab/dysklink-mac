@@ -55,6 +55,8 @@ final class AppModel {
 
     /// Called when a pairing needs the user, even if the window is closed.
     @ObservationIgnored var onNeedsAttention: (() -> Void)?
+    /// Called each time a paired phone reports its status.
+    @ObservationIgnored var onPeerInfo: ((_ peerId: String, _ name: String, _ info: DeviceInfo) -> Void)?
 
     var hasPairedDevices: Bool { !records.isEmpty }
 
@@ -299,6 +301,7 @@ final class AppModel {
             print("INFO \(hello(of: session)) battery=\(info.batteryPercent.map(String.init) ?? "-") os=\(info.osVersion ?? "-")")
             #endif
             rebuildPeers()
+            onPeerInfo?(id, peers.first { $0.id == id }?.name ?? "Phone", info)
         case MessageType.ping:
             session.send(Envelope(type: MessageType.pong))
         case MessageType.clipboard:

@@ -31,6 +31,19 @@ struct MenuBarView: View {
                     }
                 }
             }
+            if let release = Shared.updates.available {
+                Divider().overlay(Theme.stroke)
+                Button { Shared.updates.download() } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.mint)
+                        Text("Download DyskLink \(release.version)").foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12.5, weight: .medium))
+            }
             if Shared.tools.isDisplaysOn {
                 Divider().overlay(Theme.stroke)
                 DisplaySliders(control: Shared.tools.displays)

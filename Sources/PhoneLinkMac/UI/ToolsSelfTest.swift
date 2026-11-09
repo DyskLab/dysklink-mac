@@ -19,6 +19,7 @@ enum ToolsSelfTest {
         testDecisions()
         testAssertion()
         testMonitor()
+        testPrayerAndWeather()
         testRecognition()
         testHotKeys()
         testDisplayMessages()
@@ -163,6 +164,15 @@ enum ToolsSelfTest {
         check("pauses on battery when asked", decide(nil, battery, true, 0) == .pause)
         check("keeps going before the idle limit", AwakeDecision.decide(now: now, endsAt: nil, power: mains, onlyOnPower: false, stopBelow: 0, idleSeconds: 599, idleLimitMinutes: 10) == .hold)
         check("stops at the idle limit", AwakeDecision.decide(now: now, endsAt: nil, power: mains, onlyOnPower: false, stopBelow: 0, idleSeconds: 600, idleLimitMinutes: 10) == .stop("Stopped after 10 minutes with no activity."))
+        check("newer patch", UpdateChecker.isNewer("v0.1.3", than: "0.1.2"))
+        check("same version isn't newer", !UpdateChecker.isNewer("0.1.2", than: "0.1.2"))
+        check("older isn't newer", !UpdateChecker.isNewer("0.1.10", than: "0.1.11"))
+        check("numbers compare as numbers", UpdateChecker.isNewer("0.1.10", than: "0.1.9"))
+        check("missing parts count as zero", !UpdateChecker.isNewer("0.2", than: "0.2.0") && UpdateChecker.isNewer("0.2.1", than: "0.2"))
+        check("odd tags are ignored", !UpdateChecker.isNewer("nightly", than: "0.1.0"))
+        let releases = Data(#"[{"tag_name":"v0.1.2","html_url":"https://example.com/2","draft":false},{"tag_name":"v0.2.0","html_url":"https://example.com/9","draft":true},{"tag_name":"v0.1.10","html_url":"https://example.com/10","draft":false},{"tag_name":"v0.1.3","html_url":"https://example.com/3","prerelease":true}]"#.utf8)
+        check("picks the highest published release", (try? UpdateChecker.newest(in: releases, newerThan: "0.1.2"))??.version == "0.1.10")
+        check("nothing newer gives nothing", (try? UpdateChecker.newest(in: releases, newerThan: "0.1.10")) == .some(nil))
         check("battery under the limit is noticed", AwakeDecision.isBelow(battery, limit: 20))
         check("battery above the limit is fine", !AwakeDecision.isBelow(battery, limit: 10))
         check("plugged in is never below", !AwakeDecision.isBelow(mains, limit: 20))
@@ -407,13 +417,15 @@ enum ToolsSelfTest {
         NotchModel.Section.allCases.forEach { model.setShown($0, true) }
         model.page = .music
         model.setShown(.music, false)
-        check("hiding the open page moves to the next one", model.page == .focus && model.pages == [.focus, .shelf])
+        check("hiding the open page moves to the next one", model.page == .focus && model.pages == [.focus, .shelf, .todo, .water])
         model.togglePomodoro()
         model.setShown(.pomodoro, false)
         check("hiding Pomodoro stops its timer", !model.isFocusing && model.page == .shelf)
         model.shelfMode = .files
         model.setShown(.files, false)
-        check("the shelf shows clipboard alone", model.shelfMode == .clipboard && !model.hasShelfSwitch && model.pages == [.shelf])
+        check("the shelf shows clipboard alone", model.shelfMode == .clipboard && !model.hasShelfSwitch && model.pages == [.shelf, .todo, .water])
+        model.setShown(.todo, false)
+        model.setShown(.water, false)
         check("the last section can't be hidden", !model.canHide(.clipboard))
         model.setShown(.clipboard, false)
         check("the panel keeps one page", model.isShown(.clipboard) && model.pages == [.shelf])
@@ -556,6 +568,149 @@ enum ToolsSelfTest {
         let registered = HotKeys.register(id: 99, keyCode: 111) {}
         check("a global shortcut registers", registered)
         HotKeys.remove(id: 99)
+    }
+}
+#endif
+
+#if DEBUG
+@MainActor
+extension ToolsSelfTest {
+    fileprivate static func moment(_ text: String) -> Date { ISO8601DateFormatter().date(from: text)! }
+
+    static func testPrayerAndWeather() {
+        let jakarta = PrayerLocation(province: "DKI Jakarta", city: "Kota Jakarta")
+        let json = Data(#"""
+        {"code":200,"data":{"provinsi":"DKI Jakarta","kabkota":"Kota Jakarta","bulan":11,"tahun":2026,"jadwal":[
+         {"tanggal":9,"tanggal_lengkap":"2026-11-09","imsak":"03:58","subuh":"04:08","terbit":"05:23","dhuha":"05:51","dzuhur":"11:40","ashar":"14:56","maghrib":"17:50","isya":"19:01"},
+         {"tanggal":10,"tanggal_lengkap":"2026-11-10","imsak":"03:58","subuh":"04:07","terbit":"05:23","dhuha":"05:51","dzuhur":"11:40","ashar":"14:56","maghrib":"17:50","isya":"19:02"}]}}
+        """#.utf8)
+        guard let month = try? PrayerAPI.month(from: json, location: jakarta) else { return check("prayer month parses", false) }
+        check("prayer month parses", month.days.count == 2 && month.month == 11 && month.days[0].isya == "19:01")
+        let schedule = PrayerSchedule(location: jakarta, months: [month])
+        let midday = schedule.upcoming(after: moment("2026-11-09T10:00:00+07:00"))
+        check("next prayer before noon is Dzuhur", midday?.prayer == .dzuhur && midday?.time == moment("2026-11-09T11:40:00+07:00"))
+        check("its progress starts at Subuh", midday?.previous == moment("2026-11-09T04:08:00+07:00"))
+        let evening = schedule.upcoming(after: moment("2026-11-09T20:00:00+07:00"))
+        check("after Isya the next is tomorrow's Subuh", evening?.prayer == .subuh && evening?.time == moment("2026-11-10T04:07:00+07:00"))
+        check("and it starts from today's Isya", evening?.previous == moment("2026-11-09T19:01:00+07:00"))
+        let dawn = schedule.upcoming(after: moment("2026-11-09T03:00:00+07:00"))
+        check("before Subuh the next is today's Subuh", dawn?.prayer == .subuh && dawn?.previous == nil)
+        check("a day that isn't loaded gives nothing", schedule.upcoming(after: moment("2026-11-20T10:00:00+07:00")) == nil)
+        check("the last day needs tomorrow loaded", schedule.upcoming(after: moment("2026-11-10T20:00:00+07:00")) == nil)
+        check("the schedule ignores other cities", PrayerSchedule(location: PrayerLocation(province: "Bali", city: "Kota Denpasar"), months: [month]).days.isEmpty)
+        check("time zones follow the province",
+              PrayerLocation(province: "Bali", city: "x").timeZone.identifier == "Asia/Makassar"
+              && PrayerLocation(province: "Papua", city: "x").timeZone.identifier == "Asia/Jayapura"
+              && jakarta.timeZone.identifier == "Asia/Jakarta")
+        check("city labels drop Kota and Kab.", jakarta.label == "Jakarta" && PrayerLocation(province: "x", city: "Kab. Bogor").label == "Bogor")
+        check("provinces parse", (try? PrayerAPI.provinces(from: Data(#"{"code":200,"data":["Aceh","Bali"]}"#.utf8))) == ["Aceh", "Bali"])
+
+        let forecast = Data(#"""
+        {"current":{"time":"2026-11-09T13:30","temperature_2m":31.6,"weather_code":51,"is_day":1},
+         "daily":{"time":["2026-11-09","2026-11-10"],"weather_code":[53,81],"temperature_2m_max":[32.4,31.0],
+                  "temperature_2m_min":[21.4,20.3],"precipitation_probability_max":[92,null]}}
+        """#.utf8)
+        let report = try? WeatherAPI.report(from: forecast)
+        check("forecast parses", report?.temperature == 31.6 && report?.isDay == true && report?.days.count == 2)
+        check("a missing rain chance counts as zero", report?.days.last?.rainChance == 0 && report?.days.first?.rainChance == 92)
+        let places = try? WeatherAPI.places(from: Data(#"{"results":[{"name":"Kota Bandung","admin1":"Jawa Barat","latitude":-6.92,"longitude":107.6}]}"#.utf8))
+        check("places parse", places?.first?.label == "Kota Bandung, Jawa Barat" && places?.first?.shortName == "Bandung")
+        check("no results is an empty list", (try? WeatherAPI.places(from: Data(#"{"generationtime_ms":0.5}"#.utf8))) == [])
+        check("weather codes have words and symbols", WeatherAPI.describe(95) == "Thunderstorm" && WeatherAPI.symbol(0, isDay: false) == "moon.stars.fill")
+        let weather = WeatherModel(isInert: true)
+        let saved = weather.usesFahrenheit
+        weather.usesFahrenheit = false
+        let celsius = weather.degrees(31.6)
+        weather.usesFahrenheit = true
+        let fahrenheit = weather.degrees(31.6)
+        weather.usesFahrenheit = saved
+        testTodo()
+        testWater()
+        var alerts = PhoneBatteryAlerts()
+        func battery(_ percent: Int?, _ charging: Bool?) -> PhoneBatteryAlerts.Alert? {
+            alerts.update(peer: "hp", percent: percent, isCharging: charging, limit: 20)
+        }
+        check("a healthy phone gives no warning", battery(80, false) == nil)
+        check("falling to the limit warns once", battery(20, false) == .low(20) && battery(19, false) == nil && battery(15, false) == nil)
+        check("a small recovery doesn't repeat it", battery(24, false) == nil && battery(18, false) == nil)
+        check("charging clears the low warning", battery(30, true) == nil && battery(19, false) == .low(19))
+        check("recovering well above the limit clears it", battery(26, false) == nil && battery(20, false) == .low(20))
+        check("full while charging warns once", battery(100, true) == .full && battery(100, true) == nil)
+        check("unplugging and charging to full warns again", battery(100, false) == nil && battery(100, true) == .full)
+        check("unknown battery or charging gives nothing", battery(nil, false) == nil && battery(10, nil) == nil)
+        check("temperatures convert", celsius == "32°" && fahrenheit == "89°")
+    }
+
+    static func testTodo() {
+        let noon = moment("2026-11-09T12:00:00+07:00")
+        let tomorrow = moment("2026-11-10T09:00:00+07:00")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 7 * 3600)!
+        var list = TodoList()
+        check("a task is added", list.add("  Write the report  ", at: noon) && list.items.first?.title == "Write the report")
+        check("empty text is refused", !list.add("   ", at: noon) && list.items.count == 1)
+        check("only the first line is kept", list.add("Call Dina\nsecond line", at: noon) && list.items.last?.title == "Call Dina")
+        check("long titles are cut", { var l = TodoList(); l.add(String(repeating: "a", count: 200), at: noon); return l.items[0].title.count == TodoList.maxTitle }())
+        check("the list has a limit", { var l = TodoList(); for i in 0..<60 { l.add("task \(i)", at: noon) }; return l.items.count == TodoList.maxItems }())
+        let first = list.items[0].id
+        list.toggle(first, at: noon)
+        check("finishing counts for today", list.doneToday(now: noon, calendar: calendar) == 1 && list.totalToday(now: noon, calendar: calendar) == 2)
+        check("open tasks come before finished ones", list.visible(now: noon, calendar: calendar).map(\.title) == ["Call Dina", "Write the report"])
+        list.toggle(first, at: noon)
+        check("toggling again reopens it", list.doneToday(now: noon, calendar: calendar) == 0 && !list.items[0].isDone)
+        list.toggle(first, at: noon)
+        list.dropOld(now: tomorrow, calendar: calendar)
+        check("tasks finished yesterday are dropped, open ones stay", list.items.map(\.title) == ["Call Dina"])
+        check("yesterday's finished tasks don't count", list.doneToday(now: tomorrow, calendar: calendar) == 0 && list.totalToday(now: tomorrow, calendar: calendar) == 1)
+        list.delete(list.items[0].id)
+        check("a task is removed", list.items.isEmpty)
+        var cleared = TodoList()
+        cleared.add("a", at: noon); cleared.add("b", at: noon)
+        cleared.toggle(cleared.items[0].id, at: noon)
+        cleared.clearDone()
+        check("finished tasks can be cleared", cleared.items.map(\.title) == ["b"])
+    }
+
+    static func testWater() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 7 * 3600)!
+        let nine = moment("2026-11-09T09:10:00+07:00")
+        let noon = moment("2026-11-09T12:00:00+07:00")
+        let nextDay = moment("2026-11-10T10:00:00+07:00")
+        var log = WaterLog()
+        log.add(250, at: nine)
+        log.add(250, at: moment("2026-11-09T09:50:00+07:00"))
+        log.add(300, at: noon)
+        log.add(0, at: noon)
+        check("drinks add up for today", log.total(on: noon, calendar: calendar) == 800 && log.entries.count == 3)
+        check("drinks are grouped by hour", log.byHour(on: noon, calendar: calendar) == [9: 500, 12: 300])
+        check("another day starts from zero", log.total(on: nextDay, calendar: calendar) == 0)
+        log.undo(now: noon, calendar: calendar)
+        check("undo takes back the last drink", log.total(on: noon, calendar: calendar) == 500)
+        log.undo(now: nextDay, calendar: calendar)
+        check("undo on an empty day changes nothing", log.entries.count == 2)
+        log.dropOld(now: moment("2026-11-20T10:00:00+07:00"), calendar: calendar)
+        check("old days are dropped", log.entries.isEmpty)
+
+        var settings = WaterSettings(goalMl: 2000, glassMl: 250, remindEveryMinutes: 60, reminds: true, fromHour: 8, toHour: 21)
+        func due(_ now: String, drink: String?, reminder: String? = nil, total: Int = 0) -> Bool {
+            WaterLog.isReminderDue(now: moment(now), lastDrink: drink.map(moment), lastReminder: reminder.map(moment),
+                                   total: total, settings: settings, calendar: calendar)
+        }
+        check("nothing is due with reminders off", { var off = settings; off.reminds = false
+            return !WaterLog.isReminderDue(now: noon, lastDrink: nil, lastReminder: nil, total: 0, settings: off, calendar: calendar) }())
+        check("a reminder is due an hour after the last drink", due("2026-11-09T12:00:00+07:00", drink: "2026-11-09T10:59:00+07:00"))
+        check("not yet before the interval", !due("2026-11-09T12:00:00+07:00", drink: "2026-11-09T11:30:00+07:00"))
+        check("a recent reminder waits the interval", !due("2026-11-09T12:00:00+07:00", drink: "2026-11-09T09:00:00+07:00", reminder: "2026-11-09T11:30:00+07:00"))
+        check("the first reminder waits an hour after the start", !due("2026-11-09T08:30:00+07:00", drink: nil) && due("2026-11-09T09:00:00+07:00", drink: nil))
+        check("no reminders at night", !due("2026-11-09T22:30:00+07:00", drink: "2026-11-09T12:00:00+07:00"))
+        check("no reminders before the start hour", !due("2026-11-09T07:30:00+07:00", drink: nil))
+        check("no reminders once the goal is reached", !due("2026-11-09T15:00:00+07:00", drink: "2026-11-09T10:00:00+07:00", total: 2000))
+        settings.fromHour = 20; settings.toHour = 10
+        check("odd hours fall back to the defaults", settings.checked.fromHour == 8 && settings.checked.toHour == 21)
+        settings = WaterSettings(goalMl: 1234, glassMl: 250, remindEveryMinutes: 7)
+        check("values outside the lists fall back", settings.checked.goalMl == 2000 && settings.checked.remindEveryMinutes == 60 && settings.checked.glassMl == 250)
+        check("litres are shown short", WaterModel.litres(1500) == "1.5" && WaterModel.litres(2000) == "2" && WaterModel.litres(250) == "0.25")
     }
 }
 #endif

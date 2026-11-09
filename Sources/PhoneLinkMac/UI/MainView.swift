@@ -53,6 +53,9 @@ struct MainView: View {
                 }
             }
             Spacer(minLength: 0)
+            if let release = Shared.updates.available {
+                UpdateBanner(release: release, updates: Shared.updates)
+            }
             advancedButton
         }
         .padding(.horizontal, 18).padding(.top, 38).padding(.bottom, 18)
@@ -368,5 +371,29 @@ struct PairingOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(Theme.stroke))
             .shadow(color: .black.opacity(0.5), radius: 40, y: 18)
         }
+    }
+}
+
+/// Shown above Advanced when a newer version is out.
+struct UpdateBanner: View {
+    let release: UpdateChecker.Release
+    let updates: UpdateChecker
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.mint)
+                Text("DyskLink \(release.version) is available")
+                    .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            }
+            HStack(spacing: 8) {
+                Button("Download") { updates.download() }.buttonStyle(PrimaryButtonStyle())
+                Button("Skip") { updates.skip() }.buttonStyle(SecondaryButtonStyle())
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.mint.opacity(0.08), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Theme.mint.opacity(0.3)))
     }
 }

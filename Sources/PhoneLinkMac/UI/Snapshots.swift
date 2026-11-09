@@ -121,7 +121,21 @@ enum Snapshots {
         if let first = tools.clipboard.entries.last { tools.clipboard.togglePin(first) }
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1700)
             .background(Theme.ink).preferredColorScheme(.dark), "12-advanced", folder)
+        let release = UpdateChecker.Release(version: "0.1.4", url: UpdateChecker.pageURL)
+        UpdateChecker.versionOverride = "0.1.3"
+        Shared.updates.showForSnapshot(release)
+        write(VStack(alignment: .leading, spacing: 14) {
+            UpdateBanner(release: release, updates: Shared.updates).frame(width: 236).padding(18)
+            AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1700, alignment: .top).clipped()
+        }.frame(width: 708, height: 520, alignment: .top).background(Theme.ink).preferredColorScheme(.dark),
+              "25-updates", folder)
+        write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1500)
+            .background(Theme.ink).preferredColorScheme(.dark), "29-advanced-top", folder)
         tools.isNotchOn = true
+        AdvancedLayout.shared.persists = false
+        write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 2300)
+            .background(Theme.ink).preferredColorScheme(.dark), "30-advanced-notch-collapsed", folder)
+        AdvancedLayout.shared.setOpen(["pages", "music", "pomodoro", "prayer", "weather", "battery", "screen"])
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 2300)
             .background(Theme.ink).preferredColorScheme(.dark), "22-advanced-notch", folder)
         tools.isNotchOn = false
@@ -172,6 +186,50 @@ enum Snapshots {
         write(notchFrame(notch), "17-notch-focus", folder)
         notch.loadSnapshot(playing: nil, pomodoro: Pomodoro(), now: Date())
         write(notchFrame(notch), "18-notch-closed", folder)
+        notch.showPeek("Sample Phone · 18% low")
+        write(notchFrame(notch), "28-notch-phone-low", folder)
+        // Prayer times and weather use their own model, so nothing is saved or fetched.
+        let places = NotchModel(directory: directory, isInert: true)
+        places.isOpen = true
+        places.closedSize = CGSize(width: 179, height: 32)
+        let jakarta = PrayerLocation(province: "DKI Jakarta", city: "Kota Jakarta")
+        var zoned = Calendar(identifier: .gregorian)
+        zoned.timeZone = jakarta.timeZone
+        let days = (-1...1).compactMap { offset in
+            zoned.date(byAdding: .day, value: offset, to: Date()).map {
+                PrayerDay(date: PrayerSchedule.key($0, in: zoned), subuh: "04:09", dzuhur: "11:52", ashar: "15:12",
+                          maghrib: "17:48", isya: "19:01")
+            }
+        }
+        places.prayer.loadForSnapshot(location: jakarta, months: [PrayerMonth(location: jakarta, year: 2026, month: 11, days: days)])
+        let bandung = WeatherPlace(name: "Kota Bandung", region: "Jawa Barat", latitude: -6.92, longitude: 107.6)
+        places.weather.loadForSnapshot(place: bandung, report: WeatherReport(
+            temperature: 31.6, code: 2, isDay: true,
+            days: [.init(date: "2026-11-09", code: 53, high: 32.4, low: 21.4, rainChance: 92),
+                   .init(date: "2026-11-10", code: 81, high: 31, low: 20.3, rainChance: 96),
+                   .init(date: "2026-11-11", code: 95, high: 30.3, low: 20.2, rainChance: 100)],
+            fetchedAt: Date()))
+        places.todos.loadForSnapshot([("Revise the report", true), ("Reply to Dina", true), ("Post weekly update", false),
+                                      ("Book the meeting room", false)], now: Date())
+        places.page = .todo
+        write(notchFrame(places), "31-notch-todo", folder)
+        places.todos.isEditing = true
+        write(notchFrame(places), "32-notch-todo-edit", folder)
+        places.todos.isEditing = false
+        let drinkTimes = [(9, 300), (10, 200), (11, 200), (12, 150), (13, 150), (14, 200), (15, 200)]
+        places.water.settings.reminds = true
+        places.water.loadForSnapshot(drinkTimes.compactMap { hour, ml in
+            zoned.date(bySettingHour: hour, minute: 10, second: 0, of: Date()).map { WaterEntry(date: $0, ml: ml) }
+        })
+        places.page = .water
+        write(notchFrame(places), "33-notch-water", folder)
+        places.water.showsSettings = true
+        write(notchFrame(places), "34-notch-water-settings", folder)
+        places.water.showsSettings = false
+        places.page = .prayer
+        write(notchFrame(places), "26-notch-prayer", folder)
+        places.page = .weather
+        write(notchFrame(places), "27-notch-weather", folder)
         let strip = WindowListState()
         let sampleWindow = AXUIElementCreateApplication(getpid())
         strip.appName = "Sample App"

@@ -34,6 +34,11 @@ You need macOS 15 or later on Apple Silicon.
 This download uses a self-signed certificate, not one from Apple. To run on Intel,
 [build it from source](#build-and-run).
 
+**Updates:** once a day, DyskLink reads the public list of releases on GitHub. When a newer version is out, it
+sends one notification and shows **Download** in the sidebar and the menu bar, which opens the release page. It sends
+nothing about your Mac and never downloads or installs anything by itself. You can turn this off or check now under
+**Advanced > Check for updates**.
+
 | Pairing | Clipboard History |
 | --- | --- |
 | ![Pairing with a code](docs/screenshots/01-pairing.png) | ![Clipboard History](docs/screenshots/03-clipboard-history.png) |
@@ -81,12 +86,19 @@ menu bar when you log in. If you move the app afterward, turn it off and on agai
   **Option + Tab** switches between windows. It lists windows on the current Space and minimized windows. To catch
   this shortcut, the app checks which key each press is, without storing or sending it.
 - **Notch:** point at or click the top of the built-in screen, or a thin bar on the main screen with the lid closed,
-  for music controls, a Pomodoro timer, Mac and phone batteries, a file shelf, and recent copies. Each page can be
-  hidden, and the Pomodoro focus length, breaks, and number of sessions can be changed. Song titles come from Music
+  for music controls, a Pomodoro timer, a todo list, a water reminder, prayer times, weather, Mac and phone batteries, a file shelf, and recent
+  copies. Each page can be hidden, and the Pomodoro focus length, breaks, and number of sessions can be changed. Song titles come from Music
   and Spotify, and from YouTube in Firefox, Safari, Chrome, and other browsers: while the panel is open, it reads
   browser window titles with Accessibility, so a video shows when its tab is the one in front, without its length or
   channel. The buttons control whichever player is active. The shelf only remembers where files are, and files dropped
-  on **Send to phone** go to the connected phone. On a screen with a camera, the panel's menu starts below it. On a screen with no camera, the
+  on **Send to phone** go to the connected phone. The water reminder counts what you drink with a **Drink** button, shows today's total and a chart by hour, and can
+  remind you during the hours you choose until the goal is reached. The last 7 days stay on this Mac. The todo list keeps up to 50 tasks on this Mac, adds them from a small box that opens from the notch or from
+  **Advanced > Notch**, and drops tasks finished on an earlier day. Prayer times and weather appear once you choose a city under
+  **Advanced > Notch**. Prayer times come from equran.id, for cities in Indonesia, and a month is saved on this Mac so
+  they keep working offline. Prayer notifications are off until you turn them on and only run while the Notch is on.
+  A short warning also shows in the notch when the connected phone falls to 10 to 30% (20% by default) and when it
+  reaches 100% while charging. It can also send a notification, which is off by default.
+  Weather comes from Open-Meteo, which receives the city you search for and its coordinates, and nothing else. On a screen with a camera, the panel's menu starts below it. On a screen with no camera, the
   closed bar is hidden unless you turn off **Hide the bar on screens without a camera**. **Fit more icons beside the
   camera** brings menu bar icons closer together after you log out and back in, without changing the screen size.
 
@@ -153,6 +165,7 @@ Debug builds support:
 - `PhoneLinkMac --render-icon <file.png>`: renders the 1024x1024 app icon source.
 - `PhoneLinkMac --video-selftest`: tests the video decoder.
 - `PhoneLinkMac --tools-selftest`: tests the Advanced tools.
+- `PhoneLinkMac --update-check <version>`: asks GitHub for a newer release than that version and prints it.
 - `PHONELINK_DATA_DIR=<folder>`: uses a separate data folder.
 - `PHONELINK_TEST_AUTO_ACCEPT=1`: accepts pairing automatically, for testing only.
 - `PHONELINK_PORT`, `PHONELINK_DOWNLOAD_DIR`, `PHONELINK_TEST_DRY_RUN=1`, `PHONELINK_TEST_SEND_FILE`, and

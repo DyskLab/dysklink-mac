@@ -5,6 +5,7 @@ import SwiftUI
 enum Shared {
     static let model = AppModel()
     static let tools = ToolsModel()
+    static let updates = UpdateChecker()
 }
 
 /// AppKit manages the main window so the app stays alive in the menu bar when it closes,
@@ -69,9 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             let model = Shared.model
             model.onNeedsAttention = { MainWindow.show() }
+            model.onPeerInfo = { id, name, info in
+                Shared.tools.notch.model.phoneInfo(peer: id, name: name, info: info)
+            }
             model.start()
             Shared.tools.monitor.isOnScreen = { MainWindow.isVisible && Shared.model.showsTools }
             Shared.tools.start()
+            Shared.updates.start()
             if model.hasPairedDevices {
                 NSApp.setActivationPolicy(.accessory)
             } else {
@@ -115,6 +120,11 @@ struct PhoneLinkApp: App {
         if CommandLine.arguments.contains("--hardware-probe") {
             print(DisplayControl.probe())
             print(MainActor.assumeIsolated { MouseTuner.probe() })
+            exit(0)
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--update-check"),
+           CommandLine.arguments.count > index + 1 {
+            print(UpdateChecker.liveCheck(as: CommandLine.arguments[index + 1]))
             exit(0)
         }
         if CommandLine.arguments.contains("--tools-selftest") {

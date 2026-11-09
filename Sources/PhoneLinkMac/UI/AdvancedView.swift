@@ -18,7 +18,10 @@ struct AdvancedView: View {
                         .font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
                 }
                 .padding(.bottom, 4)
+                sectionLabel("GENERAL")
                 loginCard
+                updatesCard
+                sectionLabel("TOOLS")
                 ToolCard(icon: "gauge.with.dots.needle.33percent", title: "System Monitor",
                          detail: "CPU, memory, disk, network, battery, and the busiest apps.",
                          isOn: $tools.isMonitorOn) { monitorContent }
@@ -38,12 +41,18 @@ struct AdvancedView: View {
                          detail: "See an app's windows when you point at its Dock icon, and switch windows with Option + Tab.",
                          isOn: $tools.isPreviewsOn) { previewsContent }
                 ToolCard(icon: "rectangle.topthird.inset.filled", title: "Notch",
-                         detail: "Point at the top of the screen for music, a focus timer, batteries, a file shelf, and recent copies.",
+                         detail: "Point at the top of the screen for music, a focus timer, prayer times, weather, batteries, a file shelf, and recent copies.",
                          isOn: $tools.isNotchOn) { notchContent }
+                sectionLabel("ABOUT")
                 supportCard
             }
             .padding(.horizontal, 28).padding(.top, 38).padding(.bottom, 28)
         }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text).font(.system(size: 10.5, weight: .bold)).tracking(1.2).foregroundStyle(Theme.textFaint)
+            .padding(.top, 8)
     }
 
     private var loginCard: some View {
@@ -79,6 +88,44 @@ struct AdvancedView: View {
                 if let problem = model.loginProblem {
                     Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var updatesCard: some View {
+        let updates = Shared.updates
+        return Card {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.mint)
+                        .frame(width: 34, height: 34)
+                        .background(Theme.mint.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Check for updates").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        Text("Once a day, reads the list of releases on GitHub and tells you when a new version is out. Nothing is downloaded until you choose Download.")
+                            .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Bindable(updates).checksAutomatically)
+                        .labelsHidden().toggleStyle(.switch).tint(Theme.mint)
+                }
+                HStack(spacing: 10) {
+                    Text("This is version \(UpdateChecker.currentVersion ?? "unknown").")
+                        .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    if let release = updates.available {
+                        Text("\(release.version) is available.").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    } else if let status = updates.status {
+                        Text(status).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer()
+                    if updates.available != nil {
+                        Button("Download") { updates.download() }.buttonStyle(PrimaryButtonStyle())
+                    }
+                    Button(updates.isChecking ? "Checking…" : "Check now") { updates.check(manual: true) }
+                        .buttonStyle(SecondaryButtonStyle()).disabled(updates.isChecking)
                 }
             }
         }
@@ -361,33 +408,78 @@ struct AdvancedView: View {
     // MARK: Notch
 
     private var notchContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Open the notch by", selection: Bindable(tools.notch.model).opensOnClick) {
-                Text("Pointing at it").tag(false)
-                Text("Clicking it").tag(true)
+        let notch = tools.notch.model
+        let _ = notch.modeRevision
+        return VStack(alignment: .leading, spacing: 12) {
+            group("pages", "Pages") {
+                Picker("Open the notch by", selection: Bindable(notch).opensOnClick) {
+                    Text("Pointing at it").tag(false)
+                    Text("Clicking it").tag(true)
+                }
+                .frame(width: 330)
+                .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+                notchSections
             }
-            .frame(width: 330)
-            .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
-            notchSections
-            browserMusic
-            pomodoroSettings
-            let _ = tools.notch.model.modeRevision
-            Toggle("Hide the bar on screens without a camera", isOn: Bindable(tools.notch.model).hidesBar)
+            if notch.isShown(.music) {
+                group("music", "Music") { browserMusic }
+            }
+            if notch.isShown(.pomodoro) {
+                group("pomodoro", "Pomodoro", summary: "\(notch.pomodoroSettings.focusMinutes) min focus") { pomodoroSettings }
+            }
+            if notch.isShown(.todo) {
+                group("todo", "Todo list", summary: "\(notch.todos.list.items.filter { !$0.isDone }.count) open") { todoSettings }
+            }
+            if notch.isShown(.water) {
+                group("water", "Water reminder", summary: "\(WaterModel.litres(notch.water.settings.goalMl)) L a day") { waterSettings }
+            }
+            group("prayer", "Prayer times", summary: notch.prayer.location?.label ?? "Not set") { prayerSettings }
+            group("weather", "Weather", summary: notch.weather.place?.shortName ?? "Not set") { weatherSettings }
+            group("battery", "Phone battery", summary: notch.phoneBattery.isOn ? "At \(notch.phoneBattery.limit)%" : "Off") {
+                phoneBatterySettings
+            }
+            group("screen", "Screen and bar") {
+                Toggle("Hide the bar on screens without a camera", isOn: Bindable(notch).hidesBar)
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+                Text("Nothing shows at the top of the screen until you point at its center, or click there if you chose clicking.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Fit more icons beside the camera", isOn: Binding(
+                    get: { MenuBarSpacing.isTight },
+                    set: { MenuBarSpacing.isTight = $0; notch.modeChanged() }
+                ))
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
-            Text("Nothing shows at the top of the screen until you point at its center, or click there if you chose clicking.")
-                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Toggle("Fit more icons beside the camera", isOn: Binding(
-                get: { MenuBarSpacing.isTight },
-                set: { MenuBarSpacing.isTight = $0; tools.notch.model.modeChanged() }
-            ))
-            .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
-            Text("Brings menu bar icons closer together so the camera hides fewer of them, without changing the screen size. It applies after you log out and back in, and turning it off puts the normal spacing back the same way.")
-                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("It uses the built-in screen, or a thin bar at the top of the main screen when the lid is closed. The song title comes from Music, Spotify, or YouTube in a browser, and the buttons control whichever player is active. Shelf files aren't copied or moved.")
-                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text("Brings menu bar icons closer together so the camera hides fewer of them, without changing the screen size. It applies after you log out and back in, and turning it off puts the normal spacing back the same way.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("It uses the built-in screen, or a thin bar at the top of the main screen when the lid is closed. The song title comes from Music, Spotify, or YouTube in a browser, and the buttons control whichever player is active. Shelf files aren't copied or moved.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// A part of a card that opens and closes, so a long list of settings stays short until it's needed.
+    private func group<Content: View>(_ id: String, _ title: String, summary: String? = nil,
+                                      @ViewBuilder _ content: () -> Content) -> some View {
+        let layout = AdvancedLayout.shared
+        let isOpen = layout.isOpen(id)
+        return VStack(alignment: .leading, spacing: 10) {
+            Divider().overlay(Theme.stroke)
+            Button { layout.toggle(id) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
+                        .rotationEffect(.degrees(isOpen ? 90 : 0)).frame(width: 12)
+                        .foregroundStyle(Theme.textSecondary)
+                    Text(title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    if let summary {
+                        Text(summary).font(.system(size: 12)).foregroundStyle(Theme.textFaint).lineLimit(1)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if isOpen { content() }
         }
     }
 
@@ -395,19 +487,24 @@ struct AdvancedView: View {
         let notch = tools.notch.model
         return VStack(alignment: .leading, spacing: 6) {
             Text("Show in the notch").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-            HStack(spacing: 16) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)], alignment: .leading, spacing: 8) {
                 ForEach(NotchModel.Section.allCases) { section in
                     Toggle(section.label, isOn: Binding(
-                        get: { notch.isShown(section) },
+                        get: { notch.isEnabled(section) && notch.hasData(section) },
                         set: { notch.setShown(section, $0) }
                     ))
                     .toggleStyle(.checkbox)
-                    .disabled(notch.isShown(section) && !notch.canHide(section))
+                    .disabled(!notch.hasData(section) || (notch.isShown(section) && !notch.canHide(section)))
                 }
             }
             .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
             Text("Hidden pages leave the arrows and dots. At least one stays on.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+            if !notch.hasData(.prayer) || !notch.hasData(.weather) {
+                Text("Prayer times and Weather can be turned on once you choose a city in their own sections below.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.top, 2)
     }
@@ -434,7 +531,6 @@ struct AdvancedView: View {
         if notch.isShown(.pomodoro) {
             let settings = Bindable(notch).pomodoroSettings
             VStack(alignment: .leading, spacing: 8) {
-                Text("Pomodoro").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
                 HStack(spacing: 6) {
                     Text("Focus for")
                     minutesPicker(PomodoroSettings.focusChoices, settings.focusMinutes)
@@ -460,6 +556,173 @@ struct AdvancedView: View {
             .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
             .padding(.top, 2)
         }
+    }
+
+    private var phoneBatterySettings: some View {
+        let watcher = tools.notch.model.phoneBattery
+        return VStack(alignment: .leading, spacing: 8) {
+            Toggle("Warn about the phone's battery", isOn: Bindable(watcher).isOn)
+                .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+            if watcher.isOn {
+                Picker("Warn when it falls to", selection: Bindable(watcher).limit) {
+                    ForEach(PhoneBatteryAlerts.limitChoices, id: \.self) { Text("\($0)%").tag($0) }
+                }
+                .frame(width: 330)
+                .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+                Toggle("Also send a notification", isOn: Bindable(watcher).sendsNotification)
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+            }
+            Text("The notch shows a short warning when a connected phone is low, and when it reaches 100% while charging. Each warning shows once. The phone reports its battery about every 30 seconds.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 2)
+    }
+
+    private var waterSettings: some View {
+        let water = tools.notch.model.water
+        let settings = Bindable(water).settings
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Goal")
+                Picker("", selection: settings.goalMl) {
+                    ForEach(WaterSettings.goalChoices, id: \.self) { Text("\(WaterModel.litres($0)) L").tag($0) }
+                }
+                .labelsHidden().pickerStyle(.menu).fixedSize()
+                Text("a day, one glass is")
+                Picker("", selection: settings.glassMl) {
+                    ForEach(WaterSettings.glassChoices, id: \.self) { Text("\($0) ml").tag($0) }
+                }
+                .labelsHidden().pickerStyle(.menu).fixedSize()
+            }
+            Toggle("Remind me to drink", isOn: settings.reminds).tint(Theme.mint)
+            if water.settings.reminds {
+                HStack(spacing: 6) {
+                    Text("Every")
+                    Picker("", selection: settings.remindEveryMinutes) {
+                        ForEach(WaterSettings.intervalChoices, id: \.self) { Text("\($0) min").tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.menu).fixedSize()
+                    Text("from")
+                    Picker("", selection: settings.fromHour) {
+                        ForEach(WaterSettings.hourChoices.dropLast(), id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.menu).fixedSize()
+                    Text("to")
+                    Picker("", selection: settings.toHour) {
+                        ForEach(WaterSettings.hourChoices.dropFirst(), id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.menu).fixedSize()
+                }
+                if water.settings.fromHour >= water.settings.toHour {
+                    Text("The end hour must come after the start hour, or no reminder is sent.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.amber)
+                }
+            }
+            Text("Press Drink in the notch each time you drink. A reminder comes when the time you chose has passed since your last drink or reminder, only during those hours, and stops once the goal is reached. Reminders only run while the Notch is on. The last 7 days are kept on this Mac.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+        .padding(.top, 2)
+    }
+
+    private var todoSettings: some View {
+        let todos = tools.notch.model.todos
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("New task", text: Bindable(todos).draft)
+                    .textFieldStyle(.roundedBorder).frame(width: 300)
+                    .onSubmit { todos.addDraft() }
+                Button("Add") { todos.addDraft() }.buttonStyle(SecondaryButtonStyle())
+                    .disabled(todos.draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if todos.list.items.contains(where: \.isDone) {
+                Button("Clear finished tasks") { todos.clearDone() }.buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+            }
+            Text("Add, check off, and remove tasks in the notch. Up to \(TodoList.maxItems) tasks are kept on this Mac, and tasks finished on an earlier day are removed.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 2)
+    }
+
+    private var prayerSettings: some View {
+        let prayer = tools.notch.model.prayer
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Picker("Province", selection: Bindable(prayer).draftProvince) {
+                    Text("Choose").tag(String?.none)
+                    ForEach(prayer.provinces, id: \.self) { Text($0).tag(Optional($0)) }
+                }
+                .frame(width: 270)
+                Picker("City", selection: Binding(
+                    get: { prayer.location?.province == prayer.draftProvince ? prayer.location?.city : nil },
+                    set: { city in
+                        if let city, let province = prayer.draftProvince {
+                            prayer.location = PrayerLocation(province: province, city: city)
+                        }
+                    }
+                )) {
+                    Text("Choose").tag(String?.none)
+                    ForEach(prayer.cities, id: \.self) { Text($0).tag(Optional($0)) }
+                }
+                .frame(width: 250)
+                .disabled(prayer.draftProvince == nil)
+            }
+            .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+            .onAppear { prayer.loadProvinces() }
+            if prayer.location != nil {
+                Toggle("Notify at prayer times", isOn: Bindable(prayer).notifies)
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+                if prayer.notifies {
+                    Toggle("10 minutes before instead of at the time", isOn: Bindable(prayer).notifiesEarly)
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+                }
+            }
+            if let problem = prayer.problem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+            }
+            Text("Times come from equran.id, for cities in Indonesia. A month is saved on this Mac, so they keep working offline. Notifications only run while the Notch is on.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 2)
+    }
+
+    private var weatherSettings: some View {
+        let weather = tools.notch.model.weather
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Search a city", text: Bindable(weather).query)
+                    .textFieldStyle(.roundedBorder).frame(width: 220)
+                    .onSubmit { weather.search(weather.query) }
+                Button("Search") { weather.search(weather.query) }.buttonStyle(SecondaryButtonStyle())
+                if let place = weather.place {
+                    Text(place.label).font(.system(size: 12)).foregroundStyle(Theme.mint).lineLimit(1)
+                }
+            }
+            ForEach(weather.results) { place in
+                Button { weather.choose(place) } label: {
+                    HStack {
+                        Text(place.label).foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).font(.system(size: 12.5))
+            }
+            if let note = weather.searchNote {
+                Text(note).font(.system(size: 12)).foregroundStyle(Theme.amber)
+            }
+            Toggle("Show temperatures in Fahrenheit", isOn: Bindable(weather).usesFahrenheit)
+                .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+            Text("Weather comes from Open-Meteo. The city you search for and its coordinates are sent to Open-Meteo, with nothing else about you or your Mac. It updates at most every 30 minutes, only while the panel is open.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 2)
     }
 
     private func minutesPicker(_ choices: [Int], _ value: Binding<Int>) -> some View {
@@ -701,4 +964,27 @@ struct DisplaySliders: View {
                 .foregroundStyle(Theme.textSecondary).frame(width: 36, alignment: .trailing)
         }
     }
+}
+
+/// Which parts of a card are open, kept between launches.
+@MainActor
+@Observable
+final class AdvancedLayout {
+    static let shared = AdvancedLayout()
+    private(set) var open: Set<String>
+    /// Snapshots change what is open without saving it.
+    var persists = true
+
+    private init() {
+        open = Set(UserDefaults.standard.stringArray(forKey: "advanced.open") ?? ["pages"])
+    }
+
+    func isOpen(_ id: String) -> Bool { open.contains(id) }
+
+    func toggle(_ id: String) {
+        if open.contains(id) { open.remove(id) } else { open.insert(id) }
+        if persists { UserDefaults.standard.set(open.sorted(), forKey: "advanced.open") }
+    }
+
+    func setOpen(_ ids: Set<String>) { open = ids }
 }

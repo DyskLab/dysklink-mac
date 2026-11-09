@@ -87,14 +87,14 @@ struct NowPlaying: Equatable {
 @Observable
 final class NotchModel {
     enum Page: String, CaseIterable {
-        case music = "", focus = "Pomodoro", shelf = "Shelf"
+        case music = "", focus = "Pomodoro", shelf = "Shelf", prayer = "Prayer", weather = "Weather", todo = "Todo", water = "Water"
     }
 
     enum ShelfMode { case files, clipboard }
 
     /// What can be hidden in Advanced. Files and Clipboard share the Shelf page.
     enum Section: String, CaseIterable, Identifiable {
-        case music, pomodoro, files, clipboard
+        case music, pomodoro, files, clipboard, prayer, weather, todo, water
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -102,6 +102,10 @@ final class NotchModel {
             case .pomodoro: return "Pomodoro"
             case .files: return "Shelf files"
             case .clipboard: return "Clipboard"
+            case .prayer: return "Prayer times"
+            case .weather: return "Weather"
+            case .todo: return "Todo list"
+            case .water: return "Water reminder"
             }
         }
     }
@@ -116,7 +120,11 @@ final class NotchModel {
     }
 
     var isOpen = false {
-        didSet { if isOpen != oldValue { updateBrowserReading() } }
+        didSet {
+            guard isOpen != oldValue else { return }
+            updateBrowserReading()
+            if isOpen, isShown(.weather) { weather.refresh() }
+        }
     }
     var page = Page.music
     var shelfMode = ShelfMode.files
@@ -163,6 +171,11 @@ final class NotchModel {
     private(set) var shelf: [ShelfItem] = []
     private(set) var pomodoro: Pomodoro
     private(set) var now = Date()
+    let prayer: PrayerModel
+    let weather: WeatherModel
+    let phoneBattery: PhoneBatteryWatcher
+    let todos: TodoModel
+    let water: WaterModel
 
     @ObservationIgnored private let shelfFile: URL
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
@@ -174,7 +187,12 @@ final class NotchModel {
     /// After a click, the new state stays a moment, because a browser can keep sending sound briefly after a pause.
     @ObservationIgnored private var heldState: (title: String, isPlaying: Bool, until: Date)?
 
-    init(directory: URL) {
+    init(directory: URL, isInert: Bool = false) {
+        prayer = PrayerModel(directory: directory, isInert: isInert)
+        weather = WeatherModel(isInert: isInert)
+        phoneBattery = PhoneBatteryWatcher(isInert: isInert)
+        todos = TodoModel(directory: directory, persists: !isInert)
+        water = WaterModel(directory: directory, persists: !isInert)
         shelfFile = directory.appendingPathComponent("notch-shelf.json")
         opensOnClick = UserDefaults.standard.bool(forKey: "notch.opensOnClick")
         hidesBar = UserDefaults.standard.object(forKey: "notch.hidesBar") as? Bool ?? true
@@ -187,6 +205,8 @@ final class NotchModel {
         playsPomodoroSound = UserDefaults.standard.object(forKey: "notch.pomodoroSound") as? Bool ?? true
         readsBrowsers = UserDefaults.standard.object(forKey: "notch.readsBrowsers") as? Bool ?? true
         settle()
+        phoneBattery.onAlert = { [weak self] text in self?.showPeek(text) }
+        water.onRemind = { [weak self] text in self?.showPeek(text) }
         shelf = ShelfStore.load(from: shelfFile)
         power = PowerStatus.current()
     }
@@ -201,6 +221,8 @@ final class NotchModel {
             })
         }
         power = PowerStatus.current()
+        prayer.start()
+        water.start()
         let source = IOPSNotificationCreateRunLoopSource({ _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { Shared.tools.notch.model.powerChanged() } }
         }, nil)?.takeRetainedValue()
@@ -215,6 +237,8 @@ final class NotchModel {
         observers = []
         if let powerSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes) }
         powerSource = nil
+        prayer.stop()
+        water.stop()
         resetPomodoro()
         isOpen = false
         appTrack = nil
@@ -301,6 +325,12 @@ final class NotchModel {
         power = next
     }
 
+    /// Only while the Notch is on, so nothing is warned about with the tool off.
+    func phoneInfo(peer: String, name: String, info: DeviceInfo) {
+        guard !observers.isEmpty else { return }
+        phoneBattery.handle(peer: peer, name: name, percent: info.batteryPercent, isCharging: info.isCharging)
+    }
+
     func showPeek(_ text: String) {
         peekWork?.cancel()
         peek = text
@@ -324,11 +354,23 @@ final class NotchModel {
         ShelfStore.save(shelf, to: shelfFile)
     }
 
-    func isShown(_ section: Section) -> Bool { !hiddenSections.contains(section) }
+    /// Prayer times and weather have no page until a city is chosen.
+    func hasData(_ section: Section) -> Bool {
+        switch section {
+        case .prayer: return prayer.location != nil
+        case .weather: return weather.place != nil
+        default: return true
+        }
+    }
+
+    /// Not hidden by the user, whether or not it has data to show yet.
+    func isEnabled(_ section: Section) -> Bool { !hiddenSections.contains(section) }
+
+    func isShown(_ section: Section) -> Bool { !hiddenSections.contains(section) && hasData(section) }
 
     /// The last shown section can't be hidden, so the panel always has a page.
     func canHide(_ section: Section) -> Bool {
-        isShown(section) && hiddenSections.count < Section.allCases.count - 1
+        isShown(section) && Section.allCases.filter(isShown).count > 1
     }
 
     func setShown(_ section: Section, _ shown: Bool) {
@@ -345,6 +387,10 @@ final class NotchModel {
             case .music: return isShown(.music)
             case .focus: return isShown(.pomodoro)
             case .shelf: return isShown(.files) || isShown(.clipboard)
+            case .prayer: return isShown(.prayer)
+            case .weather: return isShown(.weather)
+            case .todo: return isShown(.todo)
+            case .water: return isShown(.water)
             }
         }
     }
