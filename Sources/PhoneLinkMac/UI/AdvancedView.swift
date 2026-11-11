@@ -195,6 +195,19 @@ struct AdvancedView: View {
         }
     }
 
+    /// Connected phones whose DyskLink is older than the newest Android release.
+    private var phonesBehind: [Peer] {
+        Shared.model.peers.filter { $0.isConnected && !$0.isComputer && Shared.updates.isPhoneBehind(Shared.model.phoneAppVersion($0.id)) }
+    }
+
+    private func phoneUpdateText(_ peer: Peer) -> String {
+        let latest = Shared.updates.latestPhone?.version
+        guard let version = Shared.model.phoneAppVersion(peer.id) else {
+            return "\(peer.name) has a DyskLink older than 0.2.0. Update it on the phone."
+        }
+        return "\(peer.name) has DyskLink \(version)" + (latest.map { ", and \($0) is out for the phone." } ?? ".")
+    }
+
     private var updatesCard: some View {
         let updates = Shared.updates
         return Card {
@@ -231,9 +244,21 @@ struct AdvancedView: View {
                         } else {
                             Button("Download") { updates.download() }.buttonStyle(PrimaryButtonStyle())
                         }
+                        Button("Skip") { updates.skip() }.buttonStyle(SecondaryButtonStyle())
                     }
                     Button(updates.isChecking ? "Checking…" : "Check now") { updates.check(manual: true) }
                         .buttonStyle(SecondaryButtonStyle()).disabled(updates.isChecking)
+                }
+                ForEach(phonesBehind) { peer in
+                    Divider().overlay(Theme.stroke)
+                    HStack(spacing: 10) {
+                        Image(systemName: "iphone.gen3").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.amber)
+                            .frame(width: 18)
+                        Text(phoneUpdateText(peer)).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Get it") { updates.openPhoneRelease() }.buttonStyle(SecondaryButtonStyle())
+                    }
                 }
             }
         }

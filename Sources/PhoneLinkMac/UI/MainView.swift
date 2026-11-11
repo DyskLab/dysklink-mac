@@ -61,9 +61,6 @@ struct MainView: View {
                 }
             }
             Spacer(minLength: 0)
-            if let release = Shared.updates.available {
-                UpdateBanner(release: release, updates: Shared.updates)
-            }
             historyButton
             careButton
             advancedButton
@@ -107,6 +104,13 @@ struct MainView: View {
         .onTapGesture(perform: action)
     }
 
+    /// A new DyskLink for this Mac, or a connected phone that's behind. Both are shown in Advanced > General.
+    private var hasUpdate: Bool {
+        Shared.updates.available != nil || model.peers.contains {
+            $0.isConnected && !$0.isComputer && Shared.updates.isPhoneBehind(model.phoneAppVersion($0.id))
+        }
+    }
+
     private var advancedButton: some View {
         HStack(spacing: 11) {
             Image(systemName: "slider.horizontal.3")
@@ -116,6 +120,11 @@ struct MainView: View {
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             Text("Advanced").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
             Spacer(minLength: 0)
+            if hasUpdate {
+                Text("Update").font(.system(size: 10.5, weight: .bold)).foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Theme.mint, in: Capsule())
+            }
         }
         .padding(9)
         .background(model.showsTools ? Theme.panelRaised : Color.clear, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -126,6 +135,8 @@ struct MainView: View {
             model.showsHistory = false
             model.showsCare = false
             model.showsTools = true
+            // A waiting update opens the page that has it.
+            if hasUpdate { AdvancedLayout.shared.category = .general }
             if Shared.tools.isMonitorOn { Shared.tools.monitor.refresh() }
         }
     }
@@ -246,7 +257,6 @@ private struct PeerDetail: View {
 
     @ViewBuilder
     private var overview: some View {
-        if peer.isConnected, Shared.updates.isPhoneBehind(model.phoneAppVersion(peer.id)) { phoneUpdateCard }
         SectionLabel("At a glance")
         // Always the full width: one row of four, or two rows of two when the window is narrow.
         ViewThatFits(in: .horizontal) {
@@ -343,25 +353,6 @@ private struct PeerDetail: View {
     private var storageBar: (free: Int64, total: Int64)? {
         guard let free = peer.info?.storageFreeBytes, let total = peer.info?.storageTotalBytes else { return nil }
         return (free, total)
-    }
-
-    private var phoneUpdateCard: some View {
-        let version = model.phoneAppVersion(peer.id)
-        let latest = Shared.updates.latestPhone?.version
-        return Card {
-            HStack(spacing: 14) {
-                Image(systemName: "arrow.down.app.fill").font(.system(size: 22)).foregroundStyle(Theme.amber)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("The phone app is out of date").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                    Text(version.map { "\(peer.name) has DyskLink \($0)" + (latest.map { ", and \($0) is out." } ?? ".") }
-                         ?? "\(peer.name) has a DyskLink older than 0.2.0, so the Todo list, water, Pomodoro, and Find phone don't work there yet.")
-                        .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-                Button("Get it") { Shared.updates.openPhoneRelease() }.buttonStyle(SecondaryButtonStyle())
-            }
-        }
     }
 
     private var callMusicCard: some View {
@@ -547,29 +538,6 @@ struct PairingOverlay: View {
 }
 
 /// Shown above Advanced when a newer version is out.
-struct UpdateBanner: View {
-    let release: UpdateChecker.Release
-    let updates: UpdateChecker
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.mint)
-                Text("DyskLink \(release.version) is available")
-                    .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-            }
-            HStack(spacing: 8) {
-                Button("Download") { updates.download() }.buttonStyle(PrimaryButtonStyle())
-                Button("Skip") { updates.skip() }.buttonStyle(SecondaryButtonStyle())
-            }
-        }
-        .padding(11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.mint.opacity(0.08), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Theme.mint.opacity(0.3)))
-    }
-}
-
 /// A big button under the phone's name for the most used actions.
 private struct QuickTile: View {
     let icon: String

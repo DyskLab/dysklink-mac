@@ -151,11 +151,9 @@ enum Snapshots {
         let release = UpdateChecker.Release(version: "0.1.4", url: UpdateChecker.pageURL)
         UpdateChecker.versionOverride = "0.1.3"
         Shared.updates.showForSnapshot(release)
-        write(VStack(alignment: .leading, spacing: 14) {
-            UpdateBanner(release: release, updates: Shared.updates).frame(width: 236).padding(18)
-            AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1700, alignment: .top).clipped()
-        }.frame(width: 708, height: 520, alignment: .top).background(Theme.ink).preferredColorScheme(.dark),
-              "25-updates", folder)
+        // The General page down to the updates card, which is near the bottom.
+        write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1700, alignment: .top)
+            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "25-updates", folder)
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1500, alignment: .top)
             .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "29-advanced-top", folder)
         tools.isNotchOn = true
