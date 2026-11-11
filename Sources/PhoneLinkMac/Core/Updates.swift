@@ -16,7 +16,7 @@ final class UpdateChecker {
 
     static let releasesURL = URL(string: "https://api.github.com/repos/DyskLab/dysklink-mac/releases?per_page=10")!
     static let pageURL = URL(string: "https://github.com/DyskLab/dysklink-mac/releases")!
-    static let interval: TimeInterval = 24 * 60 * 60
+    nonisolated static let interval: TimeInterval = 24 * 60 * 60
     static let phoneReleasesURL = URL(string: "https://api.github.com/repos/DyskLab/dysklink-android/releases?per_page=10")!
     static let phonePageURL = URL(string: "https://github.com/DyskLab/dysklink-android/releases/latest")!
     static let latestPageURL = URL(string: "https://github.com/DyskLab/dysklink-mac/releases/latest")!
@@ -114,17 +114,32 @@ final class UpdateChecker {
         schedule()
     }
 
+    /// How long to wait before the next automatic check. A check that failed is tried again after an hour, then
+    /// two, four, … up to once a day; one that worked runs again a day after it. Never sooner than 15 s.
+    nonisolated static func nextDelay(lastSuccess: Date?, lastAttempt: Date?, failures: Int, now: Date) -> TimeInterval {
+        let due: Date
+        if failures > 0, let lastAttempt {
+            let wait = min(retryAfterFailure * pow(2, Double(min(failures - 1, 10))), interval)
+            due = lastAttempt.addingTimeInterval(wait)
+        } else {
+            due = (lastSuccess ?? .distantPast).addingTimeInterval(interval)
+        }
+        return max(15, due.timeIntervalSince(now))
+    }
+    nonisolated static let retryAfterFailure: TimeInterval = 60 * 60
+
     private func schedule() {
         timer?.invalidate()
         timer = nil
         guard checksAutomatically, Self.currentVersion != nil else { return }
-        let last = defaults.object(forKey: "updates.lastCheck") as? Date ?? .distantPast
-        // Waits a little after launch, then checks once a day.
-        let first = max(15, Self.interval - Date().timeIntervalSince(last))
+        // Waits a little after launch, then checks once a day; the next one is planned when a check finishes.
+        let first = Self.nextDelay(lastSuccess: defaults.object(forKey: "updates.lastCheck") as? Date,
+                                   lastAttempt: defaults.object(forKey: "updates.lastAttempt") as? Date,
+                                   failures: defaults.integer(forKey: "updates.failures"), now: Date())
         let timer = Timer(timeInterval: first, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.timer = nil
                 self?.check(manual: false)
-                self?.schedule()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -137,6 +152,7 @@ final class UpdateChecker {
             return
         }
         isChecking = true
+        defaults.set(Date(), forKey: "updates.lastAttempt")
         if manual { status = nil }
         var request = URLRequest(url: Self.releasesURL, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -190,12 +206,16 @@ final class UpdateChecker {
 
     private func finish(_ result: Result<Release?, Error>, manual: Bool) {
         isChecking = false
+        // The next automatic check is planned from when this one ended, whatever started it.
+        defer { schedule() }
         switch result {
         case .failure:
-            // A failed automatic check stays quiet and tries again tomorrow.
+            // A failed automatic check stays quiet and tries again later, less often each time.
+            defaults.set(defaults.integer(forKey: "updates.failures") + 1, forKey: "updates.failures")
             if manual { status = "Couldn't reach GitHub. Try again later." }
         case .success(let release):
             defaults.set(Date(), forKey: "updates.lastCheck")
+            defaults.set(0, forKey: "updates.failures")
             let skipped = defaults.string(forKey: "updates.skipped")
             if let release, manual || release.version != skipped {
                 available = release

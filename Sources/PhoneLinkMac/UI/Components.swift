@@ -236,3 +236,88 @@ extension View {
             .overlay(RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous).strokeBorder(Theme.stroke))
     }
 }
+
+/// One tab or filter in a row of pills: solid mint with dark text when selected, a raised pill otherwise.
+/// Advanced, device tabs, Mac care, and File history all use it so a selected tab looks the same everywhere.
+struct TabPill: View {
+    var icon: String?
+    let title: String
+    let isSelected: Bool
+    /// False on a narrow window, where only the icon shows (the selected pill keeps its title).
+    var showsTitle = true
+    var count: Int?
+    /// A count that wants attention, such as unread notifications, stays solid mint when not selected.
+    var highlightsCount = false
+    var help: String?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon { Image(systemName: icon).font(.system(size: 11, weight: .semibold)) }
+                if showsTitle || isSelected || icon == nil {
+                    Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                }
+                if let count, count > 0 || !highlightsCount {
+                    Text("\(count)").font(.system(size: 10.5, weight: .bold)).monospacedDigit()
+                        .foregroundStyle(countText)
+                        .padding(.horizontal, 5).frame(minWidth: 16, minHeight: 16)
+                        .background(countFill, in: Capsule())
+                }
+            }
+            .fixedSize()
+            .foregroundStyle(isSelected ? Theme.ink : Theme.textPrimary)
+            .padding(.horizontal, 11).frame(height: 30)
+            .background(isSelected ? Theme.mint : Theme.panelRaised, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help ?? title)
+    }
+
+    private var countFill: Color {
+        if isSelected { return Theme.ink.opacity(0.18) }
+        return highlightsCount ? Theme.mint : Theme.mint.opacity(0.18)
+    }
+
+    private var countText: Color {
+        if isSelected { return Theme.ink }
+        return highlightsCount ? Theme.ink : Theme.textPrimary
+    }
+}
+
+/// Numbers and dates in the reader's locale, so decimals and dates read the same everywhere in the app.
+enum LocalFormat {
+    /// A decimal with a fixed number of digits after the separator, such as "36,4" or "36.4".
+    static func decimal(_ value: Double, digits: Int = 1) -> String {
+        value.formatted(.number.precision(.fractionLength(digits)))
+    }
+
+    static func watts(_ value: Double, digits: Int = 2) -> String { "\(decimal(value, digits: digits)) W" }
+
+    static func celsius(_ value: Double) -> String { "\(decimal(value)) °C" }
+
+    /// An hour of today for a chart axis: "9 AM" or "09".
+    static func hour(_ hour: Int) -> String {
+        let date = Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: Date()) ?? Date()
+        return date.formatted(.dateTime.hour())
+    }
+
+    /// An hour of today for a picker: "9:00 AM" or "09:00".
+    static func clock(hour: Int) -> String {
+        let date = Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: Date()) ?? Date()
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private static let dayParser: DateFormatter = {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "yyyy-MM-dd"
+        return parser
+    }()
+
+    /// A saved "yyyy-MM-dd" day shown as a short date in the reader's locale.
+    static func day(_ text: String) -> String {
+        dayParser.date(from: text)?.formatted(date: .abbreviated, time: .omitted) ?? text
+    }
+}

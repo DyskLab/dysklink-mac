@@ -191,6 +191,31 @@ enum ToolsSelfTest {
             && guardian.admit("a", now: start.addingTimeInterval(75 + 121)) == .allowed)
         guardian.succeeded("a")
         check("the right code clears the count", guardian.waiting("a", now: start.addingTimeInterval(200)) == nil)
+        var crowd = PairingGuard()
+        check("new certificates can't each start a prompt at once", crowd.admit("n1", now: start) == .allowed
+              && crowd.admit("n2", now: start.addingTimeInterval(0.5)) == .deferred(1.5)
+              && crowd.admit("n3", now: start.addingTimeInterval(1.9)) != .allowed
+              && crowd.admit("n4", now: start.addingTimeInterval(2.1)) == .allowed)
+        crowd.succeeded("n4")
+        check("after a pairing that worked the next device may ask at once", crowd.admit("n5", now: start.addingTimeInterval(2.2)) == .allowed)
+        check("connections that aren't paired are capped per address",
+              InboundLimits.admits(address: "10.0.0.5", isLoopback: false, unpaired: ["10.0.0.5"])
+              && !InboundLimits.admits(address: "10.0.0.5", isLoopback: false, unpaired: ["10.0.0.5", "10.0.0.5"])
+              && InboundLimits.admits(address: "10.0.0.6", isLoopback: false, unpaired: ["10.0.0.5", "10.0.0.5"]))
+        let crowded = (0..<InboundLimits.maxUnpaired).map { "10.0.1.\($0)" }
+        check("connections that aren't paired are capped in all", !InboundLimits.admits(address: "10.0.2.1", isLoopback: false, unpaired: crowded)
+              && !InboundLimits.admits(address: "127.0.0.1", isLoopback: true, unpaired: crowded)
+              && InboundLimits.admits(address: "127.0.0.1", isLoopback: true, unpaired: ["127.0.0.1", "127.0.0.1"]))
+        check("a hello is due within 10 s", InboundLimits.helloTimeout == 10)
+        check("a gallery copy is only taken from a phone that was asked",
+              IncomingFileRule.destination(kind: "gallery", fromPhone: true, wanted: true) == .gallery
+              && IncomingFileRule.destination(kind: "gallery", fromPhone: true, wanted: false) == .downloads
+              && IncomingFileRule.destination(kind: "gallery", fromPhone: false, wanted: true) == .downloads)
+        check("photos and scans only come from phones", IncomingFileRule.destination(kind: "photo", fromPhone: true, wanted: false) == .photos
+              && IncomingFileRule.destination(kind: "photo", fromPhone: false, wanted: false) == .downloads
+              && IncomingFileRule.destination(kind: "scan", fromPhone: true, wanted: false) == .scan
+              && IncomingFileRule.destination(kind: "scan", fromPhone: false, wanted: false) == .downloads
+              && IncomingFileRule.destination(kind: nil, fromPhone: true, wanted: true).kind == nil)
         var everyone = PairingGuard()
         var globalLock = false
         for index in 0..<PairingGuard.globalLimit { globalLock = everyone.wrongCode("peer\(index)", now: start) }
@@ -365,7 +390,34 @@ enum ToolsSelfTest {
             && PowerSettings.parse(custom: custom.replacingOccurrences(of: "         0", with: "         1")) == .always
             && PowerSettings.parse(custom: "nothing") == nil)
         check("low power mode running now is read", PowerSettings.parseActive(" lowpowermode         1\n") && !PowerSettings.parseActive(" lowpowermode 0"))
-        let rule = ChargeHelper.installScript(helper: "/x", user: "me")
+        // A real PNG of 10001 × 10001 black-and-white pixels: tiny on disk, 100 MP decoded. Its size is read from
+        // the header, never decoded.
+        func crc32(_ bytes: [UInt8]) -> UInt32 {
+            var crc: UInt32 = 0xFFFF_FFFF
+            for byte in bytes {
+                crc ^= UInt32(byte)
+                for _ in 0..<8 { crc = crc & 1 == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1 }
+            }
+            return ~crc
+        }
+        func be(_ value: UInt32) -> [UInt8] { [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: value >> $0) } }
+        func chunk(_ type: String, _ body: [UInt8]) -> [UInt8] {
+            let typed = Array(type.utf8) + body
+            return be(UInt32(body.count)) + typed + be(crc32(typed))
+        }
+        let side: UInt32 = 10_001
+        let rawCount = Int(side) * (1 + (Int(side) + 7) / 8)
+        let deflated = (try? (Data(count: rawCount) as NSData).compressed(using: .zlib) as Data).map { [UInt8]($0) } ?? []
+        let zlibStream: [UInt8] = [0x78, 0x01] + deflated + be(UInt32(rawCount % 65_521) << 16 | 1)
+        let huge = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] + chunk("IHDR", be(side) + be(side) + [1, 0, 0, 0, 0])
+                        + chunk("IDAT", zlibStream) + chunk("IEND", []))
+        let small = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 10, pixelsHigh: 20, bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?
+            .representation(using: .png, properties: [:])
+        check("a clipboard picture's size is read from its header", ClipboardWatcher.pixelCount(huge) == 100_020_001
+              && small.flatMap(ClipboardWatcher.pixelCount) == 200 && ClipboardWatcher.pixelCount(Data(repeating: 7, count: 5_000)) == nil)
+        check("a picture over 100 megapixels is refused for the clipboard", (ClipboardWatcher.pixelCount(huge) ?? 0) > ClipboardWatcher.maxImagePixels)
+        let rule = ChargeHelper.installScript(user: "me")
         check("sudo rule allows only the four low power choices", rule.contains("dysklink-power lowpower never") && rule.contains("dysklink-power lowpower always")
             && !rule.contains("lowpower *"))
         check("settings search finds pages by Indonesian words", LauncherSettings.all.contains { $0.id == "battery" && $0.words.contains("baterai") }
@@ -440,7 +492,8 @@ enum ToolsSelfTest {
         func offBeforeSleep(_ percent: Int, reason: ChargeReason, topUp: Bool = false, calibration: CalibrationPhase = .off) -> Bool {
             ChargePolicy.offBeforeSleep(percent: percent, settings: sleepy, calibration: calibration, reason: reason, topUp: topUp, adapterOff: false)
         }
-        check("near the limit the charger goes off before sleep", offBeforeSleep(78, reason: .normal) && offBeforeSleep(80, reason: .limit))
+        check("at the limit the charger goes off before sleep", offBeforeSleep(80, reason: .normal) && offBeforeSleep(80, reason: .limit))
+        check("below the limit it keeps charging before sleep", !offBeforeSleep(78, reason: .normal) && !offBeforeSleep(79, reason: .limit))
         check("far below the limit it stays on before sleep", !offBeforeSleep(60, reason: .normal))
         check("a top-up keeps charging through sleep", !offBeforeSleep(90, reason: .topUp, topUp: true) && !offBeforeSleep(90, reason: .normal, topUp: true))
         check("macOS holding the level keeps the charger on in sleep", !offBeforeSleep(80, reason: .held))
@@ -486,9 +539,31 @@ enum ToolsSelfTest {
         settings.limiter = false
         let pmset = "Battery level limits:\n(\n    {\n        chargeSocLimitReason = manualChargeLimit;\n        chargeSocLimitSoc = 85;\n    }\n)"
         check("system charge limit is read", NativeChargeLimit.parse(pmset) == 85 && NativeChargeLimit.parse("No battery level limits set") == nil)
-        let script = ChargeHelper.installScript(helper: "/tmp/h", user: "someone")
+        let script = ChargeHelper.installScript(user: "someone")
         check("sudo rule only allows the helper's commands", script.contains("someone ALL=(root) NOPASSWD: /usr/local/libexec/dysklink-power adapter on, /usr/local/libexec/dysklink-power adapter off, /usr/local/libexec/dysklink-power status")
             && script.contains("visudo -cf"))
+        check("the install script takes the helper as an argument, not in its text",
+              script.contains(#"helper_src="$1""#) && script.contains(#"/bin/cp "$helper_src" "$work/helper""#)
+              && script.contains(#"install -o root -g wheel -m 755 "$work/helper""#) && !script.contains("'/"  + "tmp"))
+        check("the install script checks the copy's hash and signature in a root folder",
+              script.contains("mktemp -d /private/var/tmp/") && script.contains(#"[ "$sum" != "$helper_sha" ]"#)
+              && script.contains(#"codesign --verify --strict -R="$helper_req" "$work/helper""#)
+              && script.contains(#"rm -rf "${work:?}""#))
+        check("the install script parses", (try? Shell.run("/bin/sh", ["-n", "-c", script])) != nil)
+        check("arguments reach the root script quoted", ChargeHelper.adminRunner.contains("quoted form of (item index of argv)")
+              && ChargeHelper.adminRunner.contains("quoted form of (item 1 of argv)"))
+        // The same runner without the admin prompt: a path with quotes and $() stays one argument.
+        let tricky = "/Volumes/it's $(echo injected) `echo x` \"q\" ; true"
+        let unprivileged = ChargeHelper.adminRunner.replacingOccurrences(of: " with administrator privileges", with: "")
+        check("a path with quotes and $() is passed as plain text",
+              (try? Shell.run("/usr/bin/osascript", ["-e", unprivileged, #"printf '%s' "$1""#, tricky]))?.trimmingCharacters(in: .newlines) == tricky)
+        check("plain user names go into the sudo rule", ChargeHelper.isPlainUserName("fanny") && ChargeHelper.isPlainUserName("a.b_c-1")
+              && !ChargeHelper.isPlainUserName("x ALL") && !ChargeHelper.isPlainUserName("a'b") && !ChargeHelper.isPlainUserName("")
+              && !ChargeHelper.isPlainUserName("-x"))
+        check("the helper must have this app's team or certificate",
+              ChargeHelper.requirement(team: "ABCDE12345", leafSHA1: nil) == #"anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345""#
+              && ChargeHelper.requirement(team: nil, leafSHA1: String(repeating: "A", count: 40)) == "certificate leaf = H\"" + String(repeating: "a", count: 40) + "\""
+              && ChargeHelper.requirement(team: "x\" or true", leafSHA1: nil) == nil && ChargeHelper.requirement(team: nil, leafSHA1: nil) == nil)
     }
 
     private static func testGameKeys() {
@@ -644,6 +719,19 @@ enum ToolsSelfTest {
         check("same start but a different end isn't a copy", found.first?.files.contains { $0.name == "same-start.bin" } == false)
         check("the extra space is counted once per copy", found.first?.wasted == 200_000)
         check("small files are skipped", Duplicates.find(in: [dupsFolder], minimum: 300_000).isEmpty)
+        write("Dups-links/x.bin", Data(repeating: 11, count: 200_000))
+        try? fm.linkItem(at: home.appendingPathComponent("Dups-links/x.bin"), to: home.appendingPathComponent("Dups-links/x-link.bin"))
+        check("hard links of one file aren't copies", Duplicates.find(in: [home.appendingPathComponent("Dups-links")], minimum: 100_000).isEmpty)
+        write("Dups-clones/y.bin", Data((0..<300_000).map { UInt8($0 % 241) }))
+        let clone = home.appendingPathComponent("Dups-clones/y-clone.bin")
+        // FileManager copies are APFS clones, which share their blocks.
+        try? fm.copyItem(at: home.appendingPathComponent("Dups-clones/y.bin"), to: clone)
+        let clones = Duplicates.find(in: [home.appendingPathComponent("Dups-clones")], minimum: 100_000)
+        if Duplicates.privateSize(clone) != nil {
+            check("an APFS clone frees nothing, so it isn't counted as wasted", clones.count == 1 && (clones.first?.wasted ?? .max) < 100_000)
+        } else {
+            print("SKIP clone check: this disk doesn't report private sizes")
+        }
 
         // Uninstall
         func app(_ path: String, _ id: String) {
@@ -656,6 +744,10 @@ enum ToolsSelfTest {
         app("Applications/Tools/Bar.app", "com.bar.app")
         app("Applications/Safari Copy.app", "com.apple.Safari")
         app("Applications/DyskLink.app", "id.dysklink.mac")
+        app("Applications/Shouty.app", "COM.APPLE.Mail")
+        app("Applications/Root.app", "com.apple")
+        check("Apple's IDs are recognized in any case", Uninstaller.isAppleBundleId("com.apple.Safari") && Uninstaller.isAppleBundleId("COM.Apple.mail")
+              && Uninstaller.isAppleBundleId("com.apple") && !Uninstaller.isAppleBundleId("com.applesauce.x") && !Uninstaller.isAppleBundleId("org.com.apple"))
         let apps = Uninstaller.apps(in: [home.appendingPathComponent("Applications")])
         check("apps are listed, also inside folders", apps.map(\.name) == ["Bar", "Foo"])
         write("Library/Preferences/com.foo.app.plist", Data([1]))
@@ -669,6 +761,12 @@ enum ToolsSelfTest {
               ["com.foo.app.plist", "com.foo.app", "TEAM123.com.foo.app", "com.foo.app.helper.plist"])
         check("a folder with the same name is only suggested", leftovers.filter { !$0.byId }.map(\.item.name) == ["Foo"])
         check("a similar ID isn't a leftover", !leftovers.contains { $0.item.name == "com.foobar" })
+        // The disk ignores case, so a folder that differs only in case would be found by a made-up path.
+        write("Library/Application Support/COM.CASE.APP/data", Data([1]))
+        write("Library/Caches/com.case.app/c", Data([1]))
+        let cased = InstalledApp(url: home.appendingPathComponent("Applications/Case.app"), name: "Cs", bundleId: "com.case.app", version: "")
+        check("leftovers match the exact name, case included",
+              Uninstaller.leftovers(for: cased, home: home).map(\.item.name) == ["com.case.app"])
         check("plain bundle IDs are safe", Uninstaller.isSafeBundleId("com.foo.app") && Uninstaller.isSafeBundleId("A1-b.c"))
         check("dangerous bundle IDs are refused", [".", "..", "../..", "com/../x", "a..b", ".hidden", "-x", "", "a b", "a/b", "ü.x"]
               .allSatisfy { !Uninstaller.isSafeBundleId($0) })
@@ -814,6 +912,19 @@ enum ToolsSelfTest {
         check("pauses on battery when asked", decide(nil, battery, true, 0) == .pause)
         check("keeps going before the idle limit", AwakeDecision.decide(now: now, endsAt: nil, power: mains, onlyOnPower: false, stopBelow: 0, idleSeconds: 599, idleLimitMinutes: 10) == .hold)
         check("stops at the idle limit", AwakeDecision.decide(now: now, endsAt: nil, power: mains, onlyOnPower: false, stopBelow: 0, idleSeconds: 600, idleLimitMinutes: 10) == .stop("Stopped after 10 minutes with no activity."))
+        let checked = Date(timeIntervalSince1970: 2_000_000)
+        check("a check that worked runs again a day later",
+              abs(UpdateChecker.nextDelay(lastSuccess: checked, lastAttempt: checked, failures: 0, now: checked) - 86_400) < 1)
+        check("the first check after launch waits 15 s", UpdateChecker.nextDelay(lastSuccess: nil, lastAttempt: nil, failures: 0, now: checked) == 15)
+        check("a failed check is tried again after an hour",
+              abs(UpdateChecker.nextDelay(lastSuccess: nil, lastAttempt: checked, failures: 1, now: checked.addingTimeInterval(60)) - 3540) < 1)
+        check("failures in a row wait longer, up to a day",
+              abs(UpdateChecker.nextDelay(lastSuccess: nil, lastAttempt: checked, failures: 2, now: checked) - 7200) < 1
+              && abs(UpdateChecker.nextDelay(lastSuccess: nil, lastAttempt: checked, failures: 9, now: checked) - 86_400) < 1)
+        check("a failed check never retries every few seconds",
+              UpdateChecker.nextDelay(lastSuccess: checked.addingTimeInterval(-200_000), lastAttempt: checked, failures: 1, now: checked) >= 3600)
+        check("prayer times back off after failures", PrayerModel.retryDelay(failures: 0) == 0 && PrayerModel.retryDelay(failures: 1) == 120
+              && PrayerModel.retryDelay(failures: 2) == 240 && PrayerModel.retryDelay(failures: 30) == 3600)
         check("newer patch", UpdateChecker.isNewer("v0.1.3", than: "0.1.2"))
         check("same version isn't newer", !UpdateChecker.isNewer("0.1.2", than: "0.1.2"))
         check("older isn't newer", !UpdateChecker.isNewer("0.1.10", than: "0.1.11"))
@@ -933,6 +1044,14 @@ enum ToolsSelfTest {
                                   services: [MonitorIdentity(vendor: 0x1E6D, product: 23305, serial: 222), lg]) == [5: 1, 6: 0])
         check("services that say nothing aren't guessed with two monitors",
               MonitorMatch.assign(screens: [(5, lg), (6, dell)], services: [MonitorIdentity(), MonitorIdentity()]).isEmpty)
+        let sidecar = MonitorIdentity(vendor: 0x610, product: 0xA050, serial: 0)
+        let lgService = MonitorIdentity(vendor: 0x1E6D, product: 23305)
+        let withSidecar = MonitorMatch.assign(screens: [(5, lg), (6, sidecar)], services: [lgService])
+        check("a monitor beside a Sidecar screen gets the one service", withSidecar == [5: 0])
+        check("a Sidecar screen isn't counted as unmatched",
+              MonitorMatch.unmatched(screens: [(5, lg), (6, sidecar)], services: [lgService], assigned: withSidecar) == 0
+              && MonitorMatch.unmatched(screens: [(5, twinA), (6, twinA)], services: [twinA, twinA], assigned: [:]) == 2
+              && MonitorMatch.unmatched(screens: [(6, sidecar)], services: [], assigned: [:]) == 0)
     }
 
     private static func testWheel() {
@@ -1553,6 +1672,28 @@ extension ToolsSelfTest {
         try? stuck.start(cols: 80, rows: 24, shell: "/bin/sh", arguments: ["-c", "sleep 30"])
         stuck.hangUp()
         check("terminal: hang up ends it", ended.wait(timeout: .now() + 4) == .success)
+
+        // A shell that doesn't read: typing fills the pty, and hanging up must not wait behind the typing.
+        let full = PtyShell(id: "v")
+        let gone = DispatchSemaphore(value: 0)
+        full.onExit = { _ in gone.signal() }
+        try? full.start(cols: 80, rows: 24, shell: "/bin/sh", arguments: ["-c", "sleep 30"])
+        full.write(Data(repeating: UInt8(ascii: "x"), count: 512 * 1024))
+        full.resize(cols: 90, rows: 30)
+        full.hangUp()
+        check("terminal: a full pty doesn't hold up hanging up", gone.wait(timeout: .now() + 4) == .success)
+
+        // A shell let go of while running is ended and reaped, not left as a zombie.
+        var dropped: PtyShell? = PtyShell(id: "w")
+        try? dropped?.start(cols: 80, rows: 24, shell: "/bin/sh", arguments: ["-c", "trap '' HUP; sleep 30"])
+        let child = dropped?.pid ?? 0
+        dropped = nil
+        var reaped = false
+        for _ in 0..<40 where !reaped {
+            _ = DispatchSemaphore(value: 0).wait(timeout: .now() + 0.1)
+            reaped = kill(child, 0) != 0 && errno == ESRCH
+        }
+        check("terminal: a dropped shell is reaped", child > 0 && reaped)
     }
 
     /// The frames the session builds by hand must read back as the same messages, and the NAL splitter that works

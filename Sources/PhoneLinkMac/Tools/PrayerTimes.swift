@@ -178,7 +178,7 @@ final class PrayerModel {
             } else {
                 defaults.removeObject(forKey: "prayer.location")
             }
-            if location != oldValue { months = []; save(); refresh() }
+            if location != oldValue { months = []; save(); failures = 0; retryAt = nil; refresh() }
         }
     }
     var notifies: Bool {
@@ -204,6 +204,15 @@ final class PrayerModel {
     @ObservationIgnored private let file: URL
     @ObservationIgnored private let notifier = MacNotifier()
     @ObservationIgnored private var timer: Timer?
+    /// Loads that failed in a row, and when the next automatic try may run.
+    @ObservationIgnored private var failures = 0
+    @ObservationIgnored private var retryAt: Date?
+
+    /// After failures in a row: 2 minutes, then 4, 8, … up to an hour.
+    nonisolated static func retryDelay(failures: Int) -> TimeInterval {
+        guard failures > 0 else { return 0 }
+        return min(3600, 120 * pow(2, Double(min(failures - 1, 10))))
+    }
     /// Snapshots and tests set values without saving them or reaching the network.
     @ObservationIgnored private var isInert = false
 
@@ -272,9 +281,11 @@ final class PrayerModel {
         }
     }
 
-    /// Fetches this month, and next month once the end of this one is near.
+    /// Fetches this month, and next month once the end of this one is near. After a failure the automatic tries
+    /// wait longer each time.
     func refresh() {
         guard let location, !isLoading, !isInert else { return }
+        if let retryAt, Date() < retryAt { return }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = location.timeZone
         let now = Date()
@@ -291,6 +302,11 @@ final class PrayerModel {
         isLoading = true
         Task {
             defer { isLoading = false }
+            var failed = false
+            defer {
+                failures = failed ? failures + 1 : 0
+                retryAt = failed ? Date().addingTimeInterval(Self.retryDelay(failures: failures)) : nil
+            }
             for parts in missing {
                 guard let year = parts.year, let month = parts.month else { continue }
                 do {
@@ -306,6 +322,7 @@ final class PrayerModel {
                     problem = nil
                     save()
                 } catch {
+                    failed = true
                     problem = "Couldn't load prayer times. They load again later."
                 }
             }

@@ -41,7 +41,7 @@ struct PowerSettingsCard: View {
                         Button("Open Battery Settings") { NSWorkspace.shared.open(PowerSettings.batterySettings) }
                             .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
                     }
-                    note("macOS learns your routine and may hold charging at 80% until you usually unplug. That can fight DyskLink's Charge Limit, so turn it off in System Settings › Battery › Battery Health (ⓘ) while you use the limit. macOS doesn't let other apps read or change it.")
+                    note("macOS learns your routine and may hold charging at 80% until you usually unplug. That can fight DyskLink's charge limit, so turn it off in System Settings › Battery › Battery Health (ⓘ) while you use the limit. macOS doesn't let other apps read or change it.")
                     if let nativeLimit, nativeLimit < 100 {
                         Text("macOS's own Charge Limit is set to \(nativeLimit)%.").font(.system(size: 12)).foregroundStyle(Theme.amber)
                     }

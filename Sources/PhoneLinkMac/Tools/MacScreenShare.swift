@@ -261,6 +261,14 @@ final class MacScreenViewer {
     static let minBitrate = 1_000_000
     static let adaptEvery = 45
 
+    /// After a frame couldn't be sent: about two thirds of the bitrate, not below `minBitrate`.
+    func lowerBitrate() {
+        let next = Swift.max(Self.minBitrate, bitrate * 2 / 3)
+        guard next != bitrate else { return }
+        bitrate = next
+        encoder.setBitrate(next)
+    }
+
     /// Lower when more than one frame in ten was dropped, higher again when none were.
     static func nextBitrate(current: Int, sent: Int, dropped: Int, max limit: Int) -> Int {
         let total = sent + dropped

@@ -41,8 +41,18 @@ struct TodoPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 OptionalScroll(enabled: scrolls) {
-                    VStack(spacing: 6) {
+                    VStack(spacing: 4) {
                         ForEach(tasks) { task in taskRow(task) }
+                    }
+                }
+                // More than fit: the bottom edge fades, so the list reads as one that scrolls.
+                .mask {
+                    if tasks.count > 4 {
+                        LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.82),
+                                               .init(color: .black.opacity(0), location: 1)],
+                                       startPoint: .top, endPoint: .bottom)
+                    } else {
+                        Color.black
                     }
                 }
             }
@@ -66,11 +76,11 @@ struct TodoPanel: View {
         HStack(spacing: 10) {
             Button { todos.toggle(task.id) } label: {
                 Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 20)).foregroundStyle(task.isDone ? Self.green : Color.white.opacity(0.6))
+                    .font(.system(size: 17)).foregroundStyle(task.isDone ? Self.green : Color.white.opacity(0.6))
             }
             .buttonStyle(.plain)
             .help(task.isDone ? "Mark as not done" : "Mark as done")
-            Text(task.title).font(.system(size: 14, weight: .medium)).lineLimit(1)
+            Text(task.title).font(.system(size: 13.5, weight: .medium)).lineLimit(1)
                 .strikethrough(task.isDone)
                 .foregroundStyle(task.isDone ? Color.white.opacity(0.6) : Color.white)
             Spacer(minLength: 0)
@@ -87,7 +97,7 @@ struct TodoPanel: View {
                 .help("Remove")
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, 12).padding(.vertical, 4)
         .background(task.isDone ? Color(hex: 0x1B2E1F) : Color.white.opacity(0.1),
                     in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }

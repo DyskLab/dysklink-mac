@@ -42,10 +42,10 @@ struct BatteryDashboard: View {
     @ViewBuilder
     private var flow: some View {
             if compact {
-                PowerFlow(sample: power.current, compact: true).frame(height: 150)
+                PowerFlow(sample: power.current, compact: true, live: power.isLive).frame(height: 164)
                     .padding(10).background(Theme.panelRaised.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             } else {
-                Card { PowerFlow(sample: power.current).frame(height: 260) }
+                Card { PowerFlow(sample: power.current, live: power.isLive).frame(height: 260) }
             }
     }
 
@@ -53,6 +53,9 @@ struct BatteryDashboard: View {
 
     private var limit: Int? { control.settings.limiter ? control.settings.limit : nil }
     private var onBattery: Bool { control.adapterOff || (!battery.isPluggedIn && !battery.isCharging) }
+
+    /// The battery bar's own fill color, so its shine matches it.
+    private var barColor: Color { BatteryBar.colors(charging: battery.isCharging, onBattery: onBattery)[0] }
 
     private var limitRow: some View {
         VStack(spacing: 10) {
@@ -77,6 +80,7 @@ struct BatteryDashboard: View {
             }
             BatteryBar(percent: battery.percent, limit: limit, sailTo: limit.map { $0 - control.settings.gap },
                        charging: battery.isCharging, onBattery: onBattery)
+                .sweep(Capsule(), color: .white.opacity(battery.isCharging ? 0.35 : 0.22), live: power.isLive)
                 .frame(height: compact ? 30 : 38)
         }
     }
@@ -110,10 +114,10 @@ struct BatteryDashboard: View {
         case .limit:
             return "The limit is reached. Charging stays paused until the battery is down to \(sail ?? target)%."
         case .discharge:
-            return "Discharge on Power is on, so your MacBook runs on battery even with the charger plugged in."
+            return "Discharge on power is on, so your MacBook runs on battery even with the charger plugged in."
         case .heat:
-            return String(format: "Charging is paused because the battery is %.1f °C. It goes on below %.0f °C.",
-                          control.temperature ?? 0, control.settings.heatLimit - ChargePolicy.coolDown)
+            return "Charging is paused because the battery is \(LocalFormat.celsius(control.temperature ?? 0)). "
+                + "It goes on below \(LocalFormat.decimal(control.settings.heatLimit - ChargePolicy.coolDown, digits: 0)) °C."
         case .topUp:
             return "Topping up to 100% once. Your \(limit.map { "\($0)% " } ?? "")limit comes back after that."
         case .held:
@@ -163,14 +167,14 @@ struct BatteryDashboard: View {
     private var levelChart: some View {
         ChartCard(title: "Battery Level", icon: "battery.100percent", value: "\(battery.percent) %",
                   points: control.levels.map { Double($0.percent) }, range: 0...100,
-                  guide: limit.map(Double.init), color: Theme.mint, compact: compact)
+                  guide: limit.map(Double.init), color: Theme.mint, compact: compact, live: power.isLive)
     }
 
     private var powerChart: some View {
         let values = power.history.map(\.systemWatts)
         let average = values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
-        return ChartCard(title: "Power Consumption", icon: "bolt.fill", value: String(format: "%.2f W", power.current.systemWatts),
-                         points: values, range: 0...max(5, (values.max() ?? 5) * 1.15), guide: average, color: Theme.violet, compact: compact)
+        return ChartCard(title: "Power Consumption", icon: "bolt.fill", value: LocalFormat.watts(power.current.systemWatts),
+                         points: values, range: 0...max(5, (values.max() ?? 5) * 1.15), guide: average, color: Theme.violet, compact: compact, live: power.isLive)
     }
 
     // MARK: Details
@@ -180,16 +184,16 @@ struct BatteryDashboard: View {
                 detail("stethoscope", "Maximum Capacity:", battery.fullMah.map { "\($0) mAh" }, (battery.appleMaxCapacity ?? battery.health).map { "\($0) %" })
                 detail("clock.arrow.circlepath", "Cycle Count:", nil, "\(battery.cycles)")
                 Divider().overlay(Theme.textFaint.opacity(0.3))
-                detail("flame", "Battery Temperature:", nil, battery.temperatureC.map { String(format: "%.1f °C", $0) } ?? "—")
+                detail("flame", "Battery Temperature:", nil, battery.temperatureC.map(LocalFormat.celsius) ?? "—")
                 detail("clock", battery.isCharging ? "Time to Full:" : "Time Remaining:", nil,
                        (battery.isCharging ? battery.minutesToFull : battery.minutesToEmpty).map(MacCareView.duration) ?? "—")
                 Divider().overlay(Theme.textFaint.opacity(0.3))
-                detail("battery.100percent", "Power:", nil, String(format: "%.2f W", power.current.batteryWatts))
-                detail("laptopcomputer", "System Load:", nil, String(format: "%.2f W", power.current.systemWatts))
+                detail("battery.100percent", "Power:", nil, LocalFormat.watts(power.current.batteryWatts))
+                detail("laptopcomputer", "System Load:", nil, LocalFormat.watts(power.current.systemWatts))
                 Divider().overlay(Theme.textFaint.opacity(0.3))
                 if let watts = battery.adapterWatts, !onBattery {
                     detail("powerplug", "Power Adapter:", nil, "\(watts) W")
-                    detail("bolt", "Drawing from Adapter:", nil, String(format: "%.2f W", power.current.adapterWatts))
+                    detail("bolt", "Drawing from Adapter:", nil, LocalFormat.watts(power.current.adapterWatts))
                 } else {
                     Text("Power adapter specs are not available when discharging.")
                         .font(.system(size: compact ? 11 : 12)).foregroundStyle(Theme.textSecondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -216,8 +220,8 @@ struct BatteryDashboard: View {
 }
 
 // MARK: - Parts
-
-/// The battery level as a wide bar, with the limit and where sailing goes back to.
+/// The battery level drawn as a battery: a body with a terminal on the right, the fill inside, a tick at the limit,
+/// and a dashed line where sailing goes back to.
 private struct BatteryBar: View {
     let percent: Int
     let limit: Int?
@@ -225,35 +229,72 @@ private struct BatteryBar: View {
     let charging: Bool
     let onBattery: Bool
 
+    /// Left and right of the fill: warm on battery, cool while charging, quiet otherwise.
+    static func colors(charging: Bool, onBattery: Bool) -> [Color] {
+        if onBattery { return [Theme.amber, Color(hex: 0xFF8A4C)] }
+        if charging { return [Theme.mint, Color(hex: 0x4CC3FF)] }
+        return [Color(hex: 0x9AA4B6), Color(hex: 0x6B7588)]
+    }
+
     var body: some View {
         GeometryReader { geo in
-            let width = geo.size.width
-            let fill = onBattery ? Theme.amber : charging ? Theme.mint : Theme.textSecondary
-            ZStack(alignment: .leading) {
-                Capsule().fill(Theme.panelRaised)
-                Capsule().fill(fill.opacity(0.85)).frame(width: max(44, width * CGFloat(percent) / 100))
-                HStack {
-                    Text("\(percent)%").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.ink)
-                    Spacer()
+            let nub: CGFloat = 5, inset: CGFloat = 3
+            let bodyW = geo.size.width - nub - 2, h = geo.size.height
+            let inner = bodyW - inset * 2
+            let colors = Self.colors(charging: charging, onBattery: onBattery)
+            let x = { (value: Int) in inset + inner * CGFloat(min(max(value, 0), 100)) / 100 }
+            ZStack(alignment: .topLeading) {
+                // The body and its terminal.
+                RoundedRectangle(cornerRadius: h * 0.32, style: .continuous)
+                    .fill(Theme.panelRaised)
+                    .overlay(RoundedRectangle(cornerRadius: h * 0.32, style: .continuous).strokeBorder(Color.white.opacity(0.16), lineWidth: 1.5))
+                    .frame(width: bodyW, height: h)
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.white.opacity(0.22))
+                    .frame(width: nub, height: h * 0.36)
+                    .offset(x: bodyW + 2, y: h * 0.32)
+                // The charge.
+                RoundedRectangle(cornerRadius: h * 0.22, style: .continuous)
+                    .fill(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing))
+                    .overlay(RoundedRectangle(cornerRadius: h * 0.22, style: .continuous)
+                        .fill(LinearGradient(colors: [.white.opacity(0.32), .clear], startPoint: .top, endPoint: .center)))
+                    .shadow(color: colors[1].opacity(0.45), radius: 6)
+                    .frame(width: max(h, x(percent) - inset), height: h - inset * 2)
+                    .offset(x: inset, y: inset)
+                HStack(spacing: 6) {
+                    Image(systemName: onBattery ? "battery.75percent" : charging ? "bolt.fill" : "powerplug.portrait.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text("\(percent)%").font(.system(size: 13.5, weight: .bold).monospacedDigit())
                 }
-                .padding(.leading, 16)
-                Image(systemName: onBattery ? "powerplug.portrait" : charging ? "bolt.fill" : "powerplug.portrait.fill")
-                    .overlay(alignment: .trailing) { if onBattery { Image(systemName: "minus").offset(x: 12) } }
-                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.ink.opacity(0.85))
-                    .position(x: max(70, width * CGFloat(percent) / 200), y: geo.size.height / 2)
+                .foregroundStyle(Theme.ink)
+                .frame(height: h).padding(.leading, 12)
                 if let sailTo {
                     Path { p in
-                        let x = width * CGFloat(sailTo) / 100
-                        p.move(to: CGPoint(x: x, y: 8)); p.addLine(to: CGPoint(x: x, y: geo.size.height - 8))
+                        p.move(to: CGPoint(x: x(sailTo), y: inset + 4)); p.addLine(to: CGPoint(x: x(sailTo), y: h - inset - 4))
                     }
-                    .stroke(Theme.textPrimary.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [3, 4]))
+                    .stroke(Theme.textPrimary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [2, 3]))
                 }
                 if let limit {
-                    RoundedRectangle(cornerRadius: 2).fill(Theme.textPrimary.opacity(0.85))
-                        .frame(width: 4, height: geo.size.height + 8)
-                        .position(x: width * CGFloat(limit) / 100, y: geo.size.height / 2)
+                    // A tick across the body with a small pointer above it.
+                    RoundedRectangle(cornerRadius: 1.5).fill(Theme.textPrimary)
+                        .shadow(color: colors[0].opacity(0.9), radius: 4)
+                        .frame(width: 3, height: h + 6)
+                        .offset(x: x(limit) - 1.5, y: -3)
+                    Triangle().fill(Theme.textPrimary)
+                        .frame(width: 9, height: 6)
+                        .offset(x: x(limit) - 4.5, y: -10)
                 }
             }
+        }
+        .padding(.top, limit == nil ? 0 : 8)
+    }
+}
+
+private struct Triangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { p in
+            p.move(to: CGPoint(x: rect.minX, y: rect.minY)); p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            p.addLine(to: CGPoint(x: rect.midX, y: rect.maxY)); p.closeSubpath()
         }
     }
 }
@@ -268,6 +309,8 @@ private struct ChartCard: View {
     let guide: Double?
     let color: Color
     var compact = false
+    var live = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -278,6 +321,9 @@ private struct ChartCard: View {
                 Text(value).font(.system(size: compact ? 15 : 20, weight: .bold).monospacedDigit()).foregroundStyle(Theme.textPrimary)
             }
             .padding(.horizontal, compact ? 10 : 14).padding(.top, compact ? 8 : 12)
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !live || reduceMotion)) { timeline in
+            let moving = live && !reduceMotion
+            let phase = Sweep.phase(timeline.date)
             Canvas { context, size in
                 let span = max(range.upperBound - range.lowerBound, 0.001)
                 func y(_ v: Double) -> CGFloat { size.height * (1 - CGFloat((min(max(v, range.lowerBound), range.upperBound) - range.lowerBound) / span)) }
@@ -294,7 +340,17 @@ private struct ChartCard: View {
                     area.closeSubpath()
                     context.fill(area, with: .linearGradient(Gradient(colors: [color.opacity(0.4), color.opacity(0.05)]),
                                                              startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
+                    if moving {
+                        // A band of brighter fill that runs to the right and starts over.
+                        context.fill(area, with: .linearGradient(Sweep.gradient(phase, color: color.opacity(0.45)),
+                                                                 startPoint: .zero, endPoint: CGPoint(x: size.width, y: 0)))
+                    }
                     context.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: 2, lineJoin: .round))
+                    if moving {
+                        context.stroke(line, with: .linearGradient(Sweep.gradient(phase, color: .white.opacity(0.7), width: 0.12),
+                                                                   startPoint: .zero, endPoint: CGPoint(x: size.width, y: 0)),
+                                       style: StrokeStyle(lineWidth: 2, lineJoin: .round))
+                    }
                 } else {
                     context.draw(Text("Collecting…").font(.system(size: 12)).foregroundStyle(Theme.textFaint),
                                  at: CGPoint(x: size.width / 2, y: size.height / 2))
@@ -307,6 +363,7 @@ private struct ChartCard: View {
                 }
             }
             .frame(height: compact ? 70 : 150)
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: compact ? 14 : 18, style: .continuous))
         .background(compact ? Theme.panelRaised.opacity(0.5) : Theme.panel, in: RoundedRectangle(cornerRadius: compact ? 14 : 18, style: .continuous))
@@ -314,93 +371,151 @@ private struct ChartCard: View {
     }
 }
 
-/// Where the power comes from (charger, battery) and where it goes (battery charging, GPU, the rest of the Mac).
+/// Where the power comes from (charger, battery) and where it goes (battery charging, GPU, the rest of the Mac):
+/// chips on each side, the Mac as a glowing node in the middle, and ribbons as wide as each share.
 private struct PowerFlow: View {
     let sample: PowerSample
     var compact = false
+    var live = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private struct Part {
         let icon: String
+        let label: String
         let watts: Double
         let color: Color
         let help: String
+        /// A step between `color` and the Mac's violet, so the blend doesn't go muddy in the middle.
+        var bridge: Color? = nil
     }
 
     private static let sky = Color(hex: 0x6EB6FF)
+    private static let orchid = Color(hex: 0xE08BFF)
+    /// The Mac in the middle, where power arrives and splits.
+    private static let mac = Theme.violet
 
     private var sources: [Part] {
         var list: [Part] = []
-        if sample.adapterWatts > 0.3 { list.append(Part(icon: "powerplug.portrait.fill", watts: sample.adapterWatts, color: Theme.mint, help: "From the charger")) }
-        if sample.fromBattery > 0.05 || list.isEmpty { list.append(Part(icon: "battery.100percent", watts: sample.fromBattery, color: Theme.amber, help: "From the battery")) }
+        if sample.adapterWatts > 0.3 {
+            list.append(Part(icon: "powerplug.portrait.fill", label: "Charger", watts: sample.adapterWatts, color: Theme.mint,
+                             help: "From the charger", bridge: Color(hex: 0x4CC3FF)))
+        }
+        if sample.fromBattery > 0.05 || list.isEmpty {
+            list.append(Part(icon: "battery.75percent", label: "Battery", watts: sample.fromBattery, color: Theme.amber,
+                             help: "From the battery", bridge: Color(hex: 0xFF8FA3)))
+        }
         return list
     }
 
     private var outputs: [Part] {
         var list: [Part] = []
-        if let gpu = sample.gpuWatts, gpu > 0.02 { list.append(Part(icon: "cpu", watts: gpu, color: Self.sky, help: "Graphics (GPU)")) }
-        if sample.intoBattery > 0.05 { list.append(Part(icon: "battery.100percent.bolt", watts: sample.intoBattery, color: Theme.mint, help: "Charging the battery")) }
-        list.append(Part(icon: "ellipsis", watts: sample.restWatts, color: Self.sky, help: "The rest of the Mac: processor, screen, storage, and more"))
+        if let gpu = sample.gpuWatts, gpu > 0.02 {
+            list.append(Part(icon: "cpu", label: "Graphics", watts: gpu, color: Self.orchid, help: "Graphics (GPU)"))
+        }
+        if sample.intoBattery > 0.05 {
+            list.append(Part(icon: "battery.100percent.bolt", label: "Charging", watts: sample.intoBattery, color: Theme.mint,
+                             help: "Charging the battery"))
+        }
+        list.append(Part(icon: "ellipsis.circle", label: "Everything else", watts: sample.restWatts, color: Self.sky,
+                         help: "The rest of the Mac: processor, screen, storage, and more"))
         return list
     }
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width, h = geo.size.height
-            let iconW: CGFloat = compact ? 34 : 52, gap: CGFloat = compact ? 5 : 8
-            let barW = w * 0.26
-            let macX = iconW + gap + barW + gap
-            let ribbonX = macX + iconW + gap
-            let outX = w - iconW
-            let srcBoxes = stack(sources.map(\.watts), height: h, gap: compact ? 6 : 10, minimum: compact ? 36 : 50)
-            let outBoxes = stack(outputs.map(\.watts), height: h, gap: compact ? 8 : 12, minimum: compact ? 30 : 44)
-            let total = max(outputs.map(\.watts).reduce(0, +), 0.001)
+            let chipW = w * 0.3, gap: CGFloat = compact ? 6 : 10
+            let radius: CGFloat = compact ? 26 : 36
+            let center = CGPoint(x: w / 2, y: h / 2)
+            let srcBoxes = stack(sources.map(\.watts), height: h, gap: gap, minimum: compact ? 40 : 56)
+            let outBoxes = stack(outputs.map(\.watts), height: h, gap: gap, minimum: compact ? 42 : 54)
             ZStack(alignment: .topLeading) {
-                // Ribbons first, so the boxes sit on top.
-                Canvas { context, _ in
-                    var y = h * 0.12
-                    let band = h * 0.76
-                    for (i, part) in outputs.enumerated() {
-                        let thick = max(10, band * CGFloat(part.watts / total))
-                        let start = (y, y + thick)
-                        let end = (outBoxes[i].minY + 4, outBoxes[i].maxY - 4)
-                        var path = Path()
-                        let x0 = ribbonX, x1 = outX - gap, mid = (x0 + x1) / 2
-                        path.move(to: CGPoint(x: x0, y: start.0))
-                        path.addCurve(to: CGPoint(x: x1, y: end.0), control1: CGPoint(x: mid, y: start.0), control2: CGPoint(x: mid, y: end.0))
-                        path.addLine(to: CGPoint(x: x1, y: end.1))
-                        path.addCurve(to: CGPoint(x: x0, y: start.1), control1: CGPoint(x: mid, y: end.1), control2: CGPoint(x: mid, y: start.1))
-                        path.closeSubpath()
-                        context.fill(path, with: .linearGradient(Gradient(colors: [part.color.opacity(0.75), Theme.panelRaised]),
-                                                                 startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0)))
-                        context.draw(Text(String(format: "%.2f W", part.watts)).font(.system(size: compact ? 11 : 13, weight: .semibold)).foregroundStyle(Theme.textPrimary),
-                                     at: CGPoint(x: mid + 8, y: (start.0 + start.1 + end.0 + end.1) / 4))
-                        y += thick
+                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !live || reduceMotion)) { timeline in
+                    let moving = live && !reduceMotion
+                    let phase = Sweep.phase(timeline.date)
+                    Canvas { context, _ in
+                        let waist = radius * 1.5
+                        func ribbons(_ parts: [Part], _ boxes: [CGRect], incoming: Bool) {
+                            let total = max(parts.map(\.watts).reduce(0, +), 0.001)
+                            var y = center.y - waist / 2
+                            for (i, part) in parts.enumerated() {
+                                let thick = max(4, waist * CGFloat(part.watts / total))
+                                let box = boxes[i].insetBy(dx: 0, dy: min(8, boxes[i].height * 0.2))
+                                let atNode = (y, y + thick)
+                                let edgeX = incoming ? chipW : w - chipW
+                                let nodeX = incoming ? center.x - radius * 0.6 : center.x + radius * 0.6
+                                let (x0, x1) = incoming ? (edgeX, nodeX) : (nodeX, edgeX)
+                                let (a, b) = incoming ? ((box.minY, box.maxY), atNode) : (atNode, (box.minY, box.maxY))
+                                let mid = (x0 + x1) / 2
+                                var path = Path()
+                                path.move(to: CGPoint(x: x0, y: a.0))
+                                path.addCurve(to: CGPoint(x: x1, y: b.0), control1: CGPoint(x: mid, y: a.0), control2: CGPoint(x: mid, y: b.0))
+                                path.addLine(to: CGPoint(x: x1, y: b.1))
+                                path.addCurve(to: CGPoint(x: x0, y: a.1), control1: CGPoint(x: mid, y: b.1), control2: CGPoint(x: mid, y: a.1))
+                                path.closeSubpath()
+                                let colors = incoming
+                                    ? [part.color.opacity(0.7)] + (part.bridge.map { [$0.opacity(0.55)] } ?? []) + [Self.mac.opacity(0.6)]
+                                    : [Self.mac.opacity(0.6), part.color.opacity(0.75)]
+                                context.fill(path, with: .linearGradient(Gradient(colors: colors),
+                                                                         startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0)))
+                                if moving {
+                                    context.fill(path, with: .linearGradient(Sweep.gradient(phase, color: .white.opacity(0.28)),
+                                                                             startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0)))
+                                }
+                                y += thick
+                            }
+                        }
+                        ribbons(sources, srcBoxes, incoming: true)
+                        ribbons(outputs, outBoxes, incoming: false)
                     }
                 }
                 ForEach(Array(sources.enumerated()), id: \.offset) { i, part in
-                    box(icon: part.icon, color: part.color).frame(width: iconW, height: srcBoxes[i].height)
-                        .offset(x: 0, y: srcBoxes[i].minY).help(part.help)
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(LinearGradient(colors: [part.color.opacity(0.45), Self.sky.opacity(0.55)], startPoint: .leading, endPoint: .trailing))
-                        .overlay(Text(String(format: "%.2f W", part.watts)).font(.system(size: compact ? 11.5 : 14, weight: .semibold)).foregroundStyle(Theme.textPrimary))
-                        .frame(width: barW, height: srcBoxes[i].height)
-                        .offset(x: iconW + gap, y: srcBoxes[i].minY)
+                    chip(part).frame(width: chipW, height: srcBoxes[i].height).offset(y: srcBoxes[i].minY)
                 }
-                box(icon: "laptopcomputer", color: Self.sky).frame(width: iconW, height: h * 0.76).offset(x: macX, y: h * 0.12)
-                    .help(String(format: "Your MacBook uses %.2f W", sample.systemWatts))
                 ForEach(Array(outputs.enumerated()), id: \.offset) { i, part in
-                    box(icon: part.icon, color: part.color).frame(width: iconW, height: outBoxes[i].height)
-                        .offset(x: outX, y: outBoxes[i].minY).help(part.help)
+                    chip(part).frame(width: chipW, height: outBoxes[i].height).offset(x: w - chipW, y: outBoxes[i].minY)
                 }
+                node(radius: radius).position(center)
             }
         }
     }
 
-    private func box(icon: String, color: Color) -> some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Theme.panelRaised)
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.textFaint.opacity(0.25)))
-            .overlay(Image(systemName: icon).font(.system(size: compact ? 12 : 16)).foregroundStyle(color))
+    /// The Mac: a violet disc with a soft glow and how much it uses.
+    private func node(radius: CGFloat) -> some View {
+        ZStack {
+            Circle().fill(RadialGradient(colors: [Self.mac.opacity(0.95), Color(hex: 0x5A4BD6)], center: .topLeading,
+                                         startRadius: 0, endRadius: radius * 2))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 1))
+                .shadow(color: Self.mac.opacity(0.6), radius: 10)
+            VStack(spacing: 1) {
+                Image(systemName: "laptopcomputer").font(.system(size: compact ? 13 : 17, weight: .semibold))
+                Text(LocalFormat.watts(sample.systemWatts, digits: 1)).font(.system(size: compact ? 9.5 : 12, weight: .bold).monospacedDigit())
+            }
+            .foregroundStyle(.white)
+        }
+        .frame(width: radius * 2, height: radius * 2)
+        .help("Your MacBook uses \(LocalFormat.watts(sample.systemWatts))")
+    }
+
+    /// A rounded chip: icon and label on top, watts below, tinted by the part's color.
+    private func chip(_ part: Part) -> some View {
+        let shape = RoundedRectangle(cornerRadius: compact ? 12 : 16, style: .continuous)
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Image(systemName: part.icon).font(.system(size: compact ? 10.5 : 13, weight: .semibold)).foregroundStyle(part.color)
+                Text(part.label).font(.system(size: compact ? 10.5 : 12, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+            }
+            Text(LocalFormat.watts(part.watts)).font(.system(size: compact ? 13 : 16, weight: .bold).monospacedDigit())
+                .foregroundStyle(Theme.textPrimary)
+        }
+        .padding(.horizontal, compact ? 9 : 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(shape.fill(LinearGradient(colors: [part.color.opacity(0.26), part.color.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing)))
+        .background(shape.fill(Theme.panelRaised))
+        .overlay(shape.strokeBorder(part.color.opacity(0.45), lineWidth: 1))
+        .sweep(shape, color: part.color.opacity(0.25), live: live)
+        .help(part.help)
     }
 
     /// Splits the height between parts by their share, each at least `minimum` tall.
@@ -416,5 +531,53 @@ private struct PowerFlow: View {
             defer { y += item + gap }
             return CGRect(x: 0, y: y, width: 0, height: item)
         }
+    }
+}
+
+
+/// A soft band of light that sweeps left to right and starts over, for the live parts of the battery view.
+/// It only runs while power is being sampled (the menu is open) and stops for Reduce Motion.
+struct Sweep {
+    static let period = 2.6
+
+    /// Where the band is, from just before the left edge to just past the right, for a time.
+    static func phase(_ date: Date) -> Double {
+        let t = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+        return -0.25 + t * 1.5
+    }
+
+    /// Clear, then `color` at `phase`, then clear again, across 0...1.
+    static func gradient(_ phase: Double, color: Color, width: Double = 0.22) -> Gradient {
+        let a = min(max(phase - width, 0), 1), m = min(max(phase, 0), 1), b = min(max(phase + width, 0), 1)
+        return Gradient(stops: [
+            .init(color: .clear, location: 0), .init(color: .clear, location: a),
+            .init(color: color, location: m),
+            .init(color: .clear, location: b), .init(color: .clear, location: 1),
+        ])
+    }
+}
+
+/// Lays a sweeping band over its content, clipped to `shape`.
+private struct SweepOverlay<S: Shape>: ViewModifier {
+    let shape: S
+    var color: Color = .white.opacity(0.16)
+    let live: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !live || reduceMotion)) { timeline in
+                let phase = Sweep.phase(timeline.date)
+                shape.fill(LinearGradient(gradient: Sweep.gradient(phase, color: color), startPoint: .leading, endPoint: .trailing))
+                    .opacity(live && !reduceMotion ? 1 : 0)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+extension View {
+    fileprivate func sweep<S: Shape>(_ shape: S, color: Color = .white.opacity(0.16), live: Bool) -> some View {
+        modifier(SweepOverlay(shape: shape, color: color, live: live))
     }
 }

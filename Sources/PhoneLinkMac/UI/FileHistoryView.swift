@@ -83,43 +83,15 @@ struct FileHistoryView: View {
 
     /// All, Received, and Sent, each with how many files it holds.
     private func filterTabs(_ counts: [Filter: Int]) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             ForEach(Filter.allCases) { filter in
-                let selected = model.historyFilter == filter
-                let count = counts[filter] ?? 0
-                Button {
+                TabPill(icon: filter.symbol, title: filter.rawValue, isSelected: model.historyFilter == filter,
+                        count: counts[filter] ?? 0,
+                        help: "Show \(filter == .all ? "all files" : filter.rawValue.lowercased() + " files")") {
                     withAnimation(.easeOut(duration: 0.18)) { model.historyFilter = filter }
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: filter.symbol)
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(selected ? filter.tint : Theme.textFaint)
-                        Text(filter.rawValue)
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(selected ? Theme.textPrimary : Theme.textSecondary)
-                        Text("\(count)")
-                            .font(.system(size: 10.5, weight: .bold).monospacedDigit())
-                            .foregroundStyle(selected ? Theme.ink : Theme.textFaint)
-                            .padding(.horizontal, 6).padding(.vertical, 1.5)
-                            .background(selected ? filter.tint.opacity(0.9) : Color.white.opacity(0.06), in: Capsule())
-                    }
-                    .padding(.leading, 12).padding(.trailing, 8).padding(.vertical, 7)
-                    .background {
-                        if selected {
-                            Capsule().fill(Theme.panelRaised)
-                                .overlay(Capsule().strokeBorder(filter.tint.opacity(0.35)))
-                                .shadow(color: filter.tint.opacity(0.18), radius: 8, y: 2)
-                        }
-                    }
-                    .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
-                .help("Show \(filter == .all ? "all files" : filter.rawValue.lowercased() + " files")")
             }
         }
-        .padding(4)
-        .background(Theme.panel.opacity(0.82), in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.stroke))
         .fixedSize()
     }
 

@@ -122,30 +122,31 @@ struct NotchView: View {
     }
 
     private var header: some View {
-        ZStack {
-            HStack(spacing: 8) {
-                title
-                Spacer()
-                accessory
-            }
-            .padding(.horizontal, Self.sideRoom - 12)
-            dateAndTime
+        // The two sides share what the centred date leaves, so a long title truncates instead of running under it.
+        HStack(spacing: 10) {
+            title.frame(maxWidth: .infinity, alignment: .leading)
+            dateAndTime.fixedSize()
+            accessory.frame(maxWidth: .infinity, alignment: .trailing)
         }
+        .padding(.horizontal, Self.sideRoom - 12)
     }
 
     @ViewBuilder private var title: some View {
         let name = model.page == .shelf && !model.isShown(.files) ? "Clipboard" : model.page.rawValue
         if !name.isEmpty {
             HStack(spacing: 10) {
-                if model.page == .todo {
-                    (Text("Todo").foregroundColor(.white) + Text("List").foregroundColor(Color(hex: 0x62D17A)))
-                        .font(.system(size: 16, weight: .bold))
-                } else if model.page == .water {
-                    (Text("Water ").foregroundColor(.white) + Text("Reminder").foregroundColor(Color(hex: 0x6EB6FF)))
-                        .font(.system(size: 16, weight: .bold))
-                } else {
-                    Text(name).font(.system(size: 16, weight: .bold)).foregroundStyle(Color.white)
+                Group {
+                    if model.page == .todo {
+                        Text("Todo ").foregroundColor(.white) + Text("list").foregroundColor(Color(hex: 0x62D17A))
+                    } else if model.page == .water {
+                        Text("Water").foregroundColor(Color(hex: 0x6EB6FF))
+                    } else {
+                        Text(name).foregroundColor(.white)
+                    }
                 }
+                .font(.system(size: 16, weight: .bold)).lineLimit(1)
+                // The page name keeps its room; the place beside it truncates first.
+                .layoutPriority(1)
                 placeLabel
             }
         }

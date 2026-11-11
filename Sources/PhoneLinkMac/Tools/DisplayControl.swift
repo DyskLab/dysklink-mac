@@ -146,27 +146,45 @@ enum MonitorMatch {
     /// left out can't be told apart and aren't guessed.
     static func assign(screens: [(id: CGDirectDisplayID, identity: MonitorIdentity)], services: [MonitorIdentity]) -> [CGDirectDisplayID: Int] {
         if screens.count == 1, services.count == 1 { return [screens[0].id: 0] }
-        func candidates(_ screen: MonitorIdentity) -> [Int] {
-            let same = services.indices.filter { index in
-                let service = services[index]
-                guard let vendor = service.vendor, let product = service.product,
-                      vendor == screen.vendor, product == screen.product else { return false }
-                if let a = service.serial, a != 0, let b = screen.serial, b != 0 { return a == b }
-                return true
-            }
-            // A serial that matches exactly wins over services that don't know theirs.
-            let exact = same.filter { services[$0].serial != nil && services[$0].serial != 0 && services[$0].serial == screen.serial }
-            return exact.isEmpty ? same : exact
-        }
         var result: [CGDirectDisplayID: Int] = [:]
-        let options = screens.map { (id: $0.id, choices: candidates($0.identity)) }
+        let options = screens.map { (id: $0.id, choices: candidates($0.identity, services: services)) }
         for option in options where option.choices.count == 1 {
             let index = option.choices[0]
             // Two screens pointing at the one service can't both be right.
             guard options.filter({ $0.choices == [index] }).count == 1 else { continue }
             result[option.id] = index
         }
+        // A single service with exactly one screen that can be it, such as a monitor beside a Sidecar iPad or an
+        // AirPlay or DisplayLink screen (which have no DDC service), is paired by the loop above: the others have
+        // no candidates, so they don't compete for it.
         return result
+    }
+
+    /// The services each screen could be: the same vendor and product, and the serial too when both know it.
+    static func candidates(_ screen: MonitorIdentity, services: [MonitorIdentity]) -> [Int] {
+        let same = services.indices.filter { index in
+            let service = services[index]
+            guard let vendor = service.vendor, let product = service.product,
+                  vendor == screen.vendor, product == screen.product else { return false }
+            if let a = service.serial, a != 0, let b = screen.serial, b != 0 { return a == b }
+            return true
+        }
+        // A serial that matches exactly wins over services that don't know theirs.
+        let exact = same.filter { services[$0].serial != nil && services[$0].serial != 0 && services[$0].serial == screen.serial }
+        return exact.isEmpty ? same : exact
+    }
+
+    /// Screens that some DDC service could belong to but that weren't matched. Screens no service could be, such as
+    /// Sidecar, AirPlay, or DisplayLink, are left out: they're dimmed anyway and nothing is wrong.
+    static func unmatched(screens: [(id: CGDirectDisplayID, identity: MonitorIdentity)], services: [MonitorIdentity],
+                          assigned: [CGDirectDisplayID: Int]) -> Int {
+        guard !services.isEmpty else { return 0 }
+        let free = Set(services.indices).subtracting(assigned.values)
+        // A service that doesn't say what monitor it drives could be any screen's.
+        let unknown = free.contains { services[$0].vendor == nil || services[$0].product == nil }
+        return screens.filter { screen in
+            assigned[screen.id] == nil && (unknown || !free.isDisjoint(with: candidates(screen.identity, services: services)))
+        }.count
     }
 }
 
@@ -400,7 +418,7 @@ final class DisplayControl {
                                                        serial: CGDisplaySerialNumber($0.id)))
             }
             let assigned = MonitorMatch.assign(screens: externals, services: found.map(\.identity))
-            let unmatched = found.isEmpty ? 0 : externals.filter { assigned[$0.id] == nil }.count
+            let unmatched = MonitorMatch.unmatched(screens: externals, services: found.map(\.identity), assigned: assigned)
             var items: [DisplayItem] = []
             var mapped: [CGDirectDisplayID: CFTypeRef] = [:]
             var maximums: [String: Int] = [:]

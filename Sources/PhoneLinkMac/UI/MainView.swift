@@ -104,12 +104,7 @@ struct MainView: View {
         .onTapGesture(perform: action)
     }
 
-    /// A new DyskLink for this Mac, or a connected phone that's behind. Both are shown in Advanced > General.
-    private var hasUpdate: Bool {
-        Shared.updates.available != nil || model.peers.contains {
-            $0.isConnected && !$0.isComputer && Shared.updates.isPhoneBehind(model.phoneAppVersion($0.id))
-        }
-    }
+    private var hasUpdate: Bool { model.hasUpdateWaiting }
 
     private var advancedButton: some View {
         HStack(spacing: 11) {
@@ -174,13 +169,31 @@ struct MainView: View {
     }
 }
 
+extension AppModel {
+    /// A new DyskLink for this Mac, or a connected phone that's behind. Both are shown in Advanced > General.
+    var hasUpdateWaiting: Bool {
+        Shared.updates.available != nil || peers.contains {
+            $0.isConnected && !$0.isComputer && Shared.updates.isPhoneBehind(phoneAppVersion($0.id))
+        }
+    }
+
+    /// Opens the main window at Advanced › General, where the updates card is.
+    func showUpdates() {
+        showsHistory = false
+        showsCare = false
+        showsTools = true
+        AdvancedLayout.shared.category = .general
+        MainWindow.show()
+    }
+}
+
 /// ImageRenderer doesn't draw ScrollView content, so snapshots use a plain view.
 struct OptionalScroll<Content: View>: View {
     let enabled: Bool
     @ViewBuilder var content: Content
 
     var body: some View {
-        if enabled { ScrollView { content } } else { content }
+        if enabled { ScrollView { content } } else { content.frame(maxHeight: .infinity, alignment: .top) }
     }
 }
 
@@ -198,8 +211,16 @@ private struct PeerRow: View {
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text(peer.name).font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                    .foregroundStyle(Theme.textPrimary).lineLimit(1).truncationMode(.middle)
+                // The battery sits in the subtitle so a long name keeps its room next to the badge.
+                HStack(spacing: 0) {
+                    Text(subtitle).foregroundStyle(Theme.textSecondary)
+                    if let percent = peer.info?.batteryPercent, peer.isConnected, peer.isPaired {
+                        Text(" · ").foregroundStyle(Theme.textFaint)
+                        Text("\(percent)%").fontWeight(.bold).foregroundStyle(Theme.batteryColor(percent))
+                    }
+                }
+                .font(.system(size: 11)).lineLimit(1)
             }
             Spacer(minLength: 0)
             if alerts > 0 {
@@ -210,11 +231,8 @@ private struct PeerRow: View {
                 .foregroundStyle(Theme.ink)
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(Theme.mint, in: Capsule())
+                .fixedSize()
                 .help("\(alerts) notifications on \(peer.name)")
-            }
-            if let percent = peer.info?.batteryPercent, peer.isConnected {
-                Text("\(percent)%").font(.system(size: 11.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.batteryColor(percent))
             }
         }
         .padding(9)

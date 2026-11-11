@@ -164,7 +164,9 @@ final class MacCareModel {
         trash(dupSelection) { moved in
             self.dupGroups = self.dupGroups.compactMap { group in
                 let left = group.files.filter { !moved.contains($0.id) }
-                return left.count > 1 ? DuplicateGroup(id: group.id, size: group.size, files: left) : nil
+                // Groups that were all clones stay at nothing to free.
+                return left.count > 1 ? DuplicateGroup(id: group.id, size: group.size, files: left,
+                                                       reclaimable: group.reclaimable == 0 ? 0 : nil) : nil
             }
             self.dupSelected.subtract(moved)
         }

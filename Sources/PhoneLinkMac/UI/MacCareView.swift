@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Mac care: clean up space, find duplicate files, uninstall apps with their leftovers, and manage startup agents.
 struct MacCareView: View {
@@ -63,17 +64,7 @@ struct MacCareView: View {
     private var tabs: some View {
         HStack(spacing: 6) {
             ForEach(MacCareModel.Tab.allCases, id: \.self) { tab in
-                let on = care.tab == tab
-                Button { care.tab = tab } label: {
-                    Label(tab.title, systemImage: tab.icon)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(on ? Theme.textPrimary : Theme.textSecondary)
-                        .padding(.horizontal, 13).padding(.vertical, 8)
-                        .background(on ? Theme.panelRaised : Color.clear, in: Capsule())
-                        .overlay(Capsule().strokeBorder(on ? Theme.mint.opacity(0.4) : Theme.stroke))
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
+                TabPill(icon: tab.icon, title: tab.title, isSelected: care.tab == tab) { care.tab = tab }
             }
             Spacer(minLength: 0)
         }
@@ -352,14 +343,14 @@ struct MacCareView: View {
                         ForEach(days, id: \.day) { day in
                             RoundedRectangle(cornerRadius: 2).fill(Theme.mint.opacity(0.75))
                                 .frame(height: max(4, CGFloat(day.health - low) / CGFloat(max(1, 100 - low)) * 70))
-                                .help("\(day.day): \(day.health)%, \(day.cycles) cycles")
+                                .help("\(LocalFormat.day(day.day)): \(day.health)%, \(day.cycles) cycles")
                         }
                     }
                     .frame(height: 70, alignment: .bottom)
                     HStack {
-                        Text(days.first?.day ?? "").font(.system(size: 10.5)).foregroundStyle(Theme.textSecondary)
+                        Text(days.first.map { LocalFormat.day($0.day) } ?? "").font(.system(size: 10.5)).foregroundStyle(Theme.textSecondary)
                         Spacer()
-                        Text(days.last?.day ?? "").font(.system(size: 10.5)).foregroundStyle(Theme.textSecondary)
+                        Text(days.last.map { LocalFormat.day($0.day) } ?? "").font(.system(size: 10.5)).foregroundStyle(Theme.textSecondary)
                     }
                 }
             }
@@ -412,20 +403,99 @@ struct AnyButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
-/// File icons for the Mac care lists, read once per path instead of on every redraw.
-@MainActor
-enum CareIcons {
-    private static let cache: NSCache<NSString, NSImage> = {
+/// File icons for the Mac care lists, read once per path off the main thread instead of on every redraw.
+/// A path that doesn't exist gets no icon, so the row shows a folder or app symbol instead of a blank document.
+/// The icons live in an `NSCache`, which observation doesn't see, so reading one in `body` never changes observed
+/// state; only `loaded`, bumped when icons arrive, tells the rows to draw again.
+@MainActor @Observable
+final class CareIcons {
+    static let shared = CareIcons()
+    /// Snapshots draw in one pass, so they read icons right away.
+    static var loadsSynchronously = false
+
+    private(set) var loaded = 0
+    @ObservationIgnored private let cache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 600
+        cache.countLimit = 800
         return cache
     }()
+    @ObservationIgnored private var loading = Set<String>()
+    /// Paths that turned out to be gone, so they aren't read again on every redraw.
+    @ObservationIgnored private var missing = Set<String>()
+    @ObservationIgnored private var bumpScheduled = false
 
-    static func icon(_ path: String) -> NSImage {
+    func image(_ path: String) -> NSImage? {
+        _ = loaded
         if let image = cache.object(forKey: path as NSString) { return image }
-        let image = NSWorkspace.shared.icon(forFile: path)
-        cache.setObject(image, forKey: path as NSString)
-        return image
+        guard !loading.contains(path), !missing.contains(path) else { return nil }
+        if Self.loadsSynchronously {
+            store(Self.read(path), for: path)
+            return cache.object(forKey: path as NSString)
+        }
+        loading.insert(path)
+        Task.detached(priority: .utility) {
+            let image = Self.read(path)
+            await MainActor.run {
+                let icons = CareIcons.shared
+                icons.loading.remove(path)
+                icons.store(image, for: path)
+                icons.scheduleBump()
+            }
+        }
+        return nil
+    }
+
+    private func store(_ image: NSImage?, for path: String) {
+        if let image {
+            cache.setObject(image, forKey: path as NSString)
+        } else {
+            if missing.count > 4000 { missing.removeAll() }
+            missing.insert(path)
+        }
+    }
+
+    /// Icons that arrive together redraw the rows once.
+    private func scheduleBump() {
+        guard !bumpScheduled else { return }
+        bumpScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated {
+                let icons = CareIcons.shared
+                icons.bumpScheduled = false
+                icons.loaded &+= 1
+            }
+        }
+    }
+
+    private nonisolated static func read(_ path: String) -> NSImage? {
+        FileManager.default.fileExists(atPath: path) ? NSWorkspace.shared.icon(forFile: path) : nil
+    }
+
+    /// What to show until the icon is read, or when the path is gone.
+    /// Caches are often folders named like "com.spotify.client", so only a known file type counts as a document.
+    static func symbol(for path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ext == "app" { return "app" }
+        if let type = UTType(filenameExtension: ext), !type.isDynamic, !ext.isEmpty { return "doc" }
+        return "folder"
+    }
+}
+
+/// A file's Finder icon, or a symbol while it loads or when the file is gone.
+struct CareIcon: View {
+    let path: String
+    var size: CGFloat = 20
+    var fallback: String?
+
+    var body: some View {
+        if let image = CareIcons.shared.image(path) {
+            Image(nsImage: image).resizable().frame(width: size, height: size)
+        } else {
+            Image(systemName: fallback ?? CareIcons.symbol(for: path))
+                .font(.system(size: size * 0.7, weight: .regular))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: size, height: size)
+        }
     }
 }
 
@@ -467,7 +537,7 @@ private struct CleanGroupCard: View {
                         Text("\(items.count) item\(items.count == 1 ? "" : "s")").font(.system(size: 11)).foregroundStyle(Theme.textFaint)
                     }
                 }
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(showsAll ? items : Array(items.prefix(5))) { item in
                         CareRow(item: item, on: care.cleanSelected.contains(item.id),
                                 toggle: { care.cleanSelected.formSymmetricDifference([item.id]) },
@@ -496,7 +566,7 @@ private struct CareRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Button(action: toggle) { Tick(on: on, enabled: enabled) }.buttonStyle(.plain)
-            Image(nsImage: CareIcons.icon(item.url.path)).resizable().frame(width: 20, height: 20)
+            CareIcon(path: item.url.path, size: 20)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(item.name).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1).truncationMode(.middle)
@@ -554,7 +624,7 @@ private struct AppRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(nsImage: CareIcons.icon(app.url.path)).resizable().frame(width: 32, height: 32)
+            CareIcon(path: app.url.path, size: 32, fallback: "app")
             VStack(alignment: .leading, spacing: 1) {
                 Text(app.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Text(app.version.isEmpty ? app.bundleId : "Version \(app.version)").font(.system(size: 11)).foregroundStyle(Theme.textFaint).lineLimit(1)
@@ -583,7 +653,7 @@ private struct AppUninstallCard: View {
             Card {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 14) {
-                        Image(nsImage: CareIcons.icon(app.url.path)).resizable().frame(width: 52, height: 52)
+                        CareIcon(path: app.url.path, size: 52, fallback: "app")
                         VStack(alignment: .leading, spacing: 3) {
                             Text(app.name).font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.textPrimary)
                             Text([app.version.isEmpty ? nil : "Version \(app.version)", app.bundleId].compactMap { $0 }.joined(separator: " · "))
@@ -629,7 +699,7 @@ private struct AppUninstallCard: View {
                 .background(Theme.amber.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             Card(padding: 10) {
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(care.leftovers) { leftover in
                         CareRow(item: leftover.item, on: care.leftoverSelected.contains(leftover.id),
                                 badge: leftover.byId ? nil : "Same name", badgeColor: Theme.amber,
@@ -656,7 +726,7 @@ private struct StartupRow: View {
         HStack(spacing: 12) {
             Group {
                 if let app = item.appName, let path = item.program.range(of: app + ".app").map({ String(item.program[..<$0.upperBound]) }) {
-                    Image(nsImage: CareIcons.icon(path)).resizable()
+                    CareIcon(path: path, size: 28, fallback: "app")
                 } else {
                     Image(systemName: item.scope == .daemon ? "gearshape.2" : "gearshape").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
                 }

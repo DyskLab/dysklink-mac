@@ -114,7 +114,7 @@ final class NotchModel {
             case .todo: return "Todo list"
             case .water: return "Water reminder"
             case .note: return "Quick note"
-            case .alerts: return "Phone notifications"
+            case .alerts: return "Notifications"
             }
         }
     }

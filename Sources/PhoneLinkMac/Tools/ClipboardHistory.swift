@@ -119,7 +119,7 @@ final class ClipboardHistory {
     }
 
     /// Converts a copied image to PNG, hashes and saves it on a background queue, then adds it.
-    private func addInBackground(_ raw: (data: Data, isPNG: Bool)) {
+    private func addInBackground(_ raw: (data: Data, isPNG: Bool), retried: Bool = false) {
         let folder = imagesFolder
         Self.imageQueue.async {
             guard let data = raw.isPNG ? raw.data : Self.png(fromTIFF: raw.data), data.count <= Self.maxImageBytes else { return }
@@ -135,6 +135,12 @@ final class ClipboardHistory {
                 MainActor.assumeIsolated {
                     if let thumbnail { self.thumbnails.setObject(thumbnail, forKey: name as NSString) }
                     self.prepareDirectory()
+                    // The history may have dropped an older entry with this picture, and its file, while this
+                    // one was on its way; then the file is written again instead of listing a missing picture.
+                    guard FileManager.default.fileExists(atPath: file.path) else {
+                        if !retried { self.addInBackground((data, true), retried: true) }
+                        return
+                    }
                     self.insertImage(name)
                 }
             }
@@ -324,7 +330,11 @@ final class ClipboardHistory {
 
     /// Writes a save that's still waiting, for quitting. Nothing is written when nothing changed.
     func flush() {
-        guard pendingSave != nil else { return }
+        guard pendingSave != nil else {
+            // A save already handed to the queue is still waited for.
+            Self.saveQueue.sync {}
+            return
+        }
         saveNow()
     }
 

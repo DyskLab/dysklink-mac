@@ -357,6 +357,8 @@ final class AppModel {
     @ObservationIgnored private var listener: NWListener?
     @ObservationIgnored private var sessions: [String: PeerSession] = [:]
     @ObservationIgnored private var retained: [ObjectIdentifier: PeerSession] = [:]
+    /// Where each connection that came in is from, by session.
+    @ObservationIgnored private var inboundAddress: [ObjectIdentifier: String] = [:]
     @ObservationIgnored private var records: [String: PairedRecord] = [:]
     @ObservationIgnored private var infos: [String: DeviceInfo] = [:]
     @ObservationIgnored private var lastSeen: [String: Date] = [:]
@@ -365,13 +367,20 @@ final class AppModel {
     @ObservationIgnored private var infoTimer: Timer?
     @ObservationIgnored private var pairingTimeout: Task<Void, Never>?
     @ObservationIgnored private var pairingGuard = PairingGuard()
+    /// A pairing request waiting for the prompt rate limit, by device.
+    @ObservationIgnored private var deferredPairing: String?
     /// One timer per ringing phone, so ringing again restarts it instead of an old one ending the new ring.
     @ObservationIgnored private var ringTasks: [String: Task<Void, Never>] = [:]
     /// When each transfer last updated the UI, so progress is shown about ten times a second.
     @ObservationIgnored private var progressShown: [String: Date] = [:]
     @ObservationIgnored private let clipboard = ClipboardWatcher()
     @ObservationIgnored private var incomingFiles: [String: IncomingFile] = [:]
+    /// Uploads canceled while running. Only running uploads are added, and each is removed when it ends.
     @ObservationIgnored private var cancelledSends: Set<String> = []
+    /// Uploads still reading and sending.
+    @ObservationIgnored private var uploadsRunning: Set<String> = []
+    /// Which device each upload went to, until its `file.result`, so only that device can answer or cancel it.
+    @ObservationIgnored private var outgoingOwners: [String: String] = [:]
     @ObservationIgnored private var incomingContacts: [String: [ContactItem]] = [:]
     @ObservationIgnored private var screenTimeAsked: [String: Date] = [:]
     @ObservationIgnored private let notifier = MacNotifier()
@@ -543,7 +552,38 @@ final class AppModel {
     // MARK: - Connections
 
     private func accept(_ connection: NWConnection) {
-        attach(PeerSession(connection: connection))
+        let session = PeerSession(connection: connection)
+        let address = Self.address(of: connection.endpoint)
+        let unpaired = inboundAddress.compactMap { key, address -> String? in
+            guard let open = retained[key] else { return nil }
+            if let id = open.deviceId, open.hello != nil, records[id] != nil, sessions[id] === open { return nil }
+            return address
+        }
+        guard InboundLimits.admits(address: address, isLoopback: session.isLoopback, unpaired: unpaired) else {
+            print("Refused a connection from \(address): too many devices that aren't paired are connecting")
+            connection.cancel()
+            return
+        }
+        inboundAddress[ObjectIdentifier(session)] = address
+        attach(session)
+        // A connection that doesn't say who it is soon is closed, so idle ones can't hold the slots.
+        DispatchQueue.main.asyncAfter(deadline: .now() + InboundLimits.helloTimeout) { [weak self, weak session] in
+            MainActor.assumeIsolated {
+                guard let self, let session, self.retained[ObjectIdentifier(session)] != nil, session.hello == nil else { return }
+                print("Closed a connection from \(address): no hello within \(Int(InboundLimits.helloTimeout)) s")
+                session.close()
+            }
+        }
+    }
+
+    private static func address(of endpoint: NWEndpoint) -> String {
+        guard case .hostPort(let host, _) = endpoint else { return "\(endpoint)" }
+        switch host {
+        case .ipv4(let address): return "\(address)"
+        case .ipv6(let address): return "\(address)"
+        case .name(let name, _): return name
+        @unknown default: return "\(host)"
+        }
     }
 
     private func attach(_ session: PeerSession) {
@@ -569,6 +609,7 @@ final class AppModel {
 
     private func sessionClosed(_ session: PeerSession) {
         retained[ObjectIdentifier(session)] = nil
+        inboundAddress[ObjectIdentifier(session)] = nil
         for (key, value) in dialing where value === session { dialing[key] = nil }
         guard let id = session.deviceId, sessions[id] === session else { return }
         sessions[id] = nil
@@ -607,12 +648,14 @@ final class AppModel {
         if camera?.peerId == id { stopCamera() }
         cameraRequests.remove(id)
         if macScreens[id] != nil { endMacScreen(id, error: nil) }
-        for index in transfers.indices where transfers[index].peerId == id && transfers[index].status == .active {
-            if transfers[index].outgoing { cancelledSends.insert(transfers[index].id) }
-            transfers[index].status = .failed
-            transfers[index].detail = reason
-            progressShown[transfers[index].id] = nil
+        for transfer in transfers where transfer.peerId == id && transfer.status == .active {
+            if transfer.outgoing, uploadsRunning.contains(transfer.id) { cancelledSends.insert(transfer.id) }
+            // Everything went out but no answer came, so it may or may not have arrived.
+            let unconfirmed = transfer.outgoing && !uploadsRunning.contains(transfer.id) && transfer.transferred >= transfer.size
+            finishTransfer(transfer.id, status: .failed,
+                           detail: unconfirmed ? "\(reason) before the receiver confirmed it" : reason)
         }
+        outgoingOwners = outgoingOwners.filter { $0.value != id || uploadsRunning.contains($0.key) }
     }
 
     // MARK: - This screen on a phone
@@ -753,6 +796,10 @@ final class AppModel {
     private func sendMacScreenFrame(_ data: Data, key: Bool, to id: String) {
         guard let viewer = macScreens[id], let session = sessions[id] else { return }
         if data.count > PhoneLinkProtocol.maxScreenFrameBytes {
+            // Too large to send: a lower bitrate makes the next key frame smaller, so the picture comes back.
+            print("Dropped a \(data.count)-byte screen frame (key=\(key)); lowering the bitrate")
+            viewer.dropped += 1
+            viewer.lowerBitrate()
             viewer.waitsForKey = true
             viewer.encoder.requestKeyFrame()
             return
@@ -780,8 +827,15 @@ final class AppModel {
         viewer.sent += 1
         if viewer.sent == 1 { TestEnv.log("MACSCREEN_FRAME key=\(key) bytes=\(data.count)") }
         // The base64 and JSON are made on the session's queue, straight from the encoder's data.
-        session.sendBase64(type: MessageType.macScreenFrame, field: "video", data: data, after: ",\"keyFrame\":\(key)") { [weak viewer] _ in
-            viewer?.inFlight -= 1
+        session.sendBase64(type: MessageType.macScreenFrame, field: "video", data: data, after: ",\"keyFrame\":\(key)") { [weak viewer] ok in
+            guard let viewer else { return }
+            viewer.inFlight -= 1
+            // A frame that didn't go out breaks the frames after it, so the next one is a key frame, smaller.
+            if !ok, !viewer.waitsForKey {
+                viewer.waitsForKey = true
+                viewer.lowerBitrate()
+                viewer.encoder.requestKeyFrame()
+            }
         }
     }
 
@@ -867,6 +921,19 @@ final class AppModel {
                 beginPairing(with: id, startedByPeer: true)
             case .ignored:
                 return
+            case .deferred(let wait):
+                // Prompts open at most every couple of seconds whichever device asks, so a stream of new
+                // certificates can't keep opening them. One request waits its turn; others in the meantime are dropped.
+                guard deferredPairing == nil else { return }
+                deferredPairing = id
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05) { [weak self, weak session] in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.deferredPairing = nil
+                        guard let session, self.sessions[id] === session else { return }
+                        self.handle(envelope, payload: nil, from: session)
+                    }
+                }
             case .refused(let reason):
                 var reject = Envelope(type: MessageType.pairReject)
                 reject.error = reason
@@ -1932,6 +1999,12 @@ final class AppModel {
         else { return }
         let transferId = UUID().uuidString
         let name = FileNames.sanitize(url.lastPathComponent)
+        uploadsRunning.insert(transferId)
+        outgoingOwners[transferId] = id
+        if outgoingOwners.count > 256 {
+            let active = Set(transfers.filter { $0.status == .active }.map(\.id))
+            outgoingOwners = outgoingOwners.filter { uploadsRunning.contains($0.key) || active.contains($0.key) }
+        }
         // Clipboard pictures aren't listed as files.
         if kind != "clipboard" {
             var outgoing = Transfer(id: transferId, peerId: id, name: name, size: size, outgoing: true)
@@ -1948,6 +2021,9 @@ final class AppModel {
         let failed: @Sendable (String) async -> Void = { [weak self] failure in
             await self?.finishTransfer(transferId, status: .failed, detail: failure)
         }
+        let ended: @Sendable (Bool) async -> Void = { [weak self] ok in
+            await self?.uploadEnded(transferId, ok: ok)
+        }
         Task.detached(priority: .userInitiated) {
             defer { try? handle.close() }
             let failure = await Self.upload(handle, id: transferId, name: name, size: size, kind: kind, session: session,
@@ -1956,7 +2032,14 @@ final class AppModel {
                 session.send(Envelope(type: MessageType.fileCancel, file: FileMessage(id: transferId)))
                 await failed(failure)
             }
+            await ended(failure == nil)
         }
+    }
+
+    private func uploadEnded(_ id: String, ok: Bool) {
+        uploadsRunning.remove(id)
+        cancelledSends.remove(id)
+        if !ok { outgoingOwners[id] = nil }
     }
 
     #if DEBUG
@@ -2055,9 +2138,19 @@ final class AppModel {
                 return
             }
             do {
-                let folder = file.kind == "photo" ? photoFolder(for: id) : file.kind == "gallery" ? galleryFolder(for: id) : downloadFolder
+                // Photos, gallery copies, and scans only come from phones, and a gallery copy only when this Mac
+                // asked for it. Anything else is an ordinary file in Downloads, never opened by itself.
+                let destination = IncomingFileRule.destination(
+                    kind: file.kind, fromPhone: !isComputer(id, session),
+                    wanted: galleryWanted.contains { $0.peerId == id && $0.name == name })
+                let folder: URL
+                switch destination {
+                case .photos: folder = photoFolder(for: id)
+                case .gallery: folder = galleryFolder(for: id)
+                case .scan, .downloads: folder = downloadFolder
+                }
                 let incoming = try IncomingFile(peerId: id, name: name, size: size, folder: folder)
-                incoming.kind = file.kind
+                incoming.kind = destination.kind
                 incomingFiles[file.id] = incoming
                 transfers.insert(Transfer(id: file.id, peerId: id, name: name, size: size, outgoing: false), at: 0)
             } catch {
@@ -2089,16 +2182,19 @@ final class AppModel {
                 self?.finishIncoming(file, item, hash: hash, isSame: isSame, existing: existing, from: id, session: session)
             }
         case MessageType.fileCancel:
-            cancelledSends.insert(file.id)
+            // Only the device an upload goes to can cancel it.
+            if outgoingOwners[file.id] == id, uploadsRunning.contains(file.id) { cancelledSends.insert(file.id) }
             guard let item = incomingFiles[file.id], item.peerId == id else { return }
             incomingFiles[file.id] = nil
             item.abort()
             finishTransfer(file.id, status: .failed, detail: "Canceled by the sender")
         case MessageType.fileResult:
+            guard outgoingOwners[file.id] == id else { return }
+            if !uploadsRunning.contains(file.id) { outgoingOwners[file.id] = nil }
             if file.ok == true {
                 finishTransfer(file.id, status: .done, detail: nil)
             } else {
-                cancelledSends.insert(file.id)
+                if uploadsRunning.contains(file.id) { cancelledSends.insert(file.id) }
                 finishTransfer(file.id, status: .failed, detail: file.error ?? "Rejected by the receiver")
             }
         default:
@@ -2143,7 +2239,8 @@ final class AppModel {
                 updateTransfer(file.id) { $0.location = target }
                 replyFile(file.id, ok: true, error: nil, to: session)
                 finishTransfer(file.id, status: .done, detail: nil)
-                finishGallery(target, action: wanted?.action ?? .open)
+                // Only a copy this Mac asked for is opened or shown.
+                if let wanted { finishGallery(target, action: wanted.action) }
                 return
             }
             let target = FileNames.unique(in: item.folder, name: item.name)

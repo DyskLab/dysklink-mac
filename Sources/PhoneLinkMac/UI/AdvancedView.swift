@@ -60,11 +60,19 @@ struct AdvancedView: View {
                 case .overview:
                     overview
                 case .general:
+                    // A waiting update comes first, since that's what the update badges point at.
+                    let updateFirst = Shared.model.hasUpdateWaiting
+                    if updateFirst {
+                        sectionLabel("UPDATES")
+                        updatesCard
+                    }
                     sectionLabel("START AND MENU BAR")
                     loginCard
                     MenuBarSettings(layout: Shared.menuBar)
-                    sectionLabel("UPDATES")
-                    updatesCard
+                    if !updateFirst {
+                        sectionLabel("UPDATES")
+                        updatesCard
+                    }
                     sectionLabel("ABOUT")
                     supportCard
                 default:
@@ -109,27 +117,10 @@ struct AdvancedView: View {
             ForEach(AdvancedCategory.allCases) { category in
                 let tools = entries.filter { $0.category == category }
                 let on = tools.filter { $0.isOn.wrappedValue }.count
-                let chosen = category == selected
-                Button { AdvancedLayout.shared.category = category } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: category.icon).font(.system(size: 11, weight: .semibold))
-                        if showsLabels || chosen {
-                            Text(category.label).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                        }
-                        if on > 0 {
-                            Text("\(on)").font(.system(size: 10.5, weight: .bold)).monospacedDigit()
-                                .padding(.horizontal, 5).frame(minWidth: 16, minHeight: 16)
-                                .background(chosen ? Theme.ink.opacity(0.18) : Theme.mint.opacity(0.18), in: Capsule())
-                        }
-                    }
-                    .fixedSize()
-                    .foregroundStyle(chosen ? Theme.ink : Theme.textPrimary)
-                    .padding(.horizontal, 11).frame(height: 30)
-                    .background(chosen ? Theme.mint : Theme.panelRaised, in: Capsule())
-                    .contentShape(Capsule())
+                TabPill(icon: category.icon, title: category.label, isSelected: category == selected,
+                        showsTitle: showsLabels, count: on > 0 ? on : nil) {
+                    AdvancedLayout.shared.category = category
                 }
-                .buttonStyle(.plain)
-                .help(category.label)
             }
         }
     }
@@ -305,7 +296,7 @@ struct AdvancedView: View {
                             Text(process.name).lineLimit(1).truncationMode(.middle)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .foregroundStyle(Theme.textPrimary)
-                            Text(String(format: "%.1f%%", process.cpu)).frame(width: 60, alignment: .trailing)
+                            Text("\(LocalFormat.decimal(process.cpu))%").frame(width: 60, alignment: .trailing)
                             Text(Format.bytes(process.memory)).frame(width: 80, alignment: .trailing)
                         }
                         .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
@@ -515,31 +506,49 @@ struct AdvancedView: View {
 
     private var mouseContent: some View {
         let mouse = tools.mouse
+        let found = !mouse.mouseNames.isEmpty
         return VStack(alignment: .leading, spacing: 10) {
-            Text(mouse.mouseNames.isEmpty ? "No external mouse found" : "Found: " + mouse.mouseNames.joined(separator: ", "))
-                .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary)
-            Toggle("Turn off pointer acceleration", isOn: Bindable(mouse).isLinear)
-            HStack(spacing: 10) {
-                Text("Pointer speed")
-                Slider(value: Bindable(mouse).speed, in: 0.25...3)
-                Text(String(format: "%.2g×", mouse.speed)).monospacedDigit().frame(width: 40, alignment: .trailing)
+            HStack(spacing: 6) {
+                Image(systemName: found ? "computermouse.fill" : "computermouse")
+                    .foregroundStyle(found ? Theme.mint : Theme.textFaint)
+                Text(found ? "Found: " + mouse.mouseNames.joined(separator: ", ") : "No external mouse found. These settings apply once one is plugged in.")
+                    .font(.system(size: 12.5, weight: .medium)).foregroundStyle(found ? Theme.textPrimary : Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Toggle("Reverse the wheel", isOn: Bindable(mouse).reverses)
-            Toggle("Scroll a fixed distance per wheel notch", isOn: Bindable(mouse).usesFixedLines)
-            if mouse.usesFixedLines {
-                Stepper("\(mouse.lines) lines per notch", value: Bindable(mouse).lines, in: 1...15)
-            }
-            Text("Modifier + scroll").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                .padding(.top, 4)
-            ForEach(ScrollModifier.allCases) { modifier in
-                Picker(modifier.label, selection: Binding(
-                    get: { mouse.actions[modifier] ?? .standard },
-                    set: { mouse.setAction($0, for: modifier) }
-                )) {
-                    ForEach(ScrollAction.allCases) { Text($0.label).tag($0) }
+            // Without a mouse the controls are dimmed: they still save, and take effect when one is found.
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Turn off pointer acceleration", isOn: Bindable(mouse).isLinear)
+                HStack(spacing: 10) {
+                    Text("Pointer speed")
+                    Slider(value: Bindable(mouse).speed, in: 0.25...3)
+                    Text("\(mouse.speed.formatted(.number.precision(.significantDigits(1...2))))×")
+                        .monospacedDigit().frame(width: 40, alignment: .trailing)
                 }
-                .frame(maxWidth: 420)
+                Toggle("Reverse the wheel", isOn: Bindable(mouse).reverses)
+                Toggle("Scroll a fixed distance per wheel notch", isOn: Bindable(mouse).usesFixedLines)
+                if mouse.usesFixedLines {
+                    Stepper("\(mouse.lines) lines per notch", value: Bindable(mouse).lines, in: 1...15)
+                }
+                Text("Modifier + scroll").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    .padding(.top, 4)
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    ForEach(ScrollModifier.allCases) { modifier in
+                        GridRow {
+                            // The heading already says "+ scroll", so the label column only names the keys.
+                            Text(modifier.label.replacingOccurrences(of: " + scroll", with: "")).lineLimit(1).fixedSize()
+                            Picker("", selection: Binding(
+                                get: { mouse.actions[modifier] ?? .standard },
+                                set: { mouse.setAction($0, for: modifier) }
+                            )) {
+                                ForEach(ScrollAction.allCases) { Text($0.label).tag($0) }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: 300, alignment: .leading)
+                        }
+                    }
+                }
             }
+            .opacity(found ? 1 : 0.5)
             if mouse.needsAccessibility { accessibilityRow("The wheel options need Accessibility.") }
             Text("Your trackpad isn't changed, and the settings go back when you turn this off.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textFaint)
@@ -822,12 +831,17 @@ struct AdvancedView: View {
         let notch = tools.notch.model
         return VStack(alignment: .leading, spacing: 6) {
             Text("Show in the notch").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)], alignment: .leading, spacing: 8) {
+            // Three even columns of one-line labels, so the rows stay lined up.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .leading), count: 3),
+                      alignment: .leading, spacing: 8) {
                 ForEach(NotchModel.Section.allCases) { section in
-                    Toggle(section.label, isOn: Binding(
+                    Toggle(isOn: Binding(
                         get: { notch.isEnabled(section) && notch.hasData(section) },
                         set: { notch.setShown(section, $0) }
-                    ))
+                    )) {
+                        Text(section.label).lineLimit(1).truncationMode(.tail)
+                    }
+                    .help(section.label)
                     .disabled(!notch.hasData(section) || (notch.isShown(section) && !notch.canHide(section)))
                 }
             }
@@ -949,12 +963,12 @@ struct AdvancedView: View {
                     .labelsHidden().pickerStyle(.menu).fixedSize()
                     Text("from")
                     Picker("", selection: settings.fromHour) {
-                        ForEach(WaterSettings.hourChoices.dropLast(), id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                        ForEach(WaterSettings.hourChoices.dropLast(), id: \.self) { Text(LocalFormat.clock(hour: $0)).tag($0) }
                     }
                     .labelsHidden().pickerStyle(.menu).fixedSize()
                     Text("to")
                     Picker("", selection: settings.toHour) {
-                        ForEach(WaterSettings.hourChoices.dropFirst(), id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                        ForEach(WaterSettings.hourChoices.dropFirst(), id: \.self) { Text(LocalFormat.clock(hour: $0)).tag($0) }
                     }
                     .labelsHidden().pickerStyle(.menu).fixedSize()
                 }

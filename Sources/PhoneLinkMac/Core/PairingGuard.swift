@@ -8,6 +8,8 @@ struct PairingGuard {
         case allowed
         /// Dropped without an answer, such as a request repeated too quickly.
         case ignored
+        /// Another device asked moments ago; this one may ask again after this many seconds.
+        case deferred(TimeInterval)
         /// Refused, with the reason for the other device.
         case refused(String)
     }
@@ -30,6 +32,9 @@ struct PairingGuard {
 
     private var peers: [String: PeerState] = [:]
     private var recentWrong: [Date] = []
+    /// The last request any device was allowed, so new certificates can't each start a prompt at once. A pairing
+    /// that worked clears it.
+    private var lastAnyRequest: Date?
     private(set) var globalUntil: Date?
 
     /// The cooldown after the given number of lockouts: 60 s, 120 s, 240 s, ..., at most an hour.
@@ -45,8 +50,22 @@ struct PairingGuard {
         defer { peers[id] = state }
         if let until = state.until, now < until { return .refused(Self.waitText(until.timeIntervalSince(now))) }
         if let last = state.lastRequest, now.timeIntervalSince(last) < Self.requestInterval { return .ignored }
+        if let last = lastAnyRequest, now.timeIntervalSince(last) < Self.requestInterval {
+            return .deferred(Self.requestInterval - now.timeIntervalSince(last))
+        }
         state.lastRequest = now
+        lastAnyRequest = now
+        prune(now: now)
         return .allowed
+    }
+
+    /// Devices with nothing to remember are forgotten, so many throwaway certificates don't pile up.
+    private mutating func prune(now: Date) {
+        guard peers.count > 256 else { return }
+        peers = peers.filter { _, state in
+            state.wrong > 0 || state.lockouts > 0 || (state.until.map { $0 > now } ?? false)
+                || (state.lastRequest.map { now.timeIntervalSince($0) < Self.requestInterval } ?? false)
+        }
     }
 
     /// Counts a wrong code. True when this device, or every device, now has to wait.
@@ -73,6 +92,8 @@ struct PairingGuard {
     /// The right code was typed, so this device starts clean.
     mutating func succeeded(_ id: String) {
         peers[id] = nil
+        // The right code took someone at this Mac, so the next device may ask at once.
+        lastAnyRequest = nil
     }
 
     /// How long this device still has to wait, or nil.
@@ -101,5 +122,49 @@ enum PeerClass {
     static func helloMatches(record: String, hello: String) -> Bool {
         if isComputer(record) || isComputer(hello) { return record == hello }
         return true
+    }
+}
+
+/// Limits on connections that came in and aren't a paired device yet: a few per address and a few in all, and
+/// each has to say hello within `helloTimeout`.
+enum InboundLimits {
+    static let maxUnpaired = 8
+    static let maxUnpairedPerAddress = 2
+    static let helloTimeout: TimeInterval = 10
+
+    /// Whether a new connection from `address` may stay, given the addresses of unpaired connections already open.
+    /// Connections over USB all come from this Mac, so they only count toward the total.
+    static func admits(address: String, isLoopback: Bool, unpaired: [String]) -> Bool {
+        guard unpaired.count < maxUnpaired else { return false }
+        if isLoopback { return true }
+        return unpaired.filter { $0 == address }.count < maxUnpairedPerAddress
+    }
+}
+
+/// Where a file a device offers goes. Photos, gallery copies, and scans come only from phones (by the pairing
+/// record), and a gallery copy only when this Mac asked for that item; anything else is a plain file in Downloads.
+enum IncomingFileRule {
+    enum Destination: Equatable {
+        case photos, gallery, scan, downloads
+
+        /// The kind kept on the incoming file, which decides what happens once it arrives.
+        var kind: String? {
+            switch self {
+            case .photos: "photo"
+            case .gallery: "gallery"
+            case .scan: "scan"
+            case .downloads: nil
+            }
+        }
+    }
+
+    static func destination(kind: String?, fromPhone: Bool, wanted: Bool) -> Destination {
+        guard fromPhone else { return .downloads }
+        switch kind {
+        case "photo": return .photos
+        case "gallery": return wanted ? .gallery : .downloads
+        case "scan": return .scan
+        default: return .downloads
+        }
     }
 }

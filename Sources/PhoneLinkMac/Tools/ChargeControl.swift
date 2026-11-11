@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import IOKit.ps
 import Observation
@@ -136,7 +137,7 @@ extension ChargePolicy {
     static func offBeforeSleep(percent: Int, settings: ChargeSettings, calibration: CalibrationPhase,
                                reason: ChargeReason, topUp: Bool, adapterOff: Bool) -> Bool {
         guard settings.limiter, calibration == .off, !topUp, !adapterOff, reason == .normal || reason == .limit else { return false }
-        return percent >= settings.limit - settings.gap
+        return percent >= settings.limit
     }
 }
 
@@ -191,7 +192,50 @@ enum ChargeHelper {
         return FileManager.default.isExecutableFile(atPath: beside) ? beside : nil
     }
 
-    static func installScript(helper: String, user: String) -> String {
+    /// A user name that can go into the sudo rule as it is.
+    static func isPlainUserName(_ user: String) -> Bool {
+        guard let first = user.unicodeScalars.first, user.count <= 64, first != "-" else { return false }
+        return user.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0)) }
+    }
+
+    /// The code requirement the helper must meet: signed by the same team as this app, or by the same certificate
+    /// when it has no team (a self-made signing certificate). Nil for an ad-hoc signed or unsigned copy.
+    static func requirement(team: String?, leafSHA1: String?) -> String? {
+        if let team, !team.isEmpty, team.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.alphanumerics.contains($0) }) {
+            return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+        }
+        if let leafSHA1, leafSHA1.count == 40, leafSHA1.allSatisfy(\.isHexDigit) {
+            return "certificate leaf = H\"\(leafSHA1.lowercased())\""
+        }
+        return nil
+    }
+
+    /// The requirement for this running copy of DyskLink.
+    static var ownRequirement: String? {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let info = info as? [String: Any]
+        else { return nil }
+        let team = info[kSecCodeInfoTeamIdentifier as String] as? String
+        let leaf = (info[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
+            .map { Insecure.SHA1.hash(data: SecCertificateCopyData($0) as Data).map { String(format: "%02x", $0) }.joined() }
+        return requirement(team: team, leafSHA1: leaf)
+    }
+
+    /// SHA-256 of a file, hex.
+    static func sha256(ofFile path: String) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The install script. It takes the helper's path, its SHA-256, and the code requirement (or "") as `$1`, `$2`,
+    /// and `$3`, never pasted into the script text, and checks a copy in a folder only root can write before
+    /// installing that copy, so the file can't be swapped between the check and the install.
+    static func installScript(user: String) -> String {
         let lowPower = PowerSettings.LowPower.allCases.map { "\(path) lowpower \($0.rawValue)" }.joined(separator: ", ")
         let rule = "\(user) ALL=(root) NOPASSWD: \(path) adapter on, \(path) adapter off, \(path) status, \(lowPower)"
         let plist = """
@@ -206,6 +250,9 @@ enum ChargeHelper {
         """
         return """
         set -e
+        helper_src="$1"
+        helper_sha="$2"
+        helper_req="$3"
         # The helper runs as root, so every folder above it must be root's alone. Otherwise someone could swap it.
         for dir in /usr/local /usr/local/libexec; do
             if [ -L "$dir" ]; then echo "DyskLink can't install the charging helper: $dir is a symbolic link." >&2; exit 3; fi
@@ -221,12 +268,24 @@ enum ChargeHelper {
         mkdir -p /usr/local/libexec
         chown root:wheel /usr/local/libexec
         chmod 755 /usr/local/libexec
-        install -o root -g wheel -m 755 '\(helper)' '\(path)'
-        tmp=$(mktemp)
+        work=$(/usr/bin/mktemp -d /private/var/tmp/dysklink-install.XXXXXX)
+        trap '/bin/rm -rf "${work:?}"' EXIT
+        /bin/chmod 700 "$work"
+        /bin/cp "$helper_src" "$work/helper"
+        /usr/sbin/chown root:wheel "$work/helper"
+        /bin/chmod 755 "$work/helper"
+        sum=$(/usr/bin/shasum -a 256 "$work/helper" | /usr/bin/awk '{print $1}')
+        if [ "$sum" != "$helper_sha" ]; then echo "DyskLink can't install the charging helper: it changed while installing." >&2; exit 4; fi
+        if [ -n "$helper_req" ]; then
+            if ! /usr/bin/codesign --verify --strict -R="$helper_req" "$work/helper"; then
+                echo "DyskLink can't install the charging helper: it isn't signed like DyskLink." >&2; exit 4
+            fi
+        fi
+        install -o root -g wheel -m 755 "$work/helper" '\(path)'
+        tmp="$work/sudoers"
         printf '%s\\n' '\(rule)' > "$tmp"
         /usr/sbin/visudo -cf "$tmp"
         install -o root -g wheel -m 440 "$tmp" '\(sudoers)'
-        rm -f "$tmp"
         cat > '\(daemon)' <<'PLIST'
         \(plist)
         PLIST
@@ -243,13 +302,22 @@ enum ChargeHelper {
     rm -f '\(daemon)' '\(sudoers)' '\(path)'
     """
 
+    /// The AppleScript that runs its first argument as a root shell script, the others becoming `$1`, `$2`, ….
+    /// Everything goes in as arguments with `quoted form of`, so nothing in them is read as code, and no script
+    /// file that another process could change sits on disk.
+    static let adminRunner = """
+    on run argv
+        set command to "/bin/sh -c " & quoted form of (item 1 of argv) & " dysklink"
+        repeat with index from 2 to count of argv
+            set command to command & " " & quoted form of (item index of argv)
+        end repeat
+        do shell script command with administrator privileges
+    end run
+    """
+
     /// Runs a script as root after macOS asks for an admin password.
-    static func runAsAdmin(_ script: String) throws {
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("dysklink-power-\(UUID().uuidString).sh")
-        try script.write(to: file, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: file) }
-        let source = "do shell script \"/bin/sh \" & quoted form of \"\(file.path)\" with administrator privileges"
-        try Shell.run("/usr/bin/osascript", ["-e", source])
+    static func runAsAdmin(_ script: String, arguments: [String] = []) throws {
+        try Shell.run("/usr/bin/osascript", ["-e", adminRunner, script] + arguments)
     }
 
     /// Switches the charger input through sudo, without a password thanks to the installed rule.
@@ -407,8 +475,25 @@ final class ChargeControl {
         }
     }
 
+    /// Changing `topUp` or `calibration` inside a check runs `tick()` again from their `didSet`; that runs once
+    /// more after the current check instead of in the middle of it.
+    private var ticking = false
+    private var tickAgain = false
+
     func tick() {
         guard available else { return }
+        if ticking { tickAgain = true; return }
+        ticking = true
+        defer { ticking = false }
+        var rounds = 0
+        repeat {
+            tickAgain = false
+            tickOnce()
+            rounds += 1
+        } while tickAgain && rounds < 3
+    }
+
+    private func tickOnce() {
         defer { updateTimer() }
         installed = ChargeHelper.isInstalled
         adapterOff = Adapter.isOff ?? false
@@ -455,7 +540,10 @@ final class ChargeControl {
         guard installed else { return }
         if ChargePolicy.offBeforeSleep(percent: Battery.now().percent, settings: settings, calibration: calibration,
                                        reason: reason, topUp: topUp, adapterOff: adapterOff) {
-            try? ChargeHelper.setAdapter(on: false)
+            // Asleep there's no time to wait for a background switch; it's only counted when it worked.
+            guard (try? ChargeHelper.setAdapter(on: false)) != nil else { return }
+            adapterOff = Adapter.isOff ?? true
+            lastSwitch = Date()
             reason = .limit
         }
     }
@@ -470,9 +558,15 @@ final class ChargeControl {
         guard let helper = ChargeHelper.bundled else { error = "The helper is missing from this copy of DyskLink."; return }
         busy = true
         error = nil
-        let script = ChargeHelper.installScript(helper: helper, user: NSUserName())
+        let user = NSUserName()
+        guard ChargeHelper.isPlainUserName(user) else { busy = false; error = "This account's name can't be used in the sudo rule."; return }
+        let script = ChargeHelper.installScript(user: user)
         Task.detached {
-            let failure: String? = { do { try ChargeHelper.runAsAdmin(script); return nil } catch { return error.localizedDescription } }()
+            let failure: String? = {
+                guard let sum = ChargeHelper.sha256(ofFile: helper) else { return "The helper in this copy of DyskLink can't be read." }
+                do { try ChargeHelper.runAsAdmin(script, arguments: [helper, sum, ChargeHelper.ownRequirement ?? ""]); return nil }
+                catch { return error.localizedDescription }
+            }()
             await MainActor.run {
                 let control = ChargeControl.shared
                 control.busy = false

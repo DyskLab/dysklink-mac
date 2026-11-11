@@ -35,30 +35,12 @@ struct PeerTabBar: View {
     }
 
     private func bar(compact: Bool) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             ForEach(PeerTab.allCases) { tab in
-                let open = model.peerTab == tab
-                Button { model.peerTab = tab } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: tab.icon).font(.system(size: 11))
-                        if !compact || open {
-                            Text(tab.title).font(.system(size: 12.5, weight: .semibold)).fixedSize()
-                        }
-                        if let count = badge(tab), count > 0 {
-                            Text("\(count)").font(.system(size: 10.5, weight: .bold)).foregroundStyle(Theme.ink)
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(Theme.mint, in: Capsule())
-                                .fixedSize()
-                        }
-                    }
-                    .foregroundStyle(open ? Theme.textPrimary : Theme.textSecondary)
-                    .padding(.horizontal, compact && !open ? 10 : 9).padding(.vertical, 8)
-                    .background(open ? Theme.panelRaised : Color.clear, in: Capsule())
-                    .overlay(Capsule().strokeBorder(open ? Theme.mint.opacity(0.35) : Color.clear))
-                    .contentShape(Capsule())
+                TabPill(icon: tab.icon, title: tab.title, isSelected: model.peerTab == tab,
+                        showsTitle: !compact, count: badge(tab), highlightsCount: true) {
+                    model.peerTab = tab
                 }
-                .buttonStyle(.plain)
-                .help(tab.title)
             }
             Spacer(minLength: 0)
         }
@@ -555,10 +537,17 @@ struct FilesTab: View {
             }
             .buttonStyle(SecondaryButtonStyle())
             .disabled(data.folder.isEmpty || !peer.isConnected)
-            Text(data.folder.isEmpty ? "Internal storage" : data.folder)
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                .lineLimit(1).truncationMode(.head)
-            Spacer()
+            // Where you are, shown as a path rather than a button: Up and Reload are the actions.
+            HStack(spacing: 6) {
+                Image(systemName: "folder").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.textSecondary)
+                Text((["Internal storage"] + data.folder.split(separator: "/").map(String.init)).joined(separator: " › "))
+                    .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1).truncationMode(.head)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.ink.opacity(0.45), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .help(data.folder.isEmpty ? "Internal storage" : data.folder)
             Button("Reload") { model.openPhoneFolder(data.folder, on: peer.id) }
                 .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
                 .disabled(!peer.isConnected)
@@ -592,10 +581,10 @@ struct FilesTab: View {
         let path = folder.isEmpty ? entry.name : "\(folder)/\(entry.name)"
         let isSelected = model.phone(peer.id).selectedFiles.contains(entry.name)
         return HStack(spacing: 10) {
-            if !entry.isDirectory {
-                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(isSelected ? Theme.mint : Theme.textFaint).frame(width: 16)
-            }
+            // Folders keep the checkbox's room, so their icons line up with the files'.
+            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                .foregroundStyle(isSelected ? Theme.mint : Theme.textFaint).frame(width: 16)
+                .opacity(entry.isDirectory ? 0 : 1)
             Image(systemName: entry.isDirectory ? "folder.fill" : "doc.fill")
                 .foregroundStyle(entry.isDirectory ? Theme.mint : Theme.textSecondary).frame(width: 20)
             VStack(alignment: .leading, spacing: 1) {
@@ -605,7 +594,9 @@ struct FilesTab: View {
                 Text(detail(entry)).font(.system(size: 11)).foregroundStyle(Theme.textFaint)
             }
             Spacer()
-            if !entry.isDirectory && peer.isConnected {
+            if entry.isDirectory {
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.textFaint)
+            } else if peer.isConnected {
                 Button("Download") { model.downloadPhoneFile(path, on: peer.id) }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
             }

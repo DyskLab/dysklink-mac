@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 enum Snapshots {
     static func render(to folder: String) {
+        CareIcons.loadsSynchronously = true
         let phone = Peer(
             id: "demo-1", name: "Sample Phone", platform: "android", model: "Android 36",
             isPaired: true, isConnected: true,
@@ -258,6 +259,7 @@ enum Snapshots {
         places.note.set("Alamat kantor: Jl. Merdeka No. 10, Lt. 3\nBeli: telur, susu, roti tawar\nWi-Fi tamu: dysk-guest / 4821-merdeka", at: Date().addingTimeInterval(-300))
         places.page = .note
         write(notchFrame(places), "33b-notch-note", folder)
+        places.page = .water
         places.water.showsSettings = true
         write(notchFrame(places), "34-notch-water-settings", folder)
         places.water.showsSettings = false
@@ -292,12 +294,12 @@ enum Snapshots {
         tools.notch.model.note.set("Wi-Fi tamu: dysk-guest / 4821-merdeka\nBeli: telur, susu")
         tools.isAwakeOn = true
         menu.setShown(.awake, true)
-        write(MenuBarView(model: AppModel(), layout: menu, tools: tools).fixedSize(), "50-menubar-custom", folder)
+        write(MenuBarView(model: AppModel(), layout: menu, tools: tools, scrolls: false).fixedSize(), "50-menubar-custom", folder)
         write(MenuBarSettings(layout: menu).frame(width: 640).padding(20).background(Theme.ink).preferredColorScheme(.dark),
               "51-menubar-settings", folder)
         // Every part turned off.
         MenuBarLayout.Section.allCases.forEach { menu.setShown($0, false) }
-        write(MenuBarView(model: AppModel(), layout: menu, tools: tools).fixedSize(), "52-menubar-empty", folder)
+        write(MenuBarView(model: AppModel(), layout: menu, tools: tools, scrolls: false).fixedSize(), "52-menubar-empty", folder)
         menuDefaults.removePersistentDomain(forName: suite)
     }
 
@@ -393,7 +395,7 @@ enum Snapshots {
         batteryParts.forEach { batteryMenu.setShown($0, true) }
         batteryMenu.setShown(.devices, false)
         batteryMenu.setShown(.login, false)
-        write(MenuBarView(model: AppModel(), layout: batteryMenu, tools: Shared.tools).fixedSize(), "53-menubar-battery", folder)
+        write(MenuBarView(model: AppModel(), layout: batteryMenu, tools: Shared.tools, scrolls: false).fixedSize(), "53-menubar-battery", folder)
         let chosen = apps.apps[0]
         apps.chosenApp = chosen
         apps.leftovers = [

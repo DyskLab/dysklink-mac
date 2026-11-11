@@ -199,16 +199,22 @@ struct DuplicateGroup: Identifiable, Hashable, Sendable {
     let size: Int64
     /// Oldest first, which is the copy kept by default.
     let files: [CareItem]
-    var wasted: Int64 { size * Int64(files.count - 1) }
+    /// What removing every copy but the first frees, when known. APFS clones share their blocks, so removing one
+    /// frees little or nothing.
+    var reclaimable: Int64? = nil
+    var wasted: Int64 { reclaimable ?? size * Int64(files.count - 1) }
 }
 
 enum Duplicates {
     /// Same size, then the same first 64 KB, then the same SHA-256 of the whole file.
     static func find(in folders: [URL], minimum: Int64, limit: Int = 300_000,
                      progress: (Int) -> Void = { _ in }, cancelled: () -> Bool = { false }) -> [DuplicateGroup] {
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey, .creationDateKey, .fileResourceIdentifierKey]
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey, .creationDateKey, .fileResourceIdentifierKey,
+                                      .volumeIdentifierKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
         var bySize: [Int64: [URL]] = [:]
         var seen = Set<String>()
+        /// Hard links are one file under several names, so only the first name counts.
+        var seenFiles = Set<NSArray>()
         var count = 0
         for folder in folders {
             guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: keys,
@@ -218,8 +224,14 @@ enum Duplicates {
                 if cancelled() { return [] }
                 guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true, v.isSymbolicLink != true,
                       let size = v.fileSize, Int64(size) >= minimum else { continue }
+                // iCloud files that are only in the cloud would be downloaded just to be compared.
+                if !isLocal(v) { continue }
                 // A folder picked twice, or one inside another, must not make a file its own copy.
                 if !seen.insert(url.standardizedFileURL.resolvingSymlinksInPath().path).inserted { continue }
+                if let file = v.fileResourceIdentifier as? NSObject {
+                    let key: NSArray = [(v.volumeIdentifier as? NSObject) ?? NSNull(), file]
+                    if !seenFiles.insert(key).inserted { continue }
+                }
                 bySize[Int64(size), default: []].append(url)
                 count += 1
                 if count % 500 == 0 { progress(count) }
@@ -239,11 +251,35 @@ enum Duplicates {
                         return CareItem(url: url, size: size, detail: "", date: created)
                     }
                     .sorted { ($0.date ?? .distantFuture, $0.url.path) < ($1.date ?? .distantFuture, $1.url.path) }
-                    groups.append(DuplicateGroup(id: digest, size: size, files: items))
+                    let freed = items.dropFirst().reduce(Int64(0)) { $0 + min(size, privateSize($1.url) ?? size) }
+                    groups.append(DuplicateGroup(id: digest, size: size, files: items, reclaimable: freed))
                 }
             }
         }
         return groups.sorted { $0.wasted > $1.wasted }
+    }
+
+    /// False for an iCloud file whose newest version isn't on this Mac.
+    static func isLocal(_ values: URLResourceValues) -> Bool {
+        guard values.isUbiquitousItem == true else { return true }
+        return values.ubiquitousItemDownloadingStatus == .current
+    }
+
+    /// Bytes only this file uses, which removing it frees: about its size for an ordinary file, nearly nothing for
+    /// an APFS clone whose blocks are shared. Nil when the file system doesn't say.
+    static func privateSize(_ url: URL) -> Int64? {
+        var list = attrlist()
+        list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        list.forkattr = attrgroup_t(ATTR_CMNEXT_PRIVATESIZE)
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let result = buffer.withUnsafeMutableBytes { raw in
+            getattrlist(url.path, &list, raw.baseAddress, raw.count, UInt32(FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW))
+        }
+        guard result == 0 else { return nil }
+        return buffer.withUnsafeBytes { raw -> Int64? in
+            guard raw.load(as: UInt32.self) >= 12 else { return nil }
+            return max(0, raw.loadUnaligned(fromByteOffset: 4, as: Int64.self))
+        }
     }
 
     static func hash(_ url: URL, upTo limit: Int? = nil) -> String? {
@@ -293,7 +329,7 @@ enum Uninstaller {
     static func read(_ url: URL) -> InstalledApp? {
         let info = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
         guard let bundleId = info?["CFBundleIdentifier"] as? String, !bundleId.isEmpty,
-              !bundleId.hasPrefix("com.apple."), bundleId != MacCare.ownBundleId else { return nil }
+              !isAppleBundleId(bundleId), bundleId != MacCare.ownBundleId else { return nil }
         let name = (info?["CFBundleDisplayName"] as? String) ?? (info?["CFBundleName"] as? String) ?? url.deletingPathExtension().lastPathComponent
         let version = (info?["CFBundleShortVersionString"] as? String) ?? ""
         return InstalledApp(url: url, name: url.deletingPathExtension().lastPathComponent.isEmpty ? name : url.deletingPathExtension().lastPathComponent,
@@ -305,6 +341,12 @@ enum Uninstaller {
         /// Found by the app's ID, so it surely belongs to it. Matches by name only are left for you to tick.
         let byId: Bool
         var id: String { item.id }
+    }
+
+    /// Apple's own IDs in any case, and `com.apple` itself.
+    static func isAppleBundleId(_ id: String) -> Bool {
+        let lower = id.lowercased()
+        return lower == "com.apple" || lower.hasPrefix("com.apple.")
     }
 
     /// A bundle ID that's safe to put into a Library path: letters, digits, dots and dashes, never `.` or `..`.
@@ -351,9 +393,14 @@ enum Uninstaller {
                 ("Saved Application State", id + ".savedState"), ("Logs", id), ("HTTPStorages", id),
                 ("HTTPStorages", id + ".binarycookies"), ("WebKit", id), ("Cookies", id + ".binarycookies"), ("Application Scripts", id),
             ]
-            byId = named.map { folder, name in
+            // The folder's real entries are compared by exact name. A path made from the ID would also find
+            // another app's folder that differs only in case, since the disk ignores case.
+            var listings: [String: [URL]] = [:]
+            for (folder, name) in named {
                 let parent = library.appendingPathComponent(folder)
-                return (parent.appendingPathComponent(name), parent)
+                let entries = listings[folder] ?? MacCare.children(of: parent)
+                listings[folder] = entries
+                byId += entries.filter { $0.lastPathComponent == name }.map { ($0, parent) }
             }
             func scan(_ folder: String, _ keep: (String) -> Bool) {
                 let parent = library.appendingPathComponent(folder)

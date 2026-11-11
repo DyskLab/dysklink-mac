@@ -58,18 +58,18 @@ struct ChargeControlCard: View {
     private var controls: some View {
         let settings = $control.settings
         VStack(alignment: .leading, spacing: 11) {
-            row("battery.25percent", "Charge Limit",
+            row("battery.25percent", "Charge limit",
                 help: "Charging stops here and the Mac runs on battery. Set 100% to turn it off. To hold the battery exactly at 80–100%, the Charge Limit in System Settings › Battery works too.") {
                 NumberBox(value: Binding(get: { control.settings.limiter ? control.settings.limit : 100 },
                                          set: { control.settings.limit = min(max($0, 20), 100); control.settings.limiter = $0 < 100 }),
                           range: ChargeSettings.limitRange)
                 Text("%").font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textSecondary)
             }
-            row("bolt.badge.automatic", "Discharge on Power",
-                help: "Runs the Mac on battery with the charger plugged in until the battery is down to the Charge Limit, then the limit takes over. With no limit, it runs on battery until the battery is low.") {
+            row("bolt.badge.automatic", "Discharge on power",
+                help: "Runs the Mac on battery with the charger plugged in until the battery is down to the charge limit, then the limit takes over. With no limit, it runs on battery until the battery is low.") {
                 Switch(isOn: settings.discharge)
             }
-            row("paperplane", "Sailing Mode",
+            row("paperplane", "Sailing mode",
                 help: "After the limit is reached, the Mac stays on battery until it falls by the difference, so the battery isn't topped up a little all the time.") {
                 Switch(isOn: settings.sailing)
             }
@@ -99,7 +99,7 @@ struct ChargeControlCard: View {
             }
         }
         VStack(alignment: .leading, spacing: 11) {
-            row("flame", "Heat Protection", help: "Pauses charging while the battery is warmer than the limit, and goes on once it's two degrees cooler.") {
+            row("flame", "Heat protection", help: "Pauses charging while the battery is warmer than the limit, and goes on once it's two degrees cooler.") {
                 Switch(isOn: settings.heat)
             }
             panel {
@@ -111,18 +111,18 @@ struct ChargeControlCard: View {
                     } else {
                         Text("Heat protection deactivated.")
                     }
-                    Text("Current: \(control.temperature.map { String(format: "%.1f °C", $0) } ?? "—")")
+                    Text("Current: \(control.temperature.map(LocalFormat.celsius) ?? "—")")
                         .foregroundStyle((control.temperature ?? 0) >= control.settings.heatLimit ? Theme.coral : Theme.textPrimary)
                 }
             }
         }
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                label("slider.vertical.3", "Calibration Mode",
+                label("slider.vertical.3", "Calibration mode",
                       help: "Runs the battery down on the charger, fills it, and rests at full, so the percentage shown is accurate again. Keep the charger plugged in the whole time. Needs the Charge Limit in System Settings at 100%.")
                 Spacer(minLength: 8)
                 Button { control.calibration == .off ? control.startCalibration() : control.cancelCalibration() } label: {
-                    Label(control.calibration == .off ? "Start Calibration" : "Stop Calibration",
+                    Label(control.calibration == .off ? "Start calibration" : "Stop calibration",
                           systemImage: control.calibration == .off ? "play" : "stop")
                         .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.textPrimary)
                         .padding(.horizontal, 14).frame(height: 28)
@@ -136,7 +136,7 @@ struct ChargeControlCard: View {
                     Text(warning).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
-                Text("Last Calibration: \(control.lastCalibration.map { $0.formatted(date: .numeric, time: .omitted) } ?? "never")")
+                Text("Last calibration: \(control.lastCalibration.map { $0.formatted(date: .abbreviated, time: .omitted) } ?? "never")")
                     .font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary)
                 Image(systemName: "checkmark.seal").font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary)
             }
@@ -261,6 +261,7 @@ private struct CalibrationSteps: View {
                 VStack(spacing: 6) {
                     BatteryGlyph(kind: step.kind).opacity(current == nil || current == step.id ? 1 : 0.4)
                     Text(step.text).font(.system(size: 11)).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
                         .foregroundStyle(current == step.id ? Theme.mint : Theme.textPrimary)
                 }
                 .frame(maxWidth: .infinity)

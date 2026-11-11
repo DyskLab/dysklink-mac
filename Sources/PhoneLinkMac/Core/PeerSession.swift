@@ -50,6 +50,14 @@ final class PeerSession: @unchecked Sendable {
     /// The other side didn't answer a ping in time, so bulk data goes out without waiting for pongs.
     private var windowOff = false
     private var windowCheckScheduled = false
+    /// Bulk bytes a second the other side confirmed, smoothed; sets how long a pong may take.
+    private var ackRate: Double = 0
+    private var lastAck: (at: DispatchTime, mark: Int)?
+    /// Bytes of messages handed to the main thread that it hasn't handled yet. Reading stops above
+    /// `receiveHighWater` and goes on once they are handled, so a fast sender can't fill memory.
+    private var deliveredPending = 0
+    private var receivePaused = false
+    static let receiveHighWater = 8 * 1024 * 1024
     #if DEBUG
     private let readMegabytesPerSecond = TestEnv.value("PHONELINK_TEST_READ_MBPS").flatMap(Double.init) ?? 0
     #endif
@@ -62,8 +70,16 @@ final class PeerSession: @unchecked Sendable {
     static let bulkWindow = 512 * 1024
     /// A ping goes out after this many bulk bytes.
     static let bulkMarkEvery = 128 * 1024
-    /// Seconds without a pong before the window is given up for this connection.
+    /// Seconds without a pong before the window is given up for this connection, at the least; a slow link that
+    /// still confirms data gets as long as a window takes at its measured speed, up to `maxPongTimeout`.
     static let pongTimeout = 3.0
+    static let maxPongTimeout = 30.0
+
+    /// How long a pong may take when the other side confirms `rate` bulk bytes a second.
+    static func pongTimeout(rate: Double) -> Double {
+        guard rate > 0 else { return pongTimeout }
+        return min(maxPongTimeout, max(pongTimeout, 2 * Double(bulkWindow) / rate + 1))
+    }
     private static let pingFrame = PeerSession.rawFrame(Data(#"{"type":"ping"}"#.utf8))
 
     init(connection: NWConnection) {
@@ -236,13 +252,18 @@ final class PeerSession: @unchecked Sendable {
                 if error != nil { self.closeOnQueue() } else { self.pumpBulk() }
             })
             item.handed(true)
-            if !windowOff, bulkSent - bulkMarked >= Self.bulkMarkEvery {
-                bulkMarked = bulkSent
-                pings.append((DispatchTime.now(), bulkSent, nil))
-                write(Self.pingFrame, done: nil)
+            // With the window off, one mark at a time stays out, so a pong that comes late can turn it back on.
+            if bulkSent - bulkMarked >= Self.bulkMarkEvery, !windowOff || !pings.contains(where: { $0.mark != nil }) {
+                sendMark()
             }
         }
         if !closed, !bulk.isEmpty, !windowOff, bulkSent - bulkAcked >= Self.bulkWindow { scheduleWindowCheck() }
+    }
+
+    private func sendMark() {
+        bulkMarked = bulkSent
+        pings.append((DispatchTime.now(), bulkSent, nil))
+        write(Self.pingFrame, done: nil)
     }
 
     /// While bulk data waits for a pong, checks that pongs still come.
@@ -254,8 +275,8 @@ final class PeerSession: @unchecked Sendable {
             self.windowCheckScheduled = false
             guard !self.closed else { return }
             if let oldest = self.pings.first(where: { $0.mark != nil }),
-               Double(DispatchTime.now().uptimeNanoseconds - oldest.at.uptimeNanoseconds) / 1e9 > Self.pongTimeout {
-                print("No pong within \(Self.pongTimeout) s; bulk data now goes out without waiting")
+               Double(DispatchTime.now().uptimeNanoseconds - oldest.at.uptimeNanoseconds) / 1e9 > Self.pongTimeout(rate: self.ackRate) {
+                print("No pong within \(Self.pongTimeout(rate: self.ackRate)) s; bulk data now goes out without waiting")
                 self.windowOff = true
             }
             self.pumpBulk()
@@ -265,7 +286,21 @@ final class PeerSession: @unchecked Sendable {
     private func pongArrived() {
         guard !pings.isEmpty else { return }
         let ping = pings.removeFirst()
-        if let mark = ping.mark { bulkAcked = max(bulkAcked, mark) }
+        if let mark = ping.mark {
+            let now = DispatchTime.now()
+            if let lastAck, mark > lastAck.mark, now.uptimeNanoseconds > lastAck.at.uptimeNanoseconds {
+                let rate = Double(mark - lastAck.mark) / (Double(now.uptimeNanoseconds - lastAck.at.uptimeNanoseconds) / 1e9)
+                ackRate = ackRate == 0 ? rate : ackRate * 0.7 + rate * 0.3
+            }
+            lastAck = (now, mark)
+            bulkAcked = max(bulkAcked, mark)
+            if windowOff {
+                // A late pong: the other side does answer, so the window comes back, starting from a fresh mark.
+                print("A late pong came; bulk data waits for pongs again")
+                windowOff = false
+                if bulkSent > bulkAcked { sendMark() }
+            }
+        }
         ping.answer?(Double(DispatchTime.now().uptimeNanoseconds - ping.at.uptimeNanoseconds) / 1e6)
         pumpBulk()
     }
@@ -337,10 +372,15 @@ final class PeerSession: @unchecked Sendable {
             guard error == nil, let data, data.count == length else { return self.closeOnQueue() }
             if let (envelope, payload) = self.decode(data) {
                 if envelope.type == MessageType.pong { self.pongArrived() }
+                self.deliveredPending += length
                 DispatchQueue.main.async {
-                    guard !self.reportedClose else { return }
-                    self.onMessage?(self, envelope, payload)
+                    if !self.reportedClose { self.onMessage?(self, envelope, payload) }
+                    self.queue.async { self.handled(length) }
                 }
+            }
+            if self.deliveredPending > Self.receiveHighWater {
+                self.receivePaused = true
+                return
             }
             #if DEBUG
             // Tests only: reads no faster than this many megabytes a second, like a slow Wi-Fi network.
@@ -352,6 +392,14 @@ final class PeerSession: @unchecked Sendable {
             #endif
             self.receiveHeader()
         }
+    }
+
+    /// The main thread handled a message of `length` bytes; reading goes on once most of the backlog is gone.
+    private func handled(_ length: Int) {
+        deliveredPending -= length
+        guard receivePaused, deliveredPending <= Self.receiveHighWater / 2, !closed else { return }
+        receivePaused = false
+        receiveHeader()
     }
 
     /// The message, with the large base64 payloads decoded here instead of on the main thread.

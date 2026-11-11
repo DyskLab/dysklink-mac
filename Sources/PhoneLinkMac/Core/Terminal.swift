@@ -30,6 +30,11 @@ final class PtyShell: @unchecked Sendable {
     private var flushScheduled = false
     private var inFlight = 0
     private var readerPaused = false
+    /// Typed input the shell hasn't taken yet; a write source drains it so the queue never waits on a full pty.
+    private var pendingInput = Data()
+    private var writer: DispatchSourceWrite?
+    private var writerActive = false
+    static let maxPendingInput = 1 << 20
     static let batchDelay: DispatchTimeInterval = .milliseconds(16)
     static let batchBytes = 32 * 1024
     static let maxInFlight = 4
@@ -48,7 +53,27 @@ final class PtyShell: @unchecked Sendable {
         // Releasing a suspended dispatch source crashes, so a paused reader is resumed first.
         if readerPaused { reader?.resume() }
         reader?.cancel()
+        if let writer, !writerActive { writer.resume() }
+        writer?.cancel()
         exitWatch?.cancel()
+        if master >= 0 { close(master) }
+        // A shell still running is hung up and reaped later, so it doesn't stay behind as a zombie.
+        if pid > 0, !finished {
+            let child = pid
+            kill(-child, SIGHUP)
+            kill(child, SIGHUP)
+            var status: Int32 = 0
+            if waitpid(child, &status, WNOHANG) == 0 {
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                    var status: Int32 = 0
+                    if waitpid(child, &status, WNOHANG) == 0 {
+                        kill(-child, SIGKILL)
+                        kill(child, SIGKILL)
+                        waitpid(child, &status, 0)
+                    }
+                }
+            }
+        }
     }
 
     /// The user's own shell as a login shell, starting in the home folder.
@@ -162,6 +187,10 @@ final class PtyShell: @unchecked Sendable {
         // A suspended source must be resumed before it can be canceled.
         if readerPaused { readerPaused = false; reader?.resume() }
         reader?.cancel()
+        if let writer, !writerActive { writer.resume() }
+        writerActive = true
+        writer?.cancel()
+        pendingInput = Data()
         exitWatch?.cancel()
         if master >= 0 { close(master) }
         master = -1
@@ -172,18 +201,38 @@ final class PtyShell: @unchecked Sendable {
     func write(_ data: Data) {
         queue.async { [self] in
             guard master >= 0, !finished else { return }
-            data.withUnsafeBytes { raw in
-                var offset = 0
-                while offset < raw.count {
-                    let written = Darwin.write(master, raw.baseAddress! + offset, raw.count - offset)
-                    if written <= 0 {
-                        if errno == EAGAIN { usleep(2_000); continue }
-                        break
-                    }
-                    offset += written
-                }
-            }
+            // Input beyond what a stuck shell can ever take is dropped rather than held in memory.
+            guard pendingInput.count + data.count <= Self.maxPendingInput else { return }
+            pendingInput.append(data)
+            drainInput()
         }
+    }
+
+    /// Writes what the pty takes now; the rest waits for the write source, so the queue (and hang-up, resize,
+    /// and reaping behind it) never blocks on a shell that isn't reading.
+    private func drainInput() {
+        guard master >= 0, !finished else { return }
+        while !pendingInput.isEmpty {
+            let written = pendingInput.withUnsafeBytes { raw in Darwin.write(master, raw.baseAddress!, raw.count) }
+            if written > 0 {
+                pendingInput.removeFirst(written)
+                continue
+            }
+            if written < 0, errno == EINTR { continue }
+            if written < 0, errno == EAGAIN { break }
+            pendingInput = Data()
+            break
+        }
+        if pendingInput.isEmpty {
+            if writerActive { writerActive = false; writer?.suspend() }
+            return
+        }
+        if writer == nil {
+            let source = DispatchSource.makeWriteSource(fileDescriptor: master, queue: queue)
+            source.setEventHandler { [weak self] in self?.drainInput() }
+            writer = source
+        }
+        if !writerActive { writerActive = true; writer?.resume() }
     }
 
     func resize(cols: Int, rows: Int) {

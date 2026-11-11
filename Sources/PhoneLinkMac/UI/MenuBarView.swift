@@ -13,13 +13,21 @@ struct MenuBarView: View {
     let model: AppModel
     var layout: MenuBarLayout = Shared.menuBar
     var tools: ToolsModel = Shared.tools
+    /// Snapshots draw the menu without its scroll view, which renders empty off screen.
+    var scrolls = true
 
     private typealias Section = MenuBarLayout.Section
 
     var body: some View {
         // Taller than the screen, the menu scrolls instead of running off the bottom.
+        if scrolls { scrolling } else {
+            content.background(Theme.panel).preferredColorScheme(.dark)
+        }
+    }
+
+    private var scrolling: some View {
         let room = max(240, (NSScreen.main?.visibleFrame.height ?? 900) - 12)
-        ScrollView(.vertical) {
+        return ScrollView(.vertical) {
             content
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { MenuMetrics.shared.contentHeight = $0 }
         }
@@ -31,7 +39,7 @@ struct MenuBarView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var width: CGFloat { layout.visible.filter(isAvailable).contains(.powerFlow) ? 340 : 280 }
+    private var width: CGFloat { layout.visible.filter(isAvailable).contains(.powerFlow) ? 390 : 330 }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -43,11 +51,13 @@ struct MenuBarView: View {
                     Circle().fill(Theme.mint).frame(width: 8, height: 8)
                 }
             }
-            if let release = Shared.updates.available {
-                Button { Shared.updates.download() } label: {
-                    row("arrow.down.circle.fill", "Download DyskLink \(release.version)", tint: Theme.mint)
+            if model.hasUpdateWaiting {
+                // Updates live in one card in Advanced › General, so the menu points there.
+                Button { model.showUpdates() } label: {
+                    row("arrow.down.circle.fill", updateTitle, tint: Theme.mint)
                 }
                 .buttonStyle(.plain)
+                .help("Open Advanced › General › Updates")
             }
             let sections = layout.visible.filter(isAvailable)
             ForEach(sections) { section in
@@ -69,6 +79,11 @@ struct MenuBarView: View {
         // The battery part has a power diagram and charts, so the menu is a little wider with it.
         .frame(width: width)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var updateTitle: String {
+        if let release = Shared.updates.available { return "DyskLink \(release.version) is available" }
+        return "A phone needs a DyskLink update"
     }
 
     private var connectedPhones: [Peer] { model.peers.filter { $0.isPaired && $0.isConnected && !$0.isComputer } }
@@ -350,9 +365,14 @@ struct MenuBatterySection: View {
         }
         // The menu's window stays alive while it's closed, so onAppear and onDisappear don't follow it.
         // Sampling follows the window being on screen instead.
-        .background(WindowVisibility { visible in
-            if visible { power.begin() } else { power.end() }
-        })
+        .background {
+            // Snapshots can't draw this AppKit view, and don't sample anyway.
+            if !power.previewing {
+                WindowVisibility { visible in
+                    if visible { power.begin() } else { power.end() }
+                }
+            }
+        }
     }
 }
 
@@ -399,11 +419,28 @@ struct WindowVisibility: NSViewRepresentable {
                 })
             }
             check(closing: false)
+            // The menu's window doesn't always post a notification when it's shown, so this also looks once a second.
+            // It only reads a flag, so it costs next to nothing.
+            timer?.invalidate()
+            let poll = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.check(closing: false) }
+            }
+            poll.tolerance = 0.5
+            RunLoop.main.add(poll, forMode: .common)
+            timer = poll
+        }
+
+        private var timer: Timer?
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            super.viewWillMove(toWindow: newWindow)
+            if newWindow == nil { timer?.invalidate(); timer = nil }
         }
 
         private func check(closing: Bool) {
             guard let window, !closing else { return set(false) }
-            set(window.isVisible && window.occlusionState.contains(.visible))
+            // Ordered in is what counts: a menu window can report itself occluded while it's open.
+            set(window.isVisible)
         }
 
         func set(_ visible: Bool) {
@@ -414,6 +451,7 @@ struct WindowVisibility: NSViewRepresentable {
 
         deinit {
             observers.forEach(NotificationCenter.default.removeObserver)
+            timer?.invalidate()
         }
     }
 }

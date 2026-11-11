@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import CryptoKit
+import ImageIO
 import Foundation
 import UserNotifications
 
@@ -502,13 +503,38 @@ final class ClipboardWatcher {
     /// Bumped on each copy, so a picture still being encoded is dropped when something newer was copied.
     private var imageGeneration = 0
 
-    /// Puts a picture from another computer on the clipboard, as PNG and TIFF so every app can paste it.
+    nonisolated static let maxImagePixels = 100_000_000
+    nonisolated static let maxTIFFPixels = 8_000_000
+
+    /// Width × height from the image's header, without decoding it; nil when it isn't an image.
+    nonisolated static func pixelCount(_ data: Data) -> Int? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              width > 0, height > 0
+        else { return nil }
+        let (product, overflow) = width.multipliedReportingOverflow(by: height)
+        return overflow ? Int.max : product
+    }
+
+    /// Puts a picture from another computer on the clipboard, as PNG (and TIFF when small) so every app can paste it.
     func setImage(_ png: Data) {
         imageGeneration += 1
         let generation = imageGeneration
         Self.imageQueue.async { [weak self] in
+            // The size is read from the header first, so a small file can't decode into gigabytes. A TIFF copy,
+            // for apps that only paste TIFF, is made only for pictures small enough that it stays modest.
+            // Data no image reader understands can't be decoded into anything large either, so it goes on as it
+            // came, without a TIFF copy.
+            let pixels = Self.pixelCount(png)
+            if let pixels, pixels > Self.maxImagePixels {
+                print("Ignored a clipboard picture of \(pixels / 1_000_000) megapixels, over \(Self.maxImagePixels / 1_000_000)")
+                return
+            }
             let hash = Self.hash(png)
-            let tiff = NSBitmapImageRep(data: png)?.tiffRepresentation
+            let tiff = (pixels ?? .max) <= Self.maxTIFFPixels ? NSBitmapImageRep(data: png)?.tiffRepresentation : nil
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, generation == self.imageGeneration else { return }

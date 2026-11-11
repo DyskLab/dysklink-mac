@@ -108,7 +108,7 @@ struct WaterPanel: View {
                                     .frame(width: 12, height: max(6, 64 * Double(ml) / Double(top)))
                             }
                         }
-                        Text(slot % 3 == 0 ? String(format: "%02d", slot) : " ")
+                        Text(slot % 3 == 0 ? LocalFormat.hour(slot) : " ")
                             .font(.system(size: 10).monospacedDigit()).foregroundStyle(Color.white.opacity(0.5))
                             .lineLimit(1).fixedSize()
                     }

@@ -39,11 +39,13 @@ final class PowerMonitor {
     /// Apps above this energy impact are worth showing.
     static let significantImpact = 10.0
 
-    private var users = 0
+    private(set) var users = 0
+    /// True while something on screen shows live power, such as the open menu.
+    var isLive: Bool { users > 0 }
     private var timer: Timer?
     private var tick = 0
     private let gpu = GPUEnergy()
-    private var previewing = false
+    private(set) var previewing = false
 
     func begin() {
         users += 1
