@@ -23,7 +23,7 @@ You need both to use the phone features. The Advanced tools work on the Mac alon
 > DyskLink is in early development, so expect rough edges.
 
 ## Download
-You need macOS 15 or later on Apple Silicon.
+You need macOS 15 or later on Apple Silicon. Which features work on which Mac is in [COMPATIBILITY.md](COMPATIBILITY.md) (in Indonesian).
 
 1. Download `DyskLink-mac-arm64.zip` from the [latest release](https://github.com/DyskLab/dysklink-mac/releases/latest),
    unzip it, and move **DyskLink** to Applications.
