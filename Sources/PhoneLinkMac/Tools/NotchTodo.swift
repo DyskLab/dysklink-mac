@@ -75,6 +75,11 @@ struct TodoPanel: View {
                 .foregroundStyle(task.isDone ? Color.white.opacity(0.6) : Color.white)
             Spacer(minLength: 0)
             if todos.isEditing {
+                Button { TodoQuickAdd.show(todos, renaming: task) } label: {
+                    Image(systemName: "pencil.circle.fill").font(.system(size: 17)).foregroundStyle(Color.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .help("Rename")
                 Button { todos.delete(task.id) } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 17)).foregroundStyle(Color(hex: 0xFF6F7D))
                 }

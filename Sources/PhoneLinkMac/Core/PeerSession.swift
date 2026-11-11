@@ -22,6 +22,17 @@ final class PeerSession {
         self.connection = connection
     }
 
+    /// Connections from this Mac itself come through `adb reverse`, which means a USB cable.
+    var isLoopback: Bool {
+        guard case .hostPort(let host, _) = connection.endpoint else { return false }
+        switch host {
+        case .ipv4(let address): return address.isLoopback
+        case .ipv6(let address): return address.isLoopback || "\(address)".hasSuffix("127.0.0.1")
+        case .name(let name, _): return name == "localhost"
+        @unknown default: return false
+        }
+    }
+
     func start() {
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -48,6 +59,19 @@ final class PeerSession {
         frame.append(payload)
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             if error != nil { self?.close() }
+        })
+    }
+
+    /** Calls back on the main queue once the network took the data, so senders can tell when it falls behind. */
+    func send(_ envelope: Envelope, completion: @escaping (Bool) -> Void) {
+        guard !closed, let payload = try? encoder.encode(envelope) else { return completion(false) }
+        var frame = Data()
+        var length = UInt32(payload.count).bigEndian
+        withUnsafeBytes(of: &length) { frame.append(contentsOf: $0) }
+        frame.append(payload)
+        connection.send(content: frame, completion: .contentProcessed { [weak self] error in
+            if error != nil { self?.close() }
+            completion(error == nil)
         })
     }
 

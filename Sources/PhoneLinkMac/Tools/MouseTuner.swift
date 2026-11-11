@@ -3,7 +3,7 @@ import IOKit.hid
 import Observation
 import os
 
-private let log = Logger(subsystem: "id.phonelink.mac", category: "Mouse")
+private let log = Logger(subsystem: "id.dysklink.mac", category: "Mouse")
 
 enum ScrollModifier: String, CaseIterable, Identifiable {
     case command, shift, option, control, optionControl

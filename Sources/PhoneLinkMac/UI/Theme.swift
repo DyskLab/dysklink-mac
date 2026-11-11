@@ -77,6 +77,27 @@ struct StatusPill: View {
     }
 }
 
+/// Settings use a switch instead of a checkbox: the label on the left and a small mint switch on the right.
+/// With `fills` off, the switch sits right after the label, for toolbars.
+struct DyskSwitchStyle: ToggleStyle {
+    var fills = true
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 10) {
+            configuration.label
+                .fixedSize(horizontal: false, vertical: true)
+            if fills { Spacer(minLength: 12) }
+            Toggle("", isOn: configuration.$isOn)
+                .labelsHidden().toggleStyle(.switch).controlSize(.small).tint(Theme.mint)
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+extension ToggleStyle where Self == DyskSwitchStyle {
+    static var dyskSwitch: DyskSwitchStyle { DyskSwitchStyle() }
+}
+
 struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

@@ -26,8 +26,11 @@ struct BatteryRing: View {
                 }
                 HStack(spacing: 4) {
                     if charging { Image(systemName: "bolt.fill").foregroundStyle(color) }
-                    Text(charging ? "Charging" : "Battery")
-                        .foregroundStyle(Theme.textSecondary)
+                    // A small ring has no room for the word.
+                    if size >= 100 {
+                        Text(charging ? "Charging" : "Battery")
+                            .foregroundStyle(Theme.textSecondary)
+                    }
                 }
                 .font(.system(size: 11.5, weight: .medium))
             }
@@ -119,5 +122,117 @@ struct LogoMark: View {
             LogoGlyph().fill(Color.white).frame(width: size, height: size)
         }
         .frame(width: size, height: size)
+    }
+}
+
+/// A text field that fits the dark theme, instead of the light system field.
+struct DyskField: View {
+    var icon: String?
+    let placeholder: String
+    @Binding var text: String
+    var monospaced = false
+    var multiline = false
+    var clearable = true
+    var onSubmit: () -> Void = {}
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(alignment: multiline ? .bottom : .center, spacing: 8) {
+            if let icon {
+                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(focused ? Theme.mint : Theme.textFaint)
+                    .padding(.bottom, multiline ? 2 : 0)
+            }
+            Group {
+                if multiline {
+                    TextField("", text: $text, prompt: prompt, axis: .vertical).lineLimit(1...6)
+                } else {
+                    TextField("", text: $text, prompt: prompt)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(monospaced ? .system(size: 12.5, design: .monospaced) : .system(size: 13))
+            .foregroundStyle(Theme.textPrimary)
+            .tint(Theme.mint)
+            .focused($focused)
+            .onSubmit(onSubmit)
+            if clearable, !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+                }
+                .buttonStyle(.plain).help("Clear")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(Theme.ink.opacity(0.65), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .strokeBorder(focused ? Theme.mint.opacity(0.55) : Theme.stroke, lineWidth: focused ? 1.5 : 1))
+        .contentShape(Rectangle())
+        .onTapGesture { focused = true }
+        .animation(.easeOut(duration: 0.12), value: focused)
+    }
+
+    private var prompt: Text { Text(placeholder).foregroundStyle(Theme.textFaint) }
+}
+
+/// A round avatar with initials, colored by the name so the same person keeps the same color.
+struct Avatar: View {
+    let name: String
+    var size: CGFloat = 34
+
+    private static let colors = [Theme.mint, Theme.violet, Theme.amber, Theme.coral, Color(hex: 0x5CB8FF), Color(hex: 0xFF9F5C)]
+
+    var body: some View {
+        let color = Self.colors[abs(name.unicodeScalars.reduce(0) { $0 &* 31 &+ Int($1.value) }) % Self.colors.count]
+        Text(PhoneSearch.initials(name))
+            .font(.system(size: size * 0.38, weight: .bold, design: .rounded))
+            .foregroundStyle(color)
+            .frame(width: size, height: size)
+            .background(color.opacity(0.14), in: Circle())
+    }
+}
+
+/// A small uppercase heading above a group of cards.
+struct SectionLabel: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 10.5, weight: .bold)).tracking(1.2).foregroundStyle(Theme.textFaint)
+            .padding(.top, 6).padding(.leading, 2)
+    }
+}
+
+/// A small icon button, for actions inside rows.
+struct IconButton: View {
+    let icon: String
+    let help: String
+    var tint: Color = Theme.textSecondary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(tint)
+                .frame(width: 28, height: 28)
+                .background(Theme.panelRaised, in: Circle())
+                .overlay(Circle().strokeBorder(Theme.stroke))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+extension View {
+    /// The dark field look for a TextField that DyskField can't wrap, such as a number field.
+    func dyskFieldLook(compact: Bool = false) -> some View {
+        self.textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .foregroundStyle(Theme.textPrimary)
+            .padding(.horizontal, compact ? 8 : 12).padding(.vertical, compact ? 5 : 9)
+            .background(Theme.ink.opacity(0.65), in: RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous).strokeBorder(Theme.stroke))
     }
 }

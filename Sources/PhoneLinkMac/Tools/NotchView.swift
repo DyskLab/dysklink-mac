@@ -4,9 +4,11 @@ import SwiftUI
 struct NotchView: View {
     let model: NotchModel
     let tools: ToolsModel
-    var phoneProvider: () -> [Peer] = { Shared.model.peers.filter { $0.isPaired && $0.isConnected } }
+    var phoneProvider: () -> [Peer] = { Shared.model.peers.filter { $0.isPaired && $0.isConnected && !$0.isMac } }
     var transfersProvider: () -> [Transfer] = { Shared.model.transfers }
     var sendFile: (URL, String) -> Void = { Shared.model.sendFile($0, to: $1) }
+    var alertsProvider: () -> [PhoneAlert] = { Shared.model.phoneAlerts }
+    var dismissAlert: (PhoneAlert) -> Void = { Shared.model.dismissNotification($0.item.key, on: $0.peerId) }
     /// Snapshots turn scrolling off, because they can't draw a scroll view.
     var scrolls = true
 
@@ -15,7 +17,8 @@ struct NotchView: View {
     /// Room on each side for the page arrows.
     private static let sideRoom: CGFloat = 44
 
-    private var hasStatus: Bool { model.peek != nil || model.isFocusing }
+    private var hasStatus: Bool { model.peek != nil || model.isFocusing || model.isWatched }
+    static let noticeWidth: CGFloat = 400
 
     private var shape: NotchShape {
         if model.isOpen {
@@ -23,6 +26,10 @@ struct NotchView: View {
                               bottomRadius: 30, topRadius: 8)
         }
         let base = model.closedSize
+        if model.hasBanner {
+            return NotchShape(width: max(base.width, Self.noticeWidth), height: model.closedHeight(statusHeight: Self.statusHeight),
+                              bottomRadius: 22, topRadius: 0)
+        }
         return NotchShape(width: base.width, height: model.closedHeight(statusHeight: Self.statusHeight),
                           bottomRadius: hasStatus ? 12 : (model.hasNotch ? 9 : 3), topRadius: 0)
     }
@@ -31,8 +38,19 @@ struct NotchView: View {
         ZStack(alignment: .top) {
             shape.fill(Color.black)
             statusRow
-                .opacity(!model.isOpen && hasStatus ? 1 : 0)
+                .opacity(!model.isOpen && hasStatus && !model.hasBanner ? 1 : 0)
                 .padding(.top, model.closedSize.height)
+            if let code = model.code, !model.isOpen {
+                CodeBanner(notice: code) { model.copyCode() } close: { model.hideCode() }
+                    .frame(width: max(model.closedSize.width, Self.noticeWidth) - 28, height: NotchModel.noticeHeight)
+                    .padding(.top, model.closedSize.height)
+                    .transition(.opacity)
+            } else if let notice = model.notice, !model.isOpen {
+                NoticeBanner(alert: notice)
+                    .frame(width: max(model.closedSize.width, Self.noticeWidth) - 28, height: NotchModel.noticeHeight)
+                    .padding(.top, model.closedSize.height)
+                    .transition(.opacity)
+            }
             // The open content is always laid out, so opening only has to reveal it.
             openContent
                 .frame(width: model.openSize.width - 28, height: model.openSize.height, alignment: .top)
@@ -48,6 +66,12 @@ struct NotchView: View {
         HStack(spacing: 6) {
             if let peek = model.peek {
                 Text(peek).lineLimit(1)
+            } else if model.isWatched {
+                Image(systemName: model.screenWatchers.isEmpty ? "headphones" : "eye.fill").foregroundStyle(Theme.coral)
+                Text(model.watchText).lineLimit(1).minimumScaleFactor(0.8)
+                if model.isFocusing {
+                    Text(model.focusText).monospacedDigit().foregroundStyle(Theme.violet)
+                }
             } else if model.isFocusing {
                 Image(systemName: model.pomodoro.phase == .focus ? "timer" : "cup.and.saucer.fill")
                     .foregroundStyle(model.pomodoro.phase == .focus ? Theme.violet : Theme.mint)
@@ -92,6 +116,8 @@ struct NotchView: View {
         case .weather: weatherPage
         case .todo: todoPage
         case .water: waterPage
+        case .note: notePage
+        case .alerts: alertsPage
         }
     }
 
@@ -220,9 +246,24 @@ struct NotchView: View {
     private var music: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let playing = model.nowPlaying
+            HStack(spacing: 14) {
+                player(playing, at: context.date)
+                    .frame(width: model.lyrics.isOn ? 230 : nil)
+                if model.lyrics.isOn {
+                    Rectangle().fill(Color.white.opacity(0.14)).frame(width: 1).padding(.vertical, 4)
+                    LyricsColumn(lyrics: model.lyrics, elapsed: playing?.elapsed(at: context.date))
+                }
+            }
+            .task(id: "\(model.lyrics.isOn)|\(playing?.title ?? "")|\(playing?.artist ?? "")") {
+                await model.lyrics.load(for: playing)
+            }
+        }
+    }
+
+    private func player(_ playing: NowPlaying?, at date: Date) -> some View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 14) {
-                    Artwork()
+                    Artwork(image: model.currentArtwork)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(playing?.title ?? "Nothing playing")
                             .font(.system(size: 17, weight: .bold)).foregroundStyle(Color.white).lineLimit(1)
@@ -231,7 +272,7 @@ struct NotchView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                if let playing, let duration = playing.duration, let elapsed = playing.elapsed(at: context.date) {
+                if let playing, let duration = playing.duration, let elapsed = playing.elapsed(at: date) {
                     HStack(spacing: 10) {
                         Text(NotchModel.clock(elapsed)).monospacedDigit()
                         ProgressBar(value: duration > 0 ? elapsed / duration : 0, color: Color.white)
@@ -245,10 +286,15 @@ struct NotchView: View {
                     mediaButton(playing?.isPlaying == true ? "pause.fill" : "play.fill", label: "Play or pause",
                                 action: "play_pause", size: 19)
                     mediaButton("forward.fill", label: "Next", action: "next", size: 15)
+                    Button { model.lyrics.isOn.toggle() } label: {
+                        Image(systemName: "quote.bubble\(model.lyrics.isOn ? ".fill" : "")").font(.system(size: 14))
+                            .foregroundStyle(Color.white.opacity(model.lyrics.isOn ? 1 : 0.6)).frame(width: 32, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.lyrics.isOn ? "Hide lyrics" : "Show lyrics from lrclib.net")
                 }
                 .frame(maxWidth: .infinity)
             }
-        }
     }
 
     private func mediaButton(_ icon: String, label: String, action: String, size: CGFloat) -> some View {
@@ -582,13 +628,21 @@ private struct AudioBars: View {
     }
 }
 
-/// Stands in for album art, which Music and Spotify don't announce.
+/// Album art or a video thumbnail when it could be read, otherwise a stand-in.
 private struct Artwork: View {
+    var image: NSImage?
+
     var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(LinearGradient(colors: [Theme.violet, Theme.mint.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay(Image(systemName: "music.note").font(.system(size: 24, weight: .semibold)).foregroundStyle(Color.white))
-            .frame(width: 58, height: 58)
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                LinearGradient(colors: [Theme.violet, Theme.mint.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .overlay(Image(systemName: "music.note").font(.system(size: 24, weight: .semibold)).foregroundStyle(Color.white))
+            }
+        }
+        .frame(width: 58, height: 58)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 

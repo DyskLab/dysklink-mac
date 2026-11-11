@@ -3,7 +3,7 @@ import Observation
 import os
 import SwiftUI
 
-private let log = Logger(subsystem: "id.phonelink.mac", category: "Windows")
+private let log = Logger(subsystem: "id.dysklink.mac", category: "Windows")
 
 final class ClickThroughHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -134,11 +134,31 @@ final class DockWatcher {
 @MainActor
 @Observable
 final class WindowPreviews {
+    enum SwitcherLayout: String, CaseIterable, Identifiable {
+        case previews, icons
+        var id: String { rawValue }
+        var label: String { self == .previews ? "Window pictures" : "App icons only" }
+    }
+
+    enum Style: String, CaseIterable, Identifiable {
+        case standard, glass
+        var id: String { rawValue }
+        var label: String { self == .standard ? "Default" : "Liquid Glass" }
+    }
+
     var usesSwitcher: Bool {
         didSet {
             UserDefaults.standard.set(usesSwitcher, forKey: "windows.switcher")
             applySwitcher()
         }
+    }
+    /// What Option + Tab shows for each window.
+    var switcherLayout: SwitcherLayout {
+        didSet { UserDefaults.standard.set(switcherLayout.rawValue, forKey: "windows.switcherLayout") }
+    }
+    /// Only the look changes. Liquid Glass needs macOS 26, and falls back to a frosted panel before it.
+    var style: Style {
+        didSet { UserDefaults.standard.set(style.rawValue, forKey: "windows.style") }
     }
     private(set) var shortcutProblem: String?
 
@@ -164,6 +184,8 @@ final class WindowPreviews {
 
     init() {
         usesSwitcher = UserDefaults.standard.object(forKey: "windows.switcher") as? Bool ?? true
+        switcherLayout = UserDefaults.standard.string(forKey: "windows.switcherLayout").flatMap(SwitcherLayout.init) ?? .previews
+        style = UserDefaults.standard.string(forKey: "windows.style").flatMap(Style.init) ?? .standard
     }
 
     func start() {
@@ -277,7 +299,7 @@ final class WindowPreviews {
     }
 
     private func makeDockPanel() -> NSPanel {
-        let view = WindowStrip(state: dockState, cardWidth: Self.dockWidth, isSwitcher: false) { [weak self] window in
+        let view = WindowStrip(state: dockState, cardWidth: Self.dockWidth, isSwitcher: false, style: style) { [weak self] window in
             WindowCatalog.focus(window)
             self?.closeDock()
         } onClose: { [weak self] window in
@@ -365,15 +387,18 @@ final class WindowPreviews {
         switcherState.images = [:]
         // The first press goes to the window behind the current one, as Command + Tab does for apps.
         switcherState.selection = windows.count > 1 ? 1 : 0
-        let view = WindowStrip(state: switcherState, cardWidth: Self.switcherWidth, isSwitcher: true) { [weak self] window in
+        let iconsOnly = switcherLayout == .icons
+        let cardWidth = iconsOnly ? WindowStrip.iconCardWidth : Self.switcherWidth
+        let view = WindowStrip(state: switcherState, cardWidth: cardWidth, isSwitcher: true,
+                               iconsOnly: iconsOnly, style: style) { [weak self] window in
             self?.switcherState.selection = self?.switcherState.windows.firstIndex { $0.id == window.id } ?? 0
             self?.closeSwitcher(commit: true)
         } onClose: { _ in } onMinimize: { _ in }
         let hosting = ClickThroughHostingView(rootView: AnyView(view))
         let panel = Self.makePanel()
         panel.contentView = hosting
-        let size = WindowStrip.size(count: windows.count, cardWidth: Self.switcherWidth, isSwitcher: true,
-                                    showsHint: !CGPreflightScreenCaptureAccess())
+        let size = WindowStrip.size(count: windows.count, cardWidth: cardWidth, isSwitcher: true,
+                                    showsHint: !iconsOnly && !CGPreflightScreenCaptureAccess(), iconsOnly: iconsOnly)
         let mouse = NSEvent.mouseLocation
         let area = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         panel.setFrame(CGRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
@@ -389,6 +414,7 @@ final class WindowPreviews {
         }
         RunLoop.main.add(timer, forMode: .common)
         switcherTimer = timer
+        guard !iconsOnly else { return }
         let state = switcherState
         let ids = windows.filter { !$0.isMinimized }.map(\.id)
         Task {
@@ -425,11 +451,16 @@ struct WindowStrip: View {
     let state: WindowListState
     let cardWidth: CGFloat
     let isSwitcher: Bool
+    var iconsOnly = false
+    var style = WindowPreviews.Style.standard
     let onChoose: (WindowItem) -> Void
     let onClose: (WindowItem) -> Void
     let onMinimize: (WindowItem) -> Void
 
     private static let perRow = 4
+    private static let iconsPerRow = 6
+    static let iconCardWidth: CGFloat = 96
+    private static let iconSize: CGFloat = 56
     private static let outerPadding: CGFloat = 12
     private static let cardPadding: CGFloat = 7
     private static let spacing: CGFloat = 10
@@ -440,10 +471,12 @@ struct WindowStrip: View {
     private static func thumbnailHeight(_ width: CGFloat) -> CGFloat { (width * 0.62).rounded() }
 
     /// Every part has a fixed size, so long titles can't stretch a card.
-    static func size(count: Int, cardWidth: CGFloat, isSwitcher: Bool, showsHint: Bool) -> CGSize {
+    static func size(count: Int, cardWidth: CGFloat, isSwitcher: Bool, showsHint: Bool, iconsOnly: Bool = false) -> CGSize {
+        let perRow = iconsOnly ? iconsPerRow : perRow
         let columns = CGFloat(min(max(count, 1), perRow))
         let rows = CGFloat((max(count, 1) + perRow - 1) / perRow)
-        let card = CGSize(width: cardWidth + cardPadding * 2, height: titleHeight + 7 + thumbnailHeight(cardWidth) + cardPadding * 2)
+        let cardHeight = iconsOnly ? iconSize + 7 + titleHeight * 2 : titleHeight + 7 + thumbnailHeight(cardWidth)
+        let card = CGSize(width: cardWidth + cardPadding * 2, height: cardHeight + cardPadding * 2)
         var height = rows * card.height + (rows - 1) * spacing + outerPadding * 2
         if !isSwitcher { height += headerHeight + spacing }
         if showsHint { height += hintHeight + spacing }
@@ -451,8 +484,9 @@ struct WindowStrip: View {
     }
 
     var body: some View {
-        let rows = stride(from: 0, to: state.windows.count, by: Self.perRow).map { start in
-            Array(state.windows.indices[start..<min(start + Self.perRow, state.windows.count)])
+        let perRow = iconsOnly ? Self.iconsPerRow : Self.perRow
+        let rows = stride(from: 0, to: state.windows.count, by: perRow).map { start in
+            Array(state.windows.indices[start..<min(start + perRow, state.windows.count)])
         }
         VStack(alignment: .leading, spacing: Self.spacing) {
             if !isSwitcher {
@@ -461,10 +495,12 @@ struct WindowStrip: View {
             }
             ForEach(rows, id: \.first) { row in
                 HStack(alignment: .top, spacing: Self.spacing) {
-                    ForEach(row, id: \.self) { index in card(index) }
+                    ForEach(row, id: \.self) { index in
+                        if iconsOnly { iconCard(index) } else { card(index) }
+                    }
                 }
             }
-            if !CGPreflightScreenCaptureAccess() {
+            if !iconsOnly, !CGPreflightScreenCaptureAccess() {
                 Text("Allow Screen Recording in Advanced to see pictures of windows.")
                     .font(.system(size: 11)).foregroundStyle(Theme.textFaint).lineLimit(1)
                     .padding(.horizontal, 4).frame(height: Self.hintHeight)
@@ -472,9 +508,35 @@ struct WindowStrip: View {
         }
         .padding(Self.outerPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.panel, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Theme.stroke))
+        .modifier(PanelStyle(style: style))
         .preferredColorScheme(.dark)
+    }
+
+    /// A big app icon with the window's title under it, for the icons-only switcher.
+    private func iconCard(_ index: Int) -> some View {
+        let window = state.windows[index]
+        let isSelected = isSwitcher && state.selection == index
+        return VStack(spacing: 7) {
+            ZStack {
+                if let icon = window.icon {
+                    Image(nsImage: icon).resizable().frame(width: Self.iconSize, height: Self.iconSize)
+                        .opacity(window.isMinimized ? 0.55 : 1)
+                } else {
+                    Image(systemName: "macwindow").font(.system(size: 30)).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .frame(height: Self.iconSize)
+            Text(window.title.isEmpty ? window.appName : window.title)
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.textPrimary)
+                .lineLimit(2).multilineTextAlignment(.center)
+                .frame(width: cardWidth, height: Self.titleHeight * 2, alignment: .top)
+        }
+        .padding(Self.cardPadding)
+        .background(isSelected ? Color.white.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(isSelected ? Theme.mint : Color.clear, lineWidth: 2))
+        .contentShape(Rectangle())
+        .onTapGesture { onChoose(window) }
     }
 
     private func card(_ index: Int) -> some View {
@@ -526,5 +588,24 @@ struct WindowStrip: View {
         }
         .buttonStyle(.plain)
         .help(label)
+    }
+}
+
+/// The panel behind the windows: the app's dark panel, or Liquid Glass that shows what is behind it.
+private struct PanelStyle: ViewModifier {
+    let style: WindowPreviews.Style
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        if style == .glass {
+            if #available(macOS 26, *) {
+                content.glassEffect(.regular, in: shape)
+            } else {
+                content.background(.ultraThinMaterial, in: shape)
+                    .overlay(shape.strokeBorder(Color.white.opacity(0.18)))
+            }
+        } else {
+            content.background(Theme.panel, in: shape).overlay(shape.strokeBorder(Theme.stroke))
+        }
     }
 }

@@ -28,7 +28,7 @@ enum TestEnv {
 // MARK: - Phone data
 
 enum PeerTab: String, CaseIterable, Identifiable {
-    case overview, notifications, messages, contacts, files, screen
+    case overview, notifications, messages, contacts, files, gallery, screen
 
     var id: String { rawValue }
 
@@ -39,6 +39,7 @@ enum PeerTab: String, CaseIterable, Identifiable {
         case .messages: return "Messages"
         case .contacts: return "Contacts"
         case .files: return "Files"
+        case .gallery: return "Gallery"
         case .screen: return "Screen"
         }
     }
@@ -50,6 +51,7 @@ enum PeerTab: String, CaseIterable, Identifiable {
         case .messages: return "message.fill"
         case .contacts: return "person.2.fill"
         case .files: return "folder.fill"
+        case .gallery: return "photo.on.rectangle.angled"
         case .screen: return "rectangle.on.rectangle"
         }
     }
@@ -76,6 +78,8 @@ struct PhoneSnapshot: Equatable {
     var notifications: [NotificationItem] = []
     var messages: [SmsItem] = []
     var contacts: [ContactItem] = []
+    var usage: UsageReport?
+    var usageTime: Date?
     var lastCall: CallEvent?
     var folder = ""
     var entries: [FsEntry] = []
@@ -83,6 +87,10 @@ struct PhoneSnapshot: Equatable {
     var filesError: String?
     var showHidden = false
     var selectedFiles: Set<String> = []
+    var gallery: [GalleryItem] = []
+    var galleryLoading = false
+    var galleryEnd = false
+    var galleryError: String?
     var pendingSms: String?
     var smsStatus: SmsStatus?
     private var names: [String: String] = [:]
@@ -95,6 +103,8 @@ struct PhoneSnapshot: Equatable {
         if !new.contains("sms") { messages = []; pendingSms = nil; smsStatus = nil }
         if !new.contains("calls") { lastCall = nil }
         if !new.contains("contacts") { setContacts([]) }
+        if !new.contains("screentime") { usage = nil; usageTime = nil }
+        if !new.contains("gallery") { gallery = []; galleryLoading = false; galleryEnd = false; galleryError = nil }
         if !new.contains("files") { folder = ""; entries = []; filesLoading = false; filesError = nil; selectedFiles = []; showHidden = false }
     }
 
@@ -134,6 +144,15 @@ struct PhoneSnapshot: Equatable {
         guard path == folder else { return }
         entries.append(contentsOf: new)
         filesLoading = more
+    }
+
+    /// Adds a gallery page. Photos already shown aren't added twice.
+    mutating func receiveGallery(_ items: [GalleryItem], more: Bool, end: Bool, error: String?) {
+        if let error { galleryError = error }
+        let known = Set(gallery.map(\.id))
+        gallery.append(contentsOf: items.filter { !known.contains($0.id) })
+        if !more { galleryLoading = false }
+        if end { galleryEnd = true }
     }
 
     func name(for number: String) -> String { names[Self.numberKey(number)] ?? number }
@@ -259,6 +278,29 @@ enum DeviceInput {
         case "scroll": scroll(dx: event.dx ?? 0, dy: event.dy ?? 0)
         case "text": type(event.text ?? "")
         case "key": press(event.key ?? "")
+        case "shortcut": shortcut(event.key ?? "")
+        default: break
+        }
+    }
+
+    /// A tap or drag at a point on a display, from the phone viewing the Mac's screen. The point is in global screen
+    /// coordinates with the origin at the top left, as CGEvent uses.
+    static func pointer(_ kind: String, at point: CGPoint) {
+        if TestEnv.isDryRun { return TestEnv.log("POINTER \(kind) \(Int(point.x)) \(Int(point.y))") }
+        func post(_ type: CGEventType, _ button: CGMouseButton = .left, clicks: Int64 = 1) {
+            let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button)
+            event?.setIntegerValueField(.mouseEventClickState, value: clicks)
+            event?.post(tap: .cghidEventTap)
+        }
+        switch kind {
+        case "move": post(.mouseMoved)
+        case "down": post(.leftMouseDown)
+        case "drag": post(.leftMouseDragged)
+        case "up": post(.leftMouseUp)
+        case "click": post(.mouseMoved); post(.leftMouseDown); post(.leftMouseUp)
+        // The first tap was already a click, so the second one only adds the double-click.
+        case "double": post(.leftMouseDown, clicks: 2); post(.leftMouseUp, clicks: 2)
+        case "right": post(.mouseMoved); post(.rightMouseDown, .right); post(.rightMouseUp, .right)
         default: break
         }
     }
@@ -279,12 +321,29 @@ enum DeviceInput {
     private static var cursor: CGPoint { CGEvent(source: nil)?.location ?? .zero }
 
     private static func move(dx: Float, dy: Float) {
-        let bounds = NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }
-        var target = cursor
-        target.x = min(max(target.x + CGFloat(dx), bounds.minX), bounds.maxX - 1)
-        target.y = min(max(target.y + CGFloat(dy), 0), bounds.height - 1)
+        let from = cursor
+        let target = keepOnDisplays(CGPoint(x: from.x + CGFloat(dx), y: from.y + CGFloat(dy)), from: from, displays: activeDisplayBounds())
         CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left)?
             .post(tap: .cghidEventTap)
+    }
+
+    /// Every display, in the coordinates CGEvent uses (origin at the top left of the main display, y going down).
+    static func activeDisplayBounds() -> [CGRect] {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    /// Lets the pointer cross onto any display, including ones above or left of the main one, but never into the gaps
+    /// between them: there it stops at the edge of the display it was on.
+    static func keepOnDisplays(_ target: CGPoint, from: CGPoint, displays: [CGRect]) -> CGPoint {
+        if displays.contains(where: { $0.contains(target) }) { return target }
+        guard let home = displays.first(where: { $0.contains(from) }) ?? displays.min(by: {
+            hypot($0.midX - from.x, $0.midY - from.y) < hypot($1.midX - from.x, $1.midY - from.y)
+        }) else { return target }
+        return CGPoint(x: min(max(target.x, home.minX), home.maxX - 1), y: min(max(target.y, home.minY), home.maxY - 1))
     }
 
     private static func click(right: Bool) {
@@ -319,6 +378,59 @@ enum DeviceInput {
             CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)?.post(tap: .cghidEventTap)
         }
     }
+
+    /// A key with modifiers from the phone's Stream Deck, such as "cmd+shift+4".
+    private static func shortcut(_ text: String) {
+        guard let (code, flags) = Shortcut.parse(text) else { return }
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
+            event?.flags = flags
+            event?.post(tap: .cghidEventTap)
+        }
+    }
+}
+
+/// Parses shortcuts like "cmd+shift+4". Only ordinary keyboard keys are allowed, by US key position.
+enum Shortcut {
+    static let modifiers: [String: CGEventFlags] = [
+        "cmd": .maskCommand, "command": .maskCommand,
+        "shift": .maskShift,
+        "opt": .maskAlternate, "option": .maskAlternate, "alt": .maskAlternate,
+        "ctrl": .maskControl, "control": .maskControl,
+        "fn": .maskSecondaryFn,
+    ]
+
+    static let keys: [String: CGKeyCode] = {
+        var map: [String: CGKeyCode] = [
+            "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11,
+            "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35,
+            "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+            "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29,
+            "=": 24, "-": 27, "]": 30, "[": 33, "'": 39, ";": 41, "\\": 42, ",": 43, "/": 44, ".": 47, "`": 50,
+            "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "escape": 53, "esc": 53,
+            "forwarddelete": 117, "home": 115, "end": 119, "pageup": 116, "pagedown": 121,
+            "left": 123, "right": 124, "down": 125, "up": 126,
+        ]
+        let function: [CGKeyCode] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
+        for (index, code) in function.enumerated() { map["f\(index + 1)"] = code }
+        return map
+    }()
+
+    static func parse(_ text: String) -> (CGKeyCode, CGEventFlags)? {
+        let raw = text.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty, raw.count <= 40 else { return nil }
+        // "cmd++" means Command and the plus key, which is "=" with Shift on a US layout.
+        var parts = raw.split(separator: "+", omittingEmptySubsequences: true).map { String($0).trimmingCharacters(in: .whitespaces) }
+        if raw.hasSuffix("++") { parts.append("=") }
+        guard let last = parts.popLast(), let code = keys[last] else { return nil }
+        var flags: CGEventFlags = []
+        for part in parts {
+            guard let flag = modifiers[part] else { return nil }
+            flags.insert(flag)
+        }
+        if raw.hasSuffix("++") { flags.insert(.maskShift) }
+        return (code, flags)
+    }
 }
 
 // MARK: - Clipboard
@@ -340,7 +452,8 @@ final class ClipboardWatcher {
     ].map { NSPasteboard.PasteboardType($0) }
 
     init() {
-        pasteboard = TestEnv.isDryRun ? NSPasteboard(name: .init("id.phonelink.test")) : .general
+        // Each test instance has its own pasteboard, so two of them can test syncing between Macs.
+        pasteboard = TestEnv.isDryRun ? NSPasteboard(name: .init("id.phonelink.test" + (TestEnv.value("PHONELINK_PORT") ?? ""))) : .general
         changeCount = pasteboard.changeCount
     }
 
@@ -417,6 +530,22 @@ enum TransferStatus: Equatable {
     case active, done, failed
 }
 
+/// A finished transfer, kept on this Mac for the File history page.
+struct FileRecord: Codable, Identifiable, Equatable {
+    var id: String
+    var device: String
+    var name: String
+    var size: Int64
+    var outgoing: Bool
+    var date: Date
+    var ok: Bool
+    var detail: String?
+    /// Where the file is on this Mac: the saved copy, or the original that was sent.
+    var path: String?
+
+    var url: URL? { path.map { URL(fileURLWithPath: $0) } }
+}
+
 struct Transfer: Identifiable, Equatable {
     let id: String
     let peerId: String
@@ -440,6 +569,17 @@ enum FileNames {
         return clean.isEmpty ? "file" : String(clean.prefix(200))
     }
 
+    /// True when [url] is a file of exactly this size and SHA-256.
+    static func sameFile(_ url: URL, size: Int64, sha256: String) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              (attributes[.size] as? NSNumber)?.int64Value == size,
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let data = try? handle.read(upToCount: 1 << 20), !data.isEmpty { hasher.update(data: data) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined() == sha256
+    }
+
     static func unique(in folder: URL, name: String) -> URL {
         let fm = FileManager.default
         var candidate = folder.appendingPathComponent(name)
@@ -460,12 +600,16 @@ final class IncomingFile {
     let name: String
     let size: Int64
     let partURL: URL
+    let folder: URL
     let handle: FileHandle
     var received: Int64 = 0
     var hasher = SHA256()
+    /// What the phone said the file is, such as "photo" or "scan".
+    var kind: String?
 
     init(peerId: String, name: String, size: Int64, folder: URL) throws {
         self.peerId = peerId
+        self.folder = folder
         self.name = name
         self.size = size
         partURL = folder.appendingPathComponent(".\(UUID().uuidString).part")
@@ -483,6 +627,17 @@ final class IncomingFile {
 }
 
 // MARK: - Phone screen
+
+/// A phone camera shown on the Mac.
+struct CameraSession: Equatable {
+    let peerId: String
+    let peerName: String
+    var info: ScreenInfo
+    /// "front" or "back".
+    var facing: String
+    /// Clockwise degrees that turn the picture upright.
+    var rotation: Int
+}
 
 struct ScreenSession: Equatable {
     let peerId: String

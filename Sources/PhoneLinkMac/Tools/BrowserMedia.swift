@@ -60,7 +60,7 @@ enum BrowserMedia {
         else { return nil }
         let place = (video.isMusic ? "YouTube Music" : "YouTube") + " in " + window.appName
         return NowPlaying(title: video.title, artist: video.artist.map { "\($0) · \(place)" } ?? place,
-                          isPlaying: isAudible(window.bundleID, in: audible), positionDate: now)
+                          isPlaying: isAudible(window.bundleID, in: audible), positionDate: now, source: window.bundleID)
     }
 
     /// Reads every running browser's window titles. Slow apps are given a quarter second.

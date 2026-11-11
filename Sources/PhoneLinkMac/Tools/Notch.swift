@@ -4,7 +4,7 @@ import Observation
 import os
 import SwiftUI
 
-private let log = Logger(subsystem: "id.phonelink.mac", category: "Notch")
+private let log = Logger(subsystem: "id.dysklink.mac", category: "Notch")
 
 struct ShelfItem: Codable, Identifiable, Equatable {
     var id: String { path }
@@ -66,6 +66,13 @@ struct NowPlaying: Equatable {
     var duration: TimeInterval?
     var position: TimeInterval?
     var positionDate = Date()
+    /// The app it comes from, such as com.apple.Music or a browser's bundle ID.
+    var source: String?
+    /// A YouTube video's ID, for its thumbnail.
+    var videoID: String?
+
+    /// Identifies the song or video, for matching album art to it.
+    var key: String { "\(source ?? "")|\(title)" }
 
     func elapsed(at now: Date) -> TimeInterval? {
         guard let position else { return nil }
@@ -87,14 +94,14 @@ struct NowPlaying: Equatable {
 @Observable
 final class NotchModel {
     enum Page: String, CaseIterable {
-        case music = "", focus = "Pomodoro", shelf = "Shelf", prayer = "Prayer", weather = "Weather", todo = "Todo", water = "Water"
+        case music = "", focus = "Pomodoro", shelf = "Shelf", prayer = "Prayer", weather = "Weather", todo = "Todo", water = "Water", note = "Note", alerts = "Notifications"
     }
 
     enum ShelfMode { case files, clipboard }
 
     /// What can be hidden in Advanced. Files and Clipboard share the Shelf page.
     enum Section: String, CaseIterable, Identifiable {
-        case music, pomodoro, files, clipboard, prayer, weather, todo, water
+        case music, pomodoro, files, clipboard, prayer, weather, todo, water, note, alerts
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -106,6 +113,8 @@ final class NotchModel {
             case .weather: return "Weather"
             case .todo: return "Todo list"
             case .water: return "Water reminder"
+            case .note: return "Quick note"
+            case .alerts: return "Phone notifications"
             }
         }
     }
@@ -124,6 +133,7 @@ final class NotchModel {
             guard isOpen != oldValue else { return }
             updateBrowserReading()
             if isOpen, isShown(.weather) { weather.refresh() }
+            updateDetailReading()
         }
     }
     var page = Page.music
@@ -151,16 +161,64 @@ final class NotchModel {
         didSet { UserDefaults.standard.set(opensOnClick, forKey: "notch.opensOnClick") }
     }
     private(set) var peek: String?
+    /// Phones watching this Mac's screen. The closed notch says so the whole time, so it's never secret.
+    var screenWatchers: [String] = []
+    /// Phones hearing this Mac's sound, also always shown.
+    var audioListeners: [String] = []
+    var isWatched: Bool { !screenWatchers.isEmpty || !audioListeners.isEmpty }
+    var watchText: String {
+        if screenWatchers.isEmpty {
+            return audioListeners.count == 1 ? "\(audioListeners[0]) is listening" : "\(audioListeners.count) phones listening"
+        }
+        return screenWatchers.count == 1 ? "\(screenWatchers[0]) is viewing" : "\(screenWatchers.count) phones viewing"
+    }
+    /// A phone notification shown under the closed notch for a few seconds.
+    private(set) var notice: PhoneAlert?
+    static let noticeHeight: CGFloat = 70
+    /// A one-time code from the phone, with a Copy button. It stays longer than a notification.
+    private(set) var code: CodeNotice?
+    /// Something is shown under the closed notch.
+    var hasBanner: Bool { notice != nil || code != nil }
     /// From Music or Spotify.
     private(set) var appTrack: NowPlaying?
     /// From YouTube in a browser, read only while the panel is open.
     private(set) var browserTrack: NowPlaying?
+    /// From the Firefox extension. It knows more than the window title, so it stands in for the browser reading.
+    private(set) var extensionTrack: NowPlaying?
+    /// When the extension was last heard from, for the settings.
+    private(set) var extensionHeard: Date?
+    /// The extension speaks every few seconds; after this long without it, its track is dropped.
+    static let extensionTimeout: TimeInterval = 15
+
+    private var webTrack: NowPlaying? {
+        if let extensionTrack, let heard = extensionHeard, now.timeIntervalSince(heard) < Self.extensionTimeout {
+            if extensionTrack.isPlaying || browserTrack?.isPlaying != true { return extensionTrack }
+        }
+        return browserTrack
+    }
+
     /// What plays wins. When nothing plays, Music or Spotify comes first.
     var nowPlaying: NowPlaying? {
         if let appTrack, appTrack.isPlaying { return appTrack }
-        if let browserTrack, browserTrack.isPlaying { return browserTrack }
-        return appTrack ?? browserTrack
+        if let webTrack, webTrack.isPlaying { return webTrack }
+        return appTrack ?? webTrack
     }
+    /// Album art, Music's song position, and YouTube details, asked from the apps with AppleScript.
+    var readsDetails: Bool {
+        didSet {
+            UserDefaults.standard.set(readsDetails, forKey: "notch.playerDetails")
+            if !readsDetails { artwork = nil; artworkKey = nil; detailsProblem = nil }
+            updateDetailReading()
+            refreshAppDetails()
+        }
+    }
+    /// The album art or video thumbnail for `artworkKey`.
+    private(set) var artwork: NSImage?
+    private(set) var artworkKey: String?
+    /// What to change so the details can be read, such as an Automation permission.
+    private(set) var detailsProblem: String?
+    /// Art for what's showing now, never a leftover from the song before.
+    var currentArtwork: NSImage? { nowPlaying.flatMap { $0.key == artworkKey ? artwork : nil } }
     var readsBrowsers: Bool {
         didSet {
             UserDefaults.standard.set(readsBrowsers, forKey: "notch.readsBrowsers")
@@ -175,14 +233,21 @@ final class NotchModel {
     let weather: WeatherModel
     let phoneBattery: PhoneBatteryWatcher
     let todos: TodoModel
+    let note: QuickNoteModel
     let water: WaterModel
+    let lyrics: LyricsModel
 
+    /// True while a connected phone shares its notifications, so the page only appears when it has something to show.
+    @ObservationIgnored var alertsAvailable: () -> Bool = { false }
     @ObservationIgnored private let shelfFile: URL
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var powerSource: CFRunLoopSource?
     @ObservationIgnored private var focusTimer: Timer?
     @ObservationIgnored private var peekWork: DispatchWorkItem?
+    @ObservationIgnored private var noticeWork: DispatchWorkItem?
+    @ObservationIgnored private var codeWork: DispatchWorkItem?
     @ObservationIgnored private var browserTimer: Timer?
+    @ObservationIgnored private var detailTimer: Timer?
     @ObservationIgnored private var isReadingBrowsers = false
     /// After a click, the new state stays a moment, because a browser can keep sending sound briefly after a pause.
     @ObservationIgnored private var heldState: (title: String, isPlaying: Bool, until: Date)?
@@ -192,7 +257,9 @@ final class NotchModel {
         weather = WeatherModel(isInert: isInert)
         phoneBattery = PhoneBatteryWatcher(isInert: isInert)
         todos = TodoModel(directory: directory, persists: !isInert)
+        note = QuickNoteModel(directory: directory, persists: !isInert)
         water = WaterModel(directory: directory, persists: !isInert)
+        lyrics = LyricsModel(isInert: isInert)
         shelfFile = directory.appendingPathComponent("notch-shelf.json")
         opensOnClick = UserDefaults.standard.bool(forKey: "notch.opensOnClick")
         hidesBar = UserDefaults.standard.object(forKey: "notch.hidesBar") as? Bool ?? true
@@ -204,6 +271,7 @@ final class NotchModel {
         pomodoro = Pomodoro(settings: settings)
         playsPomodoroSound = UserDefaults.standard.object(forKey: "notch.pomodoroSound") as? Bool ?? true
         readsBrowsers = UserDefaults.standard.object(forKey: "notch.readsBrowsers") as? Bool ?? true
+        readsDetails = UserDefaults.standard.bool(forKey: "notch.playerDetails")
         settle()
         phoneBattery.onAlert = { [weak self] text in self?.showPeek(text) }
         water.onRemind = { [weak self] text in self?.showPeek(text) }
@@ -214,12 +282,16 @@ final class NotchModel {
     func start() {
         guard observers.isEmpty else { return }
         let center = DistributedNotificationCenter.default()
-        for name in ["com.apple.Music.playerInfo", "com.spotify.client.PlaybackStateChanged"] {
+        for (name, app) in [("com.apple.Music.playerInfo", PlayerDetails.music), ("com.spotify.client.PlaybackStateChanged", PlayerDetails.spotify)] {
             observers.append(center.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] note in
                 let info = note.userInfo
-                MainActor.assumeIsolated { self?.updatePlayer(info) }
+                MainActor.assumeIsolated { self?.updatePlayer(info, from: app) }
             })
         }
+        observers.append(center.addObserver(forName: BrowserExtension.notification, object: nil, queue: .main) { [weak self] note in
+            let json = note.userInfo?["json"] as? String
+            MainActor.assumeIsolated { self?.extensionMessage(json) }
+        })
         power = PowerStatus.current()
         prayer.start()
         water.start()
@@ -243,6 +315,123 @@ final class NotchModel {
         isOpen = false
         appTrack = nil
         browserTrack = nil
+        detailTimer?.invalidate()
+        detailTimer = nil
+    }
+
+    // MARK: Player details
+
+    /// YouTube's position and channel are checked every few seconds while the panel is open.
+    private func updateDetailReading() {
+        let wanted = isOpen && readsDetails && !observers.isEmpty
+        if !wanted {
+            detailTimer?.invalidate()
+            detailTimer = nil
+            return
+        }
+        refreshAppDetails()
+        guard detailTimer == nil else { return }
+        refreshVideoDetails()
+        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshVideoDetails() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        detailTimer = timer
+    }
+
+    /// Music's position and the album art of Music or Spotify, after a song change or when the panel opens.
+    private func refreshAppDetails() {
+        guard readsDetails, let track = appTrack, let source = track.source else { return }
+        let key = track.key
+        let needsArt = artworkKey != key
+        PlayerDetails.queue.async { [weak self] in
+            var song: PlayerDetails.Song?
+            var problem: PlayerDetails.Failure?
+            var artData: Data?
+            var artURL: URL?
+            if source == PlayerDetails.music {
+                switch PlayerDetails.musicSong() {
+                case .success(let found): song = found
+                case .failure(let failure): problem = failure
+                case nil: break
+                }
+                if needsArt, problem == nil { artData = PlayerDetails.musicArtwork() }
+            } else if source == PlayerDetails.spotify, needsArt {
+                artURL = PlayerDetails.spotifyArtwork()
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.readsDetails, self.appTrack?.key == key else { return }
+                    self.detailsProblem = problem?.message
+                    if let song, var track = self.appTrack {
+                        track.position = song.position ?? track.position
+                        track.duration = song.duration ?? track.duration
+                        track.positionDate = Date()
+                        self.appTrack = track
+                    }
+                    if let artData, let image = NSImage(data: artData) { self.setArtwork(image, for: key) }
+                    if let artURL { self.loadArtwork(artURL, for: key) }
+                }
+            }
+        }
+    }
+
+    /// A YouTube video's position, length, channel, and thumbnail from the browser it plays in.
+    private func refreshVideoDetails() {
+        guard readsDetails, let track = browserTrack, let source = track.source,
+              source == PlayerDetails.safari || PlayerDetails.chromium.contains(source) else { return }
+        let key = track.key
+        PlayerDetails.queue.async { [weak self] in
+            let result = PlayerDetails.video(in: source)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.readsDetails, var current = self.browserTrack, current.key == key else { return }
+                    switch result {
+                    case .success(let video):
+                        self.detailsProblem = nil
+                        current.position = video.position
+                        current.duration = video.duration
+                        current.positionDate = Date()
+                        if let channel = video.channel, !current.artist.hasPrefix(channel) {
+                            current.artist = "\(channel) · \(current.artist)"
+                        }
+                        self.browserTrack = current
+                        if self.artworkKey != key, let url = video.thumbnail { self.loadArtwork(url, for: key) }
+                    case .failure(let failure):
+                        self.detailsProblem = failure.message
+                    case nil:
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    private func extensionMessage(_ json: String?) {
+        guard let json, let parsed = BrowserExtension.parse(json) else { return }
+        extensionHeard = Date()
+        now = Date()
+        guard let track = parsed else { extensionTrack = nil; return }
+        let changed = track.key != extensionTrack?.key
+        extensionTrack = track
+        // The thumbnail needs no permission: it comes from YouTube's image server by the video's ID.
+        if changed || artworkKey != track.key, let id = track.videoID, let url = URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg") {
+            loadArtwork(url, for: track.key)
+        }
+    }
+
+    private func loadArtwork(_ url: URL, for key: String) {
+        artworkKey = key
+        Task { [weak self] in
+            let image = await PlayerDetails.image(from: url)
+            guard let self, let image, self.artworkKey == key else { return }
+            self.artwork = image
+        }
+    }
+
+    private func setArtwork(_ image: NSImage, for key: String) {
+        artworkKey = key
+        artwork = image
     }
 
     /// Browsers are checked every second while the panel is open, and never while it is closed.
@@ -277,17 +466,25 @@ final class NotchModel {
                     if let held = self.heldState, Date() < held.until, track?.title == held.title {
                         track?.isPlaying = held.isPlaying
                     }
-                    // The same video keeps its place, so the view doesn't redraw for nothing.
-                    if track?.title != self.browserTrack?.title || track?.isPlaying != self.browserTrack?.isPlaying
-                        || track?.artist != self.browserTrack?.artist {
+                    // The same video keeps its place, and what was read from the page, so nothing flickers.
+                    if var fresh = track, let old = self.browserTrack, old.key == fresh.key {
+                        if old.isPlaying == fresh.isPlaying { return }
+                        let elapsed = old.elapsed(at: Date())
+                        fresh.artist = old.artist
+                        fresh.duration = old.duration
+                        fresh.position = elapsed
+                        fresh.positionDate = Date()
+                        self.browserTrack = fresh
+                    } else if track != self.browserTrack {
                         self.browserTrack = track
+                        self.refreshVideoDetails()
                     }
                 }
             }
         }
     }
 
-    private func updatePlayer(_ info: [AnyHashable: Any]?) {
+    private func updatePlayer(_ info: [AnyHashable: Any]?, from app: String) {
         guard let info else { return }
         let state = info["Player State"] as? String ?? ""
         if state == "Stopped" {
@@ -300,8 +497,10 @@ final class NotchModel {
         appTrack = title.isEmpty ? nil : NowPlaying(
             title: title, artist: artist, isPlaying: state == "Playing",
             duration: milliseconds.map { $0.doubleValue / 1000 },
-            position: (info["Playback Position"] as? NSNumber)?.doubleValue
+            position: (info["Playback Position"] as? NSNumber)?.doubleValue,
+            source: app
         )
+        refreshAppDetails()
     }
 
     /// The button shows the new state at once, and the player confirms it afterwards.
@@ -329,6 +528,44 @@ final class NotchModel {
     func phoneInfo(peer: String, name: String, info: DeviceInfo) {
         guard !observers.isEmpty else { return }
         phoneBattery.handle(peer: peer, name: name, percent: info.batteryPercent, isCharging: info.isCharging)
+    }
+
+    /// Shows the notification under the notch, with its icon and picture, then hides it after a few seconds.
+    func showNotice(_ alert: PhoneAlert) {
+        noticeWork?.cancel()
+        peek = nil
+        notice = alert
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.notice = nil } }
+        noticeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.5, execute: work)
+    }
+
+    func hideNotice() {
+        noticeWork?.cancel()
+        notice = nil
+    }
+
+    func showCode(_ notice: CodeNotice) {
+        hideNotice()
+        peek = nil
+        code = notice
+        hideCode(after: 30)
+    }
+
+    func copyCode() {
+        guard var current = code else { return }
+        OneTimeCode.copy(current.code)
+        current.copied = true
+        code = current
+        hideCode(after: 1.4)
+    }
+
+    func hideCode(after delay: Double = 0) {
+        codeWork?.cancel()
+        guard delay > 0 else { code = nil; return }
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.code = nil } }
+        codeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     func showPeek(_ text: String) {
@@ -359,6 +596,7 @@ final class NotchModel {
         switch section {
         case .prayer: return prayer.location != nil
         case .weather: return weather.place != nil
+        case .alerts: return alertsAvailable()
         default: return true
         }
     }
@@ -391,6 +629,8 @@ final class NotchModel {
             case .weather: return isShown(.weather)
             case .todo: return isShown(.todo)
             case .water: return isShown(.water)
+            case .note: return isShown(.note)
+            case .alerts: return isShown(.alerts)
             }
         }
     }
@@ -415,7 +655,8 @@ final class NotchModel {
 
     /// How tall the closed shape is. Status always shows, even when the bar is hidden.
     func closedHeight(statusHeight: CGFloat) -> CGFloat {
-        if peek != nil || isFocusing { return closedSize.height + statusHeight }
+        if hasBanner { return closedSize.height + Self.noticeHeight }
+        if peek != nil || isFocusing || isWatched { return closedSize.height + statusHeight }
         return !hasNotch && hidesBar ? 0 : closedSize.height
     }
 
@@ -562,6 +803,13 @@ final class NotchController {
                               width: size.width, height: size.height), display: true)
     }
 
+    /// The banner under the closed notch, in screen points.
+    private var codeRect: CGRect {
+        let width = max(geometry.closed.width, NotchView.noticeWidth)
+        return CGRect(x: geometry.closed.midX - width / 2, y: geometry.closed.minY - NotchModel.noticeHeight,
+                      width: width, height: NotchModel.noticeHeight)
+    }
+
     private var openRect: CGRect {
         let size = model.openSize
         return CGRect(x: geometry.closed.midX - size.width / 2 - 14, y: geometry.closed.maxY - size.height - 14,
@@ -570,6 +818,8 @@ final class NotchController {
 
     private func pointerEvent(_ kind: NSEvent.EventType) {
         let mouse = NSEvent.mouseLocation
+        // The panel lets clicks through, except over a code's banner so its Copy button works.
+        if !model.isOpen { panel?.ignoresMouseEvents = !(model.code != nil && codeRect.contains(mouse)) }
         if model.isOpen {
             if openRect.contains(mouse) || NSEvent.pressedMouseButtons != 0 {
                 closeWork?.cancel()
@@ -660,18 +910,31 @@ struct NotchShape: Shape {
 /// Two per-user macOS preferences that set the gap between menu bar icons. Removing them restores the default.
 enum MenuBarSpacing {
     private static let keys = ["NSStatusItemSpacing", "NSStatusItemSelectionPadding"] as [CFString]
-    private static let tightValue = 6
 
-    static var isTight: Bool {
+    /// The choices offered, from macOS's own spacing (nil) to tight.
+    static let levels: [(label: String, value: Int?)] = [("Normal", nil), ("A bit closer", 10), ("Close", 6)]
+
+    /// The gap in points, or nil for macOS's default.
+    static var value: Int? {
         get {
-            CFPreferencesCopyValue(keys[0], kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) != nil
+            CFPreferencesCopyValue(keys[0], kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? Int
         }
         set {
             for key in keys {
-                CFPreferencesSetValue(key, newValue ? tightValue as CFNumber : nil,
+                CFPreferencesSetValue(key, newValue.map { $0 as CFNumber },
                                       kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
             }
             CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
         }
+    }
+}
+
+/// The chosen spacing, observed so the settings show a new choice straight away.
+@MainActor
+@Observable
+final class MenuBarSpacingChoice {
+    static let shared = MenuBarSpacingChoice()
+    var value: Int? = MenuBarSpacing.value {
+        didSet { MenuBarSpacing.value = value }
     }
 }

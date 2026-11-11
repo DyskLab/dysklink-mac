@@ -104,8 +104,13 @@ enum ClipboardPanel {
     }
 
     private static func choose(_ entry: ClipEntry, _ history: ClipboardHistory) {
-        history.copy(entry)
         close()
+        paste(entry, history)
+    }
+
+    /// Puts the entry on the clipboard and presses Command + V in the app in front.
+    static func paste(_ entry: ClipEntry, _ history: ClipboardHistory) {
+        history.copy(entry)
         guard DeviceInput.isTrusted else {
             return HintToast.show("Copied. Allow Accessibility to paste automatically")
         }

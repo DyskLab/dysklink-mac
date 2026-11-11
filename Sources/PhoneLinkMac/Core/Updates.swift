@@ -10,11 +10,15 @@ final class UpdateChecker {
     struct Release: Equatable {
         let version: String
         let url: URL
+        /// The Mac app as a zip, when the release has one.
+        var zipURL: URL? = nil
     }
 
     static let releasesURL = URL(string: "https://api.github.com/repos/DyskLab/dysklink-mac/releases?per_page=10")!
     static let pageURL = URL(string: "https://github.com/DyskLab/dysklink-mac/releases")!
     static let interval: TimeInterval = 24 * 60 * 60
+    static let phoneReleasesURL = URL(string: "https://api.github.com/repos/DyskLab/dysklink-android/releases?per_page=10")!
+    static let phonePageURL = URL(string: "https://github.com/DyskLab/dysklink-android/releases/latest")!
 
     var checksAutomatically: Bool {
         didSet {
@@ -26,6 +30,8 @@ final class UpdateChecker {
     private(set) var available: Release?
     private(set) var isChecking = false
     private(set) var status: String?
+    /// The newest Android release, read with the same daily check, so the Mac can say when a phone is behind.
+    private(set) var latestPhone: Release?
 
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private let notifier = MacNotifier()
@@ -113,7 +119,29 @@ final class UpdateChecker {
                 result = .failure(error)
             }
             finish(result, manual: manual)
+            await checkPhone(current: current)
         }
+    }
+
+    private func checkPhone(current: String) async {
+        var request = URLRequest(url: Self.phoneReleasesURL, timeoutInterval: 20)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("DyskLink-Mac/\(current)", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let newest = try? Self.newest(in: data, newerThan: "0") else { return }
+        latestPhone = newest
+    }
+
+    /// True when the phone's app is older than the newest Android release, or too old to say its version.
+    func isPhoneBehind(_ version: String?) -> Bool {
+        guard let version else { return true }
+        guard let latest = latestPhone else { return false }
+        return Self.isNewer(latest.version, than: version)
+    }
+
+    func openPhoneRelease() {
+        NSWorkspace.shared.open(latestPhone?.url ?? Self.phonePageURL)
     }
 
     private func finish(_ result: Result<Release?, Error>, manual: Bool) {
@@ -147,6 +175,115 @@ final class UpdateChecker {
         NSWorkspace.shared.open(available?.url ?? Self.pageURL)
     }
 
+    // MARK: Installing
+
+    private(set) var isInstalling = false
+
+    /// Installing in place needs the zip, an Apple Silicon Mac, and an app folder this account can write to.
+    var canInstall: Bool {
+        #if arch(arm64)
+        guard available?.zipURL != nil else { return false }
+        return FileManager.default.isWritableFile(atPath: Bundle.main.bundleURL.deletingLastPathComponent().path)
+        #else
+        return false
+        #endif
+    }
+
+    /// Downloads the zip, checks that it is DyskLink signed by the same certificate as this copy, then swaps the
+    /// app and opens the new one. Anything unexpected stops the install and leaves this copy as it is.
+    func install() {
+        guard let release = available, let zip = release.zipURL, !isInstalling else { return }
+        isInstalling = true
+        status = "Downloading \(release.version)…"
+        let current = Bundle.main.bundleURL
+        Task {
+            let result = await Task.detached { Self.prepare(zip: zip, version: release.version, replacing: current) }.value
+            switch result {
+            case .success(let newApp):
+                status = "Restarting…"
+                Self.swap(newApp, into: current)
+            case .failure(let problem):
+                isInstalling = false
+                status = problem.message
+            }
+        }
+    }
+
+    struct InstallProblem: Error {
+        let message: String
+    }
+
+    nonisolated private static func prepare(zip: URL, version: String, replacing current: URL) -> Result<URL, InstallProblem> {
+        let fail = { (text: String) in Result<URL, InstallProblem>.failure(InstallProblem(message: text)) }
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("DyskLink-update-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        } catch { return fail("Couldn't make a folder for the update.") }
+        let zipFile = work.appendingPathComponent("update.zip")
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var downloaded = false
+        URLSession.shared.downloadTask(with: zip) { location, response, _ in
+            if let location, (response as? HTTPURLResponse)?.statusCode == 200 {
+                downloaded = (try? FileManager.default.moveItem(at: location, to: zipFile)) != nil
+            }
+            done.signal()
+        }.resume()
+        done.wait()
+        guard downloaded else { return fail("The download failed. Try again later, or use Download.") }
+        guard run("/usr/bin/ditto", ["-x", "-k", zipFile.path, work.path]).status == 0 else {
+            return fail("The download couldn't be opened.")
+        }
+        let newApp = work.appendingPathComponent("DyskLink.app")
+        guard let info = NSDictionary(contentsOf: newApp.appendingPathComponent("Contents/Info.plist")),
+              info["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
+              info["CFBundleShortVersionString"] as? String == version
+        else { return fail("The download isn't the expected DyskLink version, so it wasn't installed.") }
+        // The new copy must meet this copy's signing requirement, so only the same certificate can replace it.
+        let requirement = run("/usr/bin/codesign", ["-d", "-r-", current.path])
+        guard requirement.status == 0,
+              let line = requirement.output.components(separatedBy: .newlines).first(where: { $0.hasPrefix("designated => ") }),
+              !line.contains("cdhash")
+        else { return fail("This copy has no lasting signature, so updates must be installed by hand. Use Download.") }
+        let designated = String(line.dropFirst("designated => ".count))
+        guard run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R=\(designated)", newApp.path]).status == 0 else {
+            return fail("The download isn't signed like this copy, so it wasn't installed.")
+        }
+        return .success(newApp)
+    }
+
+    /// A small script waits for this app to quit, moves the old copy to the Trash, puts the new one in its place,
+    /// and opens it.
+    private static func swap(_ newApp: URL, into current: URL) {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let script = """
+        while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+        old="$HOME/.Trash/DyskLink-old-$(date +%s).app"
+        mv "$1" "$old" && mv "$2" "$1" && open "$1" || { [ -d "$old" ] && [ ! -d "$1" ] && mv "$old" "$1"; open "$1"; }
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script, "sh", current.path, newApp.path]
+        do {
+            try process.run()
+        } catch {
+            return
+        }
+        NSApp.terminate(nil)
+    }
+
+    nonisolated private static func run(_ path: String, _ arguments: [String]) -> (status: Int32, output: String) {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = pipe
+        guard (try? process.run()) != nil else { return (-1, "") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
     /// Hides this version until a newer one comes out.
     func skip() {
         guard let available else { return }
@@ -158,15 +295,21 @@ final class UpdateChecker {
 
     /// The highest published version above `current`, counting pre-releases, since DyskLink is still in them.
     nonisolated static func newest(in data: Data, newerThan current: String) throws -> Release? {
+        struct Asset: Decodable {
+            let name: String
+            let browser_download_url: String
+        }
         struct Item: Decodable {
             let tag_name: String
             let html_url: String
             let draft: Bool?
+            let assets: [Asset]?
         }
         let items = try JSONDecoder().decode([Item].self, from: data)
         let candidates = items.compactMap { item -> Release? in
             guard item.draft != true, let url = URL(string: item.html_url), version(item.tag_name) != nil else { return nil }
-            return Release(version: clean(item.tag_name), url: url)
+            let zip = item.assets?.first { $0.name.hasSuffix("-mac-arm64.zip") }
+            return Release(version: clean(item.tag_name), url: url, zipURL: zip.flatMap { URL(string: $0.browser_download_url) })
         }
         let newer = candidates.filter { isNewer($0.version, than: current) }
         return newer.reduce(nil) { best, release in

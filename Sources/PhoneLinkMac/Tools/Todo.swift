@@ -21,11 +21,25 @@ struct TodoList: Equatable {
     /// Returns false when the text is empty or the list is full.
     @discardableResult
     mutating func add(_ text: String, at now: Date) -> Bool {
-        let title = String(text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: .newlines).first ?? "").prefix(Self.maxTitle)
+        let title = Self.clean(text)
         guard !title.isEmpty, items.count < Self.maxItems else { return false }
-        items.append(TodoItem(title: String(title), createdAt: now))
+        items.append(TodoItem(title: title, createdAt: now))
         return true
+    }
+
+    /// Returns false when the new title is empty or the task is gone.
+    @discardableResult
+    mutating func rename(_ id: UUID, to text: String) -> Bool {
+        let title = Self.clean(text)
+        guard !title.isEmpty, let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        items[index].title = title
+        return true
+    }
+
+    /// One line, trimmed, and no longer than the limit.
+    static func clean(_ text: String) -> String {
+        String(String(text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .newlines).first ?? "").trimmingCharacters(in: .whitespaces).prefix(maxTitle))
     }
 
     mutating func toggle(_ id: UUID, at now: Date) {
@@ -73,6 +87,8 @@ final class TodoModel {
     var isEditing = false
     /// The text typed into the add box in Advanced.
     var draft = ""
+    /// New titles typed in Advanced and not saved yet.
+    var renameDrafts: [UUID: String] = [:]
 
     @ObservationIgnored private let file: URL
     @ObservationIgnored private let persists: Bool
@@ -118,6 +134,18 @@ final class TodoModel {
         save()
     }
 
+    func saveRename(_ id: UUID) {
+        guard let text = renameDrafts.removeValue(forKey: id) else { return }
+        rename(id, to: text)
+    }
+
+    @discardableResult
+    func rename(_ id: UUID, to text: String) -> Bool {
+        let renamed = list.rename(id, to: text)
+        if renamed { save() }
+        return renamed
+    }
+
     private func save() {
         guard persists else { return }
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -143,6 +171,7 @@ final class TodoModel {
 @Observable
 final class TodoQuickAddState {
     var text = ""
+    var isRenaming = false
 }
 
 private final class TodoKeyPanel: NSPanel {
@@ -157,9 +186,14 @@ enum TodoQuickAdd {
     private static var resignObserver: NSObjectProtocol?
     private static let state = TodoQuickAddState()
 
-    static func show(_ todos: TodoModel) {
+    /// The task being renamed, or nil when adding a new one.
+    private static var renaming: UUID?
+
+    static func show(_ todos: TodoModel, renaming task: TodoItem? = nil) {
         guard panel == nil else { return }
-        state.text = ""
+        renaming = task?.id
+        state.text = task?.title ?? ""
+        state.isRenaming = task != nil
         let size = NSSize(width: 440, height: 74)
         let panel = TodoKeyPanel(contentRect: NSRect(origin: .zero, size: size),
                                  styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -204,7 +238,9 @@ enum TodoQuickAdd {
         case 53:
             close()
         case 36, 76:
-            if todos.add(state.text) { close() } else if state.text.trimmingCharacters(in: .whitespaces).isEmpty { close() }
+            if let id = renaming {
+                if todos.rename(id, to: state.text) || state.text.trimmingCharacters(in: .whitespaces).isEmpty { close() }
+            } else if todos.add(state.text) { close() } else if state.text.trimmingCharacters(in: .whitespaces).isEmpty { close() }
         case 51:
             if !state.text.isEmpty { state.text.removeLast() }
         default:
@@ -228,14 +264,15 @@ struct TodoQuickAddView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
-                Image(systemName: "plus.circle.fill").font(.system(size: 18)).foregroundStyle(Color(hex: 0x62D17A))
-                Text(state.text.isEmpty ? "New task" : state.text + "▏")
+                Image(systemName: state.isRenaming ? "pencil.circle.fill" : "plus.circle.fill")
+                    .font(.system(size: 18)).foregroundStyle(Color(hex: 0x62D17A))
+                Text(state.text.isEmpty ? (state.isRenaming ? "Task name" : "New task") : state.text + "▏")
                     .font(.system(size: 17, weight: .medium))
                     .foregroundStyle(state.text.isEmpty ? Color.white.opacity(0.4) : Color.white)
                     .lineLimit(1).truncationMode(.head)
                 Spacer(minLength: 0)
             }
-            Text("Return to add · Esc to cancel").font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.45))
+            Text(state.isRenaming ? "Return to rename · Esc to cancel" : "Return to add · Esc to cancel").font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.45))
         }
         .padding(.horizontal, 18).padding(.vertical, 12)
         .frame(width: 440, height: 74, alignment: .leading)

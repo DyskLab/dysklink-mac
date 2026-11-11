@@ -20,7 +20,7 @@ PORT=47999
 LOG="$WORK/mac.log"
 DOWNLOADS="$WORK/downloads"
 mkdir -p "$WORK/data" "$DOWNLOADS"
-trap '[ -n "${MAC_PID:-}" ] && kill "$MAC_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap '[ -n "${MAC_PID:-}" ] && kill "$MAC_PID" 2>/dev/null; [ -n "${KEEP_LOG:-}" ] && cp "$LOG" "$KEEP_LOG"; rm -rf "$WORK"' EXIT
 
 cat > "$WORK/data/commands.json" <<'JSON'
 [{"id":"uji","name":"Uji","script":"echo halo-dari-mac"}]
@@ -29,9 +29,9 @@ echo "isi dari mac" > "$WORK/dari-mac.txt"
 
 cd "$MAC_DIR"
 swift build 2>&1 | grep -E "error:|Build complete" | sed 's/\x1b\[[0-9;]*m//g'
-PHONELINK_DATA_DIR="$WORK/data" PHONELINK_PORT=$PORT PHONELINK_DOWNLOAD_DIR="$DOWNLOADS" \
+PHONELINK_DATA_DIR="$WORK/data" PHONELINK_PORT=$PORT PHONELINK_DOWNLOAD_DIR="$DOWNLOADS" PHONELINK_PHOTO_DIR="$WORK/photos" \
 PHONELINK_TEST_AUTO_ACCEPT=1 PHONELINK_TEST_DRY_RUN=1 PHONELINK_TEST_SEND_FILE="$WORK/dari-mac.txt" \
-PHONELINK_TEST_PROBE_PHONE=1 \
+PHONELINK_TEST_PROBE_PHONE=1 PHONELINK_TEST_TERMINAL=1 PHONELINK_TEST_AUTOLOCK=1 PHONELINK_TEST_MACSCREEN=1 PHONELINK_TEST_AUDIO=1 \
     "$(swift build --show-bin-path)/PhoneLinkMac" > "$LOG" 2>&1 &
 MAC_PID=$!
 
@@ -42,7 +42,7 @@ done
 
 cd "$ANDROID_DIR"
 JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 17)}" \
-DYSKLINK_IT_PORT=$PORT DYSKLINK_IT_DOWNLOADS="$DOWNLOADS" \
+DYSKLINK_IT_PORT=$PORT DYSKLINK_IT_DOWNLOADS="$DOWNLOADS" DYSKLINK_IT_PHOTOS="$WORK/photos" \
     ./gradlew :app:testDebugUnitTest --rerun-tasks --console=plain 2>&1 \
     | sed 's/\x1b\[[0-9;]*m//g' | grep -E "^e: |FAILED|BUILD|AssertionError|tests completed"
 RESULT=${PIPESTATUS[0]}
@@ -63,12 +63,44 @@ check() {
     fi
 }
 check present "CLIPBOARD_SET dari-hp-uji"
+check present "NOTCH_ACTION todo.add uji-tugas"
+check absent "NOTCH_ACTION todo.add asing-tugas"
+check present "RING start"
+check present "RING stop"
+check present "MAC_ACTION lock"
+check present "LOCK"
 check present "MEDIA play_pause"
 check present "INPUT key right"
+check present "INPUT shortcut cmd+shift+4"
+check present "TERMINAL_OPENED"
+check present "TERMINAL_CLOSED"
 check absent "bukan-aksi"
 check absent "dari-perangkat-asing"
 check present "PHONE_SMS sms.messages halo-dari-hp"
 check present "PHONE_SMS sms.new sms-baru"
+check present "PHONE_CODE 482915"
+/bin/sleep 2
+check present "AUTOLOCK"
+check present "CAMERA_STARTED 1280x720 front 270"
+check present "CAMERA_STARTED 1280x720 front 0"
+check present "CAMERA_STOPPED uji-berhenti"
+check absent "CAMERA_STARTED 1281x721"
+check present "MACSCREEN_STARTED"
+check present "MACSCREEN_FRAME key=true"
+check present "MACSCREEN_DISPLAYS"
+check present "POINTER click"
+check present "MACSCREEN_STOPPED"
+check present "MACSCREEN_WATCHERS 1"
+check present "PHONE_GALLERY 2 end=true"
+check present "MAC_AUDIO_LISTEN"
+check present "MAC_AUDIO_SENT"
+check present "MAC_AUDIO_STOPPED"
+check present "PHONE_AUDIO_STARTED tight=false"
+check present "PHONE_AUDIO_PLAYING 7680"
+check present "GALLERY_FILE PXL_uji.jpg save"
+check present "SECOND_DISPLAY 1332x600"
+check present "SECOND_DISPLAY 600x1332"
+check present "SECOND_DISPLAY 1000x450 large"
 check present "PHONE_SMS_RESULT ok=true"
 check present "PHONE_CONTACTS 1"
 check present "FN:Budi\\, Santoso~N:Budi\\, Santoso;;;;~TEL;TYPE=CELL:+6281200000002~END:VCARD"
@@ -77,7 +109,8 @@ check present "PHONE_NOTIFICATION AppLama Lama silent=true"
 check present "PHONE_NOTIFICATION AppBaru Baru silent=false"
 check present "PHONE_NOTIFICATION_REMOVED k-baru"
 check present "PHONE_FS  folder"
-check present "PHONE_FEATURES calls,control,files,notifications,screen,sms contacts=0"
+check present "PHONE_FEATURES calls,contacts,control,files,gallery,notifications,screen,screentime,sms contacts=0"
+check present "PHONE_USAGE 95 Obrolan 60 unlocks=12"
 check present "SCREEN_STARTED 720x1280"
 check present "SCREEN_STOPPED"
 check absent "SCREEN_STARTED 1234x1234"

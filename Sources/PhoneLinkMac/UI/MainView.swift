@@ -12,12 +12,17 @@ struct MainView: View {
             HStack(spacing: 0) {
                 sidebar
                 Rectangle().fill(Theme.stroke).frame(width: 1)
-                detail.frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The top band holds the window buttons, so pages scroll below it instead of under them.
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: 28)
+                    detail.frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+                }
             }
             if let prompt = model.pairingPrompt {
                 PairingOverlay(prompt: prompt, model: model)
             }
         }
+        .toggleStyle(.dyskSwitch)
         .preferredColorScheme(.dark)
         .frame(minWidth: 860, minHeight: 600)
         .dropDestination(for: URL.self) { urls, _ in model.sendDroppedFiles(urls) }
@@ -39,10 +44,13 @@ struct MainView: View {
             OptionalScroll(enabled: animated) {
                 VStack(spacing: 8) {
                     ForEach(model.peers) { peer in
-                        PeerRow(peer: peer, isSelected: peer.id == model.selectedPeerId)
+                        PeerRow(peer: peer, isSelected: peer.id == model.selectedPeerId,
+                                alerts: peer.isConnected ? model.phone(peer.id).notifications.count : 0)
                             .onTapGesture {
                                 model.selectedPeerId = peer.id
                                 model.showsTools = false
+                                model.showsHistory = false
+                                model.showsCare = false
                             }
                     }
                     if model.peers.isEmpty {
@@ -56,11 +64,47 @@ struct MainView: View {
             if let release = Shared.updates.available {
                 UpdateBanner(release: release, updates: Shared.updates)
             }
+            historyButton
+            careButton
             advancedButton
         }
         .padding(.horizontal, 18).padding(.top, 38).padding(.bottom, 18)
         .frame(width: 272)
         .background(Theme.ink.opacity(0.42))
+    }
+
+    private var historyButton: some View {
+        sidebarButton("clock.arrow.circlepath", "File history", isOn: model.showsHistory) {
+            model.showsTools = false
+            model.showsCare = false
+            model.showsHistory = true
+        }
+    }
+
+    private var careButton: some View {
+        sidebarButton("sparkles", "Mac care", isOn: model.showsCare) {
+            model.showsTools = false
+            model.showsHistory = false
+            model.showsCare = true
+        }
+    }
+
+    private func sidebarButton(_ icon: String, _ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isOn ? Theme.mint : Theme.textSecondary)
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background(isOn ? Theme.panelRaised : Color.clear, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+            .strokeBorder(isOn ? Theme.mint.opacity(0.35) : Color.clear))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
     }
 
     private var advancedButton: some View {
@@ -79,6 +123,8 @@ struct MainView: View {
             .strokeBorder(model.showsTools ? Theme.mint.opacity(0.35) : Color.clear))
         .contentShape(Rectangle())
         .onTapGesture {
+            model.showsHistory = false
+            model.showsCare = false
             model.showsTools = true
             if Shared.tools.isMonitorOn { Shared.tools.monitor.refresh() }
         }
@@ -97,10 +143,16 @@ struct MainView: View {
     private var detail: some View {
         if model.showsTools {
             AdvancedView(tools: Shared.tools)
+        } else if model.showsCare {
+            MacCareView(care: Shared.care, scrolls: animated)
+        } else if model.showsHistory {
+            FileHistoryView(model: model, scrolls: animated)
         } else if case .failed(let message) = model.serverState {
             ErrorState(message: message)
         } else if let peer = selected {
-            if peer.isPaired {
+            if peer.isPaired, peer.isMac {
+                MacPeerDetail(model: model, peer: peer, scrolls: animated, onUnpair: { model.unpair(peer.id) })
+            } else if peer.isPaired {
                 PeerDetail(model: model, peer: peer, scrolls: animated, onUnpair: { model.unpair(peer.id) })
             } else {
                 NewPeerState(peer: peer, onPair: { model.requestPairing(with: peer.id) })
@@ -124,10 +176,11 @@ struct OptionalScroll<Content: View>: View {
 private struct PeerRow: View {
     let peer: Peer
     let isSelected: Bool
+    var alerts = 0
 
     var body: some View {
         HStack(spacing: 11) {
-            Image(systemName: "iphone.gen3")
+            Image(systemName: peer.isMac ? "laptopcomputer" : "iphone.gen3")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(peer.isConnected ? Theme.mint : Theme.textFaint)
                 .frame(width: 34, height: 34)
@@ -138,6 +191,16 @@ private struct PeerRow: View {
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(1)
             }
             Spacer(minLength: 0)
+            if alerts > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "bell.fill").font(.system(size: 8.5, weight: .bold))
+                    Text("\(alerts)").font(.system(size: 10.5, weight: .bold, design: .rounded))
+                }
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Theme.mint, in: Capsule())
+                .help("\(alerts) notifications on \(peer.name)")
+            }
             if let percent = peer.info?.batteryPercent, peer.isConnected {
                 Text("\(percent)%").font(.system(size: 11.5, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.batteryColor(percent))
@@ -164,8 +227,8 @@ private struct PeerDetail: View {
 
     var body: some View {
         OptionalScroll(enabled: scrolls) {
-            VStack(alignment: .leading, spacing: 16) {
-                if model.peerTab == .overview { hero }
+            VStack(alignment: .leading, spacing: 14) {
+                hero
                 PeerTabBar(model: model, peer: peer)
                 switch model.peerTab {
                 case .overview: overview
@@ -173,27 +236,147 @@ private struct PeerDetail: View {
                 case .messages: MessagesTab(model: model, peer: peer, scrolls: scrolls)
                 case .contacts: ContactsTab(model: model, peer: peer)
                 case .files: FilesTab(model: model, peer: peer)
+                case .gallery: GalleryTab(model: model, peer: peer)
                 case .screen: ScreenTab(model: model, peer: peer)
                 }
             }
-            .padding(.horizontal, 28).padding(.top, 38).padding(.bottom, 24)
+            .padding(.horizontal, 28).padding(.top, 10).padding(.bottom, 24)
         }
     }
 
     @ViewBuilder
     private var overview: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
-            InfoTile(icon: "wifi", title: "Network", value: networkText)
-            InfoTile(icon: "antenna.radiowaves.left.and.right", title: "Cellular", value: cellularText)
-            InfoTile(icon: "cpu", title: "System", value: peer.info?.osVersion ?? "Unknown")
-            InfoTile(icon: "phone.fill", title: "Last call", value: lastCallText)
+        if peer.isConnected, Shared.updates.isPhoneBehind(model.phoneAppVersion(peer.id)) { phoneUpdateCard }
+        SectionLabel("At a glance")
+        // Always the full width: one row of four, or two rows of two when the window is narrow.
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 10) { statTiles(minWidth: 130) }
+            Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+                let tiles = statTileList
+                GridRow { tiles[0]; tiles[1] }
+                GridRow { tiles[2]; tiles[3] }
+            }
         }
-        storage
-        FeatureCards(model: model, peer: peer)
-        HStack {
-            Spacer()
-            Button("Unpair", action: onUnpair)
-                .buttonStyle(SecondaryButtonStyle(tint: Theme.coral))
+        if model.phone(peer.id).features.contains("screentime") {
+            SectionLabel("Screen time")
+            ScreenTimeCard(model: model, peer: peer)
+        }
+        if peer.isConnected {
+            SectionLabel("Send and control")
+            FeatureCards(model: model, peer: peer, part: .transfers)
+        }
+        SectionLabel("On this Mac")
+        FeatureCards(model: model, peer: peer, part: .settings)
+        if model.phone(peer.id).features.contains("calls") { callMusicCard }
+        Button(action: onUnpair) {
+            Label("Unpair this phone", systemImage: "link.badge.plus").labelStyle(.titleOnly)
+                .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.coral)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 6).padding(.leading, 2)
+    }
+
+    private var statTileList: [StatTile] {
+        [
+            StatTile(icon: "wifi", title: "Network", value: networkText),
+            StatTile(icon: "antenna.radiowaves.left.and.right", title: "Cellular", value: cellularText),
+            StatTile(icon: "internaldrive", title: "Storage", value: storageText, bar: storageBar),
+            StatTile(icon: "phone.fill", title: "Last call", value: lastCallText),
+        ]
+    }
+
+    @ViewBuilder
+    private func statTiles(minWidth: CGFloat) -> some View {
+        ForEach(Array(statTileList.enumerated()), id: \.offset) { _, tile in
+            tile.frame(minWidth: minWidth, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var hero: some View {
+        let full = model.peerTab == .overview
+        let data = model.phone(peer.id)
+        let ringing = model.ringingPhones.contains(peer.id)
+        return Card(padding: full ? 22 : 16) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: full ? 22 : 16) {
+                    BatteryRing(percent: peer.info?.batteryPercent, charging: peer.info?.isCharging ?? false, size: full ? 112 : 76)
+                    VStack(alignment: .leading, spacing: 6) {
+                        StatusPill(
+                            text: peer.isConnected ? "Connected" : "Not connected",
+                            color: peer.isConnected ? Theme.mint : Theme.textFaint
+                        )
+                        Text(peer.name).font(.system(size: full ? 26 : 20, weight: .bold)).foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
+                        Text([peer.info?.model ?? peer.model, peer.info?.osVersion].compactMap { $0 }.joined(separator: " · "))
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                        if !peer.isConnected, let lastSeen = peer.lastSeen {
+                            Text("Last seen \(lastSeen.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                if full, peer.isConnected {
+                    HStack(spacing: 10) {
+                        QuickTile(icon: "arrow.up.doc.fill", title: "Send files") { model.pickFiles(for: peer.id) }
+                        QuickTile(icon: ringing ? "speaker.slash.fill" : "speaker.wave.3.fill",
+                                  title: ringing ? "Stop ringing" : "Find phone", tint: ringing ? Theme.amber : Theme.mint) {
+                            model.ringPhone(peer.id, !ringing)
+                        }
+                        if data.features.contains("sms") {
+                            QuickTile(icon: "message.fill", title: "New SMS") { model.composeSms(to: "") }
+                        }
+                        if data.features.contains("screen") {
+                            QuickTile(icon: "rectangle.on.rectangle", title: "Phone screen") { model.peerTab = .screen }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var storageText: String {
+        guard let free = peer.info?.storageFreeBytes, let total = peer.info?.storageTotalBytes else { return "No data yet" }
+        return "\(Format.bytes(free)) free of \(Format.bytes(total))"
+    }
+
+    private var storageBar: (free: Int64, total: Int64)? {
+        guard let free = peer.info?.storageFreeBytes, let total = peer.info?.storageTotalBytes else { return nil }
+        return (free, total)
+    }
+
+    private var phoneUpdateCard: some View {
+        let version = model.phoneAppVersion(peer.id)
+        let latest = Shared.updates.latestPhone?.version
+        return Card {
+            HStack(spacing: 14) {
+                Image(systemName: "arrow.down.app.fill").font(.system(size: 22)).foregroundStyle(Theme.amber)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("The phone app is out of date").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Text(version.map { "\(peer.name) has DyskLink \($0)" + (latest.map { ", and \($0) is out." } ?? ".") }
+                         ?? "\(peer.name) has a DyskLink older than 0.2.0, so the Todo list, water, Pomodoro, and Find phone don't work there yet.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button("Get it") { Shared.updates.openPhoneRelease() }.buttonStyle(SecondaryButtonStyle())
+            }
+        }
+    }
+
+    private var callMusicCard: some View {
+        Card {
+            HStack(spacing: 14) {
+                Image(systemName: "pause.circle").font(.system(size: 20)).foregroundStyle(Theme.textSecondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Pause the Mac during calls").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Text("When the phone rings, whatever plays on the Mac pauses, and it plays again when the call ends. Uses the Accessibility permission.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Toggle("", isOn: Bindable(Shared.callPauser).isEnabled).labelsHidden().toggleStyle(.switch).tint(Theme.mint)
+            }
         }
     }
 
@@ -218,49 +401,6 @@ private struct PeerDetail: View {
         return "\(CallText.label(call.state)): \(name)"
     }
 
-    private var hero: some View {
-        Card(padding: 26) {
-            HStack(spacing: 28) {
-                BatteryRing(percent: peer.info?.batteryPercent, charging: peer.info?.isCharging ?? false)
-                VStack(alignment: .leading, spacing: 9) {
-                    StatusPill(
-                        text: peer.isConnected ? "Connected" : "Not connected",
-                        color: peer.isConnected ? Theme.mint : Theme.textFaint
-                    )
-                    Text(peer.name).font(.system(size: 28, weight: .bold)).foregroundStyle(Theme.textPrimary)
-                        .lineLimit(2)
-                    Text(peer.info?.model ?? peer.model).font(.system(size: 13.5))
-                        .foregroundStyle(Theme.textSecondary)
-                    if !peer.isConnected, let lastSeen = peer.lastSeen {
-                        Text("Last seen \(lastSeen.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.system(size: 12)).foregroundStyle(Theme.textFaint)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var storage: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack {
-                    Text("Storage").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                    Spacer()
-                    if let free = peer.info?.storageFreeBytes {
-                        Text("\(Format.bytes(free)) free").font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                    }
-                }
-                if let free = peer.info?.storageFreeBytes, let total = peer.info?.storageTotalBytes {
-                    StorageBar(free: free, total: total)
-                    Text("\(Format.bytes(total)) total").font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
-                } else {
-                    Text("No data yet").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
-                }
-            }
-        }
-    }
 }
 
 private struct EmptyState: View {
@@ -298,7 +438,7 @@ private struct NewPeerState: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+            Image(systemName: peer.isMac ? "laptopcomputer.and.arrow.down" : "iphone.gen3.radiowaves.left.and.right")
                 .font(.system(size: 42, weight: .semibold)).foregroundStyle(Theme.accentGradient)
             Text(peer.name).font(.system(size: 24, weight: .bold)).foregroundStyle(Theme.textPrimary)
             Text("This device is connected but not trusted yet.\nPair them so the two devices can exchange data.")
@@ -326,42 +466,61 @@ private struct ErrorState: View {
 
 struct PairingOverlay: View {
     let prompt: PairingPrompt
-    let model: AppModel
+    @Bindable var model: AppModel
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.62)
             VStack(spacing: 18) {
                 LogoMark(size: 46)
-                VStack(spacing: 5) {
-                    Text("Match the code").font(.system(size: 22, weight: .bold)).foregroundStyle(Theme.textPrimary)
-                    Text("Make sure the code on \(prompt.peerName) is exactly the same.")
-                        .font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-                HStack(spacing: 8) {
-                    ForEach(Array(prompt.code.enumerated()), id: \.offset) { index, digit in
-                        Text(String(digit))
-                            .font(.system(size: 31, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.textPrimary)
-                            .frame(width: 48, height: 62)
-                            .background(Theme.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Theme.mint.opacity(0.28)))
-                            .padding(.trailing, index == 2 ? 8 : 0)
+                if prompt.outdated {
+                    title("Can't pair yet", prompt.error ?? "")
+                    Button("Close") { model.rejectPairing() }.buttonStyle(SecondaryButtonStyle())
+                } else if prompt.showsCode {
+                    title("Pair with \(prompt.peerName)", "Type this code on \(prompt.peerName). It works only for this pairing.")
+                    HStack(spacing: 8) {
+                        ForEach(Array(prompt.code.enumerated()), id: \.offset) { index, digit in
+                            Text(String(digit))
+                                .font(.system(size: 31, weight: .bold, design: .rounded))
+                                .foregroundStyle(Theme.textPrimary)
+                                .frame(width: 48, height: 62)
+                                .background(Theme.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(Theme.mint.opacity(0.28)))
+                                .padding(.trailing, index == 2 ? 8 : 0)
+                        }
                     }
-                }
-                if prompt.localAccepted {
+                    if let error = prompt.error { errorText(error) }
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Waiting for confirmation from the phone…")
-                            .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                        Text("Waiting for the code…").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
                     }
-                    .frame(height: 42)
+                    Button("Cancel") { model.rejectPairing() }.buttonStyle(SecondaryButtonStyle())
                 } else {
-                    HStack(spacing: 10) {
-                        Button("Decline") { model.rejectPairing() }.buttonStyle(SecondaryButtonStyle())
-                        Button("Codes match") { model.acceptPairing() }.buttonStyle(PrimaryButtonStyle())
+                    title("Enter the code", "Type the 6-digit code shown on \(prompt.peerName).")
+                    DyskField(icon: "number", placeholder: "000000", text: $model.pairingEntry, monospaced: true, clearable: false) {
+                        model.submitPairingCode(model.pairingEntry)
+                    }
+                    .frame(width: 220)
+                    .onChange(of: model.pairingEntry) { _, value in
+                        let digits = String(value.filter(\.isNumber).prefix(6))
+                        if digits != value { model.pairingEntry = digits }
+                        if digits.count == 6, !prompt.localAccepted { model.submitPairingCode(digits) }
+                    }
+                    if let error = prompt.error { errorText(error) }
+                    if prompt.localAccepted {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Checking the code…").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                        }
+                        .frame(height: 42)
+                    } else {
+                        HStack(spacing: 10) {
+                            Button("Cancel") { model.rejectPairing() }.buttonStyle(SecondaryButtonStyle())
+                            Button("Pair") { model.submitPairingCode(model.pairingEntry) }.buttonStyle(PrimaryButtonStyle())
+                                .disabled(model.pairingEntry.count != 6)
+                                .opacity(model.pairingEntry.count == 6 ? 1 : 0.5)
+                        }
                     }
                 }
             }
@@ -371,6 +530,19 @@ struct PairingOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(Theme.stroke))
             .shadow(color: .black.opacity(0.5), radius: 40, y: 18)
         }
+    }
+
+    private func title(_ text: String, _ detail: String) -> some View {
+        VStack(spacing: 5) {
+            Text(text).font(.system(size: 22, weight: .bold)).foregroundStyle(Theme.textPrimary)
+            Text(detail).font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func errorText(_ text: String) -> some View {
+        Text(text).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.coral)
+            .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -395,5 +567,51 @@ struct UpdateBanner: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.mint.opacity(0.08), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Theme.mint.opacity(0.3)))
+    }
+}
+
+/// A big button under the phone's name for the most used actions.
+private struct QuickTile: View {
+    let icon: String
+    let title: String
+    var tint: Color = Theme.mint
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: icon).font(.system(size: 16, weight: .semibold)).foregroundStyle(tint)
+                Text(title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 12)
+            .background(Theme.panelRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke))
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A small fact about the phone, in the "At a glance" grid.
+private struct StatTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    var bar: (free: Int64, total: Int64)?
+
+    var body: some View {
+        Card(padding: 14) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mint)
+                    Text(title).font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                }
+                Text(value).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                if let bar { StorageBar(free: bar.free, total: bar.total) }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+        }
     }
 }

@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import os
 
-private let log = Logger(subsystem: "id.phonelink.mac", category: "Windows")
+private let log = Logger(subsystem: "id.dysklink.mac", category: "Windows")
 
 enum SwitcherCommand: Equatable {
     case forward, back, commit, cancel

@@ -9,6 +9,12 @@ APP="dist/DyskLink.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$(swift build -c release --show-bin-path)/PhoneLinkMac" "$APP/Contents/MacOS/DyskLink"
+# The charging helper. It's copied to /usr/local/libexec only when the user installs it from Mac Care.
+cp "$(swift build -c release --show-bin-path)/dysklink-power" "$APP/Contents/MacOS/dysklink-power"
+# The Firefox extension and its native messaging host, installed from Advanced › Notch › Music.
+cp "$(swift build -c release --show-bin-path)/dysklink-browser-host" "$APP/Contents/MacOS/dysklink-browser-host"
+mkdir -p "$APP/Contents/Resources/firefox-extension"
+cp -R ../browser-extension/firefox/. "$APP/Contents/Resources/firefox-extension/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -17,16 +23,18 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>DyskLink</string>
-    <key>CFBundleIdentifier</key><string>id.phonelink.mac</string>
+    <key>CFBundleIdentifier</key><string>id.dysklink.mac</string>
     <key>CFBundleName</key><string>DyskLink</string>
     <key>CFBundleDisplayName</key><string>DyskLink</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.3</string>
-    <key>CFBundleVersion</key><string>4</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key><string>5</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSUIElement</key><true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>DyskLink asks Music, Spotify, and your browser what's playing, to show album art and the song's position in the notch.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>DyskLink uses the local network to connect to your phone.</string>
     <key>NSBonjourServices</key>

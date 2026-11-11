@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum CallText {
@@ -26,25 +27,38 @@ struct PeerTabBar: View {
     let peer: Peer
 
     var body: some View {
+        // Full labels when they fit; on a narrow window only the open tab keeps its name.
+        ViewThatFits(in: .horizontal) {
+            bar(compact: false)
+            bar(compact: true)
+        }
+    }
+
+    private func bar(compact: Bool) -> some View {
         HStack(spacing: 4) {
             ForEach(PeerTab.allCases) { tab in
+                let open = model.peerTab == tab
                 Button { model.peerTab = tab } label: {
                     HStack(spacing: 6) {
                         Image(systemName: tab.icon).font(.system(size: 11))
-                        Text(tab.title).font(.system(size: 12.5, weight: .semibold)).fixedSize()
+                        if !compact || open {
+                            Text(tab.title).font(.system(size: 12.5, weight: .semibold)).fixedSize()
+                        }
                         if let count = badge(tab), count > 0 {
                             Text("\(count)").font(.system(size: 10.5, weight: .bold)).foregroundStyle(Theme.ink)
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Theme.mint, in: Capsule())
+                                .fixedSize()
                         }
                     }
-                    .foregroundStyle(model.peerTab == tab ? Theme.textPrimary : Theme.textSecondary)
-                    .padding(.horizontal, 9).padding(.vertical, 8)
-                    .background(model.peerTab == tab ? Theme.panelRaised : Color.clear, in: Capsule())
-                    .overlay(Capsule().strokeBorder(model.peerTab == tab ? Theme.mint.opacity(0.35) : Color.clear))
+                    .foregroundStyle(open ? Theme.textPrimary : Theme.textSecondary)
+                    .padding(.horizontal, compact && !open ? 10 : 9).padding(.vertical, 8)
+                    .background(open ? Theme.panelRaised : Color.clear, in: Capsule())
+                    .overlay(Capsule().strokeBorder(open ? Theme.mint.opacity(0.35) : Color.clear))
                     .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .help(tab.title)
             }
             Spacer(minLength: 0)
         }
@@ -75,7 +89,7 @@ struct FeatureOffCard: View {
     }
 }
 
-private struct EmptyCard: View {
+struct EmptyCard: View {
     let text: String
 
     var body: some View {
@@ -107,6 +121,7 @@ struct NotificationsTab: View {
     private func row(_ item: NotificationItem) -> some View {
         Card {
             HStack(alignment: .top, spacing: 12) {
+                NotificationIcon(item: item, size: 38)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(item.app).font(.system(size: 11.5, weight: .bold)).foregroundStyle(Theme.mint)
@@ -121,6 +136,7 @@ struct NotificationsTab: View {
                     }
                 }
                 Spacer(minLength: 0)
+                NotificationPicture(item: item, size: 64)
                 if peer.isConnected {
                     Button { model.dismissNotification(item.key, on: peer.id) } label: {
                         Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.textSecondary)
@@ -149,95 +165,254 @@ struct MessagesTab: View {
         } else {
             Card(padding: 0) {
                 HStack(spacing: 0) {
-                    threadList(data).frame(width: 210)
+                    threadList(data).frame(width: 260)
                     Rectangle().fill(Theme.stroke).frame(width: 1)
                     conversation(data)
                 }
-                .frame(height: 470)
+                .frame(height: 540)
             }
+        }
+    }
+
+    // Threads
+
+    private struct Found: Identifiable {
+        let thread: SmsThread
+        /// The message that matched the search, shown under the name instead of the latest one.
+        let match: SmsItem?
+        var id: Int64 { thread.id }
+    }
+
+    private func found(_ data: PhoneSnapshot) -> [Found] {
+        let query = model.smsQuery.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return data.threads.map { Found(thread: $0, match: nil) } }
+        return data.threads.compactMap { thread in
+            if PhoneSearch.score(name: thread.name, numbers: [thread.address], query: query) != nil {
+                return Found(thread: thread, match: nil)
+            }
+            // Messages are newest first, so this is the latest matching one.
+            let hit = data.messages.first { $0.threadId == thread.id && PhoneSearch.textMatches($0.body, query) }
+            return hit.map { Found(thread: thread, match: $0) }
         }
     }
 
     private func threadList(_ data: PhoneSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button("New message") {
-                model.smsThread = nil
-                model.smsAddress = ""
-            }
-            .buttonStyle(.plain).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.mint)
-            .padding(.horizontal, 6)
-            OptionalScroll(enabled: scrolls) {
-                VStack(spacing: 4) {
-                    ForEach(data.threads) { thread in threadRow(thread) }
+        let shown = found(data)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Messages").font(.system(size: 15, weight: .bold)).foregroundStyle(Theme.textPrimary)
+                Spacer()
+                IconButton(icon: "square.and.pencil", help: "New message", tint: model.smsThread == nil ? Theme.mint : Theme.textSecondary) {
+                    model.smsThread = nil
+                    model.smsAddress = ""
                 }
+            }
+            DyskField(icon: "magnifyingglass", placeholder: "Search name, number, or text", text: $model.smsQuery)
+            OptionalScroll(enabled: scrolls) {
+                LazyVStack(spacing: 2) {
+                    ForEach(shown) { threadRow($0) }
+                }
+            }
+            if shown.isEmpty {
+                Text(data.threads.isEmpty ? "No messages received from the phone yet." : "Nothing matches “\(model.smsQuery)”.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textFaint).padding(.horizontal, 4)
             }
             Spacer(minLength: 0)
         }
-        .padding(10)
+        .padding(12)
     }
 
-    private func threadRow(_ thread: SmsThread) -> some View {
-        Button { model.smsThread = thread.id } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(thread.name).font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(Theme.textPrimary).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(shortTime(thread.latest.time)).font(.system(size: 10)).foregroundStyle(Theme.textFaint)
+    private func threadRow(_ item: Found) -> some View {
+        let thread = item.thread
+        let selected = model.smsThread == thread.id
+        let preview = item.match ?? thread.latest
+        return Button { model.smsThread = thread.id } label: {
+            HStack(spacing: 10) {
+                Avatar(name: thread.name, size: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(thread.name).font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(Theme.textPrimary).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(shortTime(preview.time)).font(.system(size: 10)).foregroundStyle(Theme.textFaint)
+                    }
+                    Text((preview.outgoing ? "You: " : "") + preview.body.replacingOccurrences(of: "\n", with: " "))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(item.match != nil ? Theme.mint.opacity(0.9) : Theme.textSecondary)
+                        .lineLimit(item.match != nil ? 2 : 1)
                 }
-                Text(thread.latest.body).font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary).lineLimit(1)
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(model.smsThread == thread.id ? Theme.panelRaised : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(selected ? Theme.panelRaised : Color.clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(selected ? Theme.mint.opacity(0.3) : Color.clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
+    // Conversation
+
     private func conversation(_ data: PhoneSnapshot) -> some View {
         let thread = data.threads.first { $0.id == model.smsThread }
-        return VStack(alignment: .leading, spacing: 10) {
+        let address = thread?.address ?? model.smsAddress
+        let canSend = PhoneSearch.digits(address).count >= 3
+        let draft = model.smsDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 0) {
             if let thread {
-                Text(thread.name).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                header(thread, data)
+                Rectangle().fill(Theme.stroke).frame(height: 1)
                 OptionalScroll(enabled: scrolls) {
-                    VStack(spacing: 6) {
-                        ForEach(data.messages.filter { $0.threadId == thread.id }.reversed()) { bubble($0) }
+                    LazyVStack(spacing: 6) {
+                        let items = Array(data.messages.filter { $0.threadId == thread.id }.reversed())
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            if index == 0 || !Calendar.current.isDate(date(items[index - 1].time), inSameDayAs: date(item.time)) {
+                                dayLabel(item.time)
+                            }
+                            bubble(item)
+                        }
                     }
+                    .padding(14)
                 }
                 .defaultScrollAnchor(.bottom)
             } else {
-                TextField("Recipient number", text: $model.smsAddress).textFieldStyle(.roundedBorder)
+                recipient(data)
             }
             Spacer(minLength: 0)
-            statusLine(data)
-            HStack(spacing: 8) {
-                TextField("Write an SMS", text: $model.smsDraft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(1...4)
-                Button("Send") { model.sendSms(to: thread?.address ?? model.smsAddress, on: peer.id) }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!peer.isConnected || data.pendingSms != nil)
+            VStack(alignment: .leading, spacing: 6) {
+                statusLine(data)
+                HStack(alignment: .bottom, spacing: 8) {
+                    DyskField(placeholder: canSend ? "Write an SMS" : "Choose who it's for first", text: $model.smsDraft,
+                              multiline: true, clearable: false) {
+                        if canSend, !draft.isEmpty { model.sendSms(to: address, on: peer.id) }
+                    }
+                    Button { model.sendSms(to: address, on: peer.id) } label: {
+                        Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.ink)
+                            .frame(width: 36, height: 36)
+                            .background(Theme.accentGradient, in: Circle())
+                            .opacity(canSend && !draft.isEmpty ? 1 : 0.35)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!peer.isConnected || data.pendingSms != nil || !canSend || draft.isEmpty)
+                    .help("Send (Return). Option-Return adds a new line.")
+                }
+                HStack {
+                    Text(peer.isConnected ? "Sent from \(peer.name)'s SIM. Return sends, Option-Return adds a line." : "\(peer.name) isn't connected.")
+                    Spacer()
+                    if model.smsDraft.count > 0 {
+                        // One SMS holds 160 plain characters, or 70 with emoji and other special letters.
+                        let limit = model.smsDraft.unicodeScalars.allSatisfy { $0.isASCII } ? 160 : 70
+                        Text("\(model.smsDraft.count) / \(limit)\(model.smsDraft.count > limit ? " · \((model.smsDraft.count + limit - 1) / limit) SMS" : "")")
+                    }
+                }
+                .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
+            }
+            .padding(12)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func header(_ thread: SmsThread, _ data: PhoneSnapshot) -> some View {
+        HStack(spacing: 10) {
+            Avatar(name: thread.name, size: 32)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(thread.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                if thread.name != thread.address {
+                    Text(thread.address).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textFaint)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer()
+            IconButton(icon: "doc.on.doc", help: "Copy the number") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(thread.address, forType: .string)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    /// "To" for a new message: type a name or a number, and matching contacts show up to pick.
+    private func recipient(_ data: PhoneSnapshot) -> some View {
+        let picked = data.name(for: model.smsAddress)
+        let isPicked = !model.smsAddress.isEmpty && picked != model.smsAddress
+        let suggestions = isPicked || model.smsAddress.trimmingCharacters(in: .whitespaces).isEmpty
+            ? [] : Array(PhoneSearch.contacts(data.contacts, query: model.smsAddress).prefix(6))
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("New message").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            if isPicked {
+                HStack(spacing: 10) {
+                    Avatar(name: picked, size: 30)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(picked).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        Text(model.smsAddress).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textFaint)
+                    }
+                    Spacer()
+                    IconButton(icon: "xmark", help: "Choose someone else") { model.smsAddress = "" }
+                }
+                .padding(8)
+                .background(Theme.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                DyskField(icon: "person", placeholder: "To: a name or a number", text: $model.smsAddress) {
+                    if let first = suggestions.first, !PhoneSearch.isNumber(model.smsAddress), let number = first.phones.first {
+                        model.smsAddress = number
+                    }
+                }
+                if !suggestions.isEmpty {
+                    VStack(spacing: 2) {
+                        ForEach(suggestions) { contact in
+                            ForEach(contact.phones, id: \.self) { number in
+                                Button { model.smsAddress = number } label: {
+                                    HStack(spacing: 10) {
+                                        Avatar(name: contact.name, size: 28)
+                                        Text(contact.name).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text(number).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textFaint)
+                                    }
+                                    .padding(.horizontal, 8).padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(4)
+                    .background(Theme.panelRaised.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else if !model.smsAddress.isEmpty, !PhoneSearch.isNumber(model.smsAddress) {
+                    Text(data.contacts.isEmpty ? "Contacts aren't shared from the phone, so type a number." : "No contact with that name. Type a number instead.")
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.amber)
+                }
             }
         }
         .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func dayLabel(_ milliseconds: Int64) -> some View {
+        let value = date(milliseconds)
+        let text = Calendar.current.isDateInToday(value) ? "Today"
+            : Calendar.current.isDateInYesterday(value) ? "Yesterday"
+            : value.formatted(date: .abbreviated, time: .omitted)
+        return Text(text).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.textFaint)
+            .padding(.horizontal, 10).padding(.vertical, 3)
+            .background(Theme.panelRaised.opacity(0.6), in: Capsule())
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
     }
 
     private func bubble(_ item: SmsItem) -> some View {
         HStack {
-            if item.outgoing { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 3) {
+            if item.outgoing { Spacer(minLength: 50) }
+            VStack(alignment: item.outgoing ? .trailing : .leading, spacing: 3) {
                 Text(item.body).font(.system(size: 12.5)).textSelection(.enabled)
                     .foregroundStyle(item.outgoing ? Theme.ink : Theme.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(shortTime(item.time)).font(.system(size: 9.5))
+                Text(date(item.time).formatted(date: .omitted, time: .shortened)).font(.system(size: 9.5))
                     .foregroundStyle(item.outgoing ? Theme.ink.opacity(0.6) : Theme.textFaint)
             }
             .padding(.horizontal, 11).padding(.vertical, 7)
             .background(item.outgoing ? Theme.mint : Theme.panelRaised,
-                        in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            if !item.outgoing { Spacer(minLength: 40) }
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            if !item.outgoing { Spacer(minLength: 50) }
         }
     }
 
@@ -263,51 +438,75 @@ struct ContactsTab: View {
         if !data.features.contains("contacts") {
             FeatureOffCard(title: "Contacts")
         } else {
-            VStack(spacing: 12) {
+            let query = model.contactQuery.trimmingCharacters(in: .whitespaces)
+            let shown = PhoneSearch.contacts(data.contacts, query: query)
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
-                    TextField("Search name or number", text: $model.contactQuery).textFieldStyle(.roundedBorder)
+                    DyskField(icon: "magnifyingglass", placeholder: "Search a name or a number, like 0812 or +62 812", text: $model.contactQuery)
                     Button("Export vCard") { model.exportContacts(of: peer.id) }
                         .buttonStyle(SecondaryButtonStyle())
                         .help("Save as a .vcf file that opens in the Contacts app")
+                        .disabled(data.contacts.isEmpty)
                 }
-                let shown = filtered(data.contacts)
+                Text(query.isEmpty ? "\(data.contacts.count) contacts" : "\(shown.count) of \(data.contacts.count) contacts match")
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.textFaint).padding(.leading, 2)
                 if shown.isEmpty {
-                    EmptyCard(text: data.contacts.isEmpty ? "No contacts received from the phone yet." : "No matching contacts.")
-                } else {
-                    // LazyVStack keeps the view light with thousands of contacts.
-                    LazyVStack(spacing: 8) {
-                        ForEach(shown) { row($0) }
+                    EmptyCard(text: data.contacts.isEmpty ? "No contacts received from the phone yet." : "No contact matches “\(query)”.")
+                } else if query.isEmpty {
+                    // Alphabetical, under a letter, when not searching.
+                    let groups = Dictionary(grouping: shown, by: { PhoneSearch.section($0.name) })
+                    let letters = groups.keys.sorted { $0 == "#" ? false : $1 == "#" ? true : $0 < $1 }
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(letters, id: \.self) { letter in
+                            SectionLabel(letter)
+                            list(groups[letter] ?? [])
+                        }
                     }
+                } else {
+                    list(shown)
                 }
             }
         }
     }
 
-    private func filtered(_ contacts: [ContactItem]) -> [ContactItem] {
-        let query = model.contactQuery.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return contacts }
-        return contacts.filter { contact in
-            contact.name.localizedCaseInsensitiveContains(query) || contact.phones.contains { $0.contains(query) }
+    private func list(_ contacts: [ContactItem]) -> some View {
+        Card(padding: 4) {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(contacts.enumerated()), id: \.element.id) { index, contact in
+                    if index > 0 { Rectangle().fill(Theme.stroke).frame(height: 1).padding(.leading, 56) }
+                    row(contact)
+                }
+            }
         }
     }
 
     private func row(_ contact: ContactItem) -> some View {
-        Card(padding: 13) {
-            VStack(alignment: .leading, spacing: 5) {
+        let sms = model.phone(peer.id).features.contains("sms")
+        return HStack(alignment: .top, spacing: 12) {
+            Avatar(name: contact.name, size: 34)
+            VStack(alignment: .leading, spacing: 4) {
                 Text(contact.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    .textSelection(.enabled)
                 ForEach(contact.phones, id: \.self) { number in
-                    HStack {
+                    HStack(spacing: 6) {
                         Text(number).font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(Theme.textSecondary).textSelection(.enabled)
-                        Spacer()
-                        if model.phone(peer.id).features.contains("sms") {
-                            Button("SMS") { model.composeSms(to: number) }
-                                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                        Spacer(minLength: 8)
+                        IconButton(icon: "doc.on.doc", help: "Copy \(number)") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(number, forType: .string)
+                        }
+                        if sms {
+                            IconButton(icon: "message.fill", help: "Send an SMS to \(number)", tint: Theme.mint) { model.composeSms(to: number) }
                         }
                     }
                 }
+                if contact.phones.isEmpty {
+                    Text("No number").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+                }
             }
         }
+        .padding(.horizontal, 10).padding(.vertical, 9)
     }
 }
 
@@ -373,7 +572,7 @@ struct FilesTab: View {
                 get: { model.phone(peer.id).showHidden },
                 set: { model.setShowHidden($0, on: peer.id) }
             ))
-            .toggleStyle(.checkbox).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+            .toggleStyle(DyskSwitchStyle(fills: false)).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
             .disabled(!peer.isConnected)
             Spacer()
             if !files.isEmpty {
@@ -438,6 +637,7 @@ struct ScreenTab: View {
         let data = model.phone(peer.id)
         VStack(alignment: .leading, spacing: 14) {
             screenCard(data)
+            cameraCard
             if !data.features.contains("control") {
                 FeatureOffCard(title: "Control from Mac")
             }
@@ -462,6 +662,39 @@ struct ScreenTab: View {
                 }
             }
         }
+    }
+
+    private var cameraCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Phone camera").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        Text(cameraStatus).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    if model.camera?.peerId == peer.id {
+                        Button("Stop") { model.stopCamera() }.buttonStyle(SecondaryButtonStyle(tint: Theme.coral))
+                    } else if model.cameraRequests.contains(peer.id) {
+                        Button("Cancel") { model.cancelCameraRequest(for: peer.id) }.buttonStyle(SecondaryButtonStyle())
+                    } else if peer.isConnected {
+                        Button("Use camera") { model.requestCamera(from: peer.id) }.buttonStyle(PrimaryButtonStyle())
+                    }
+                }
+                if let error = model.cameraError[peer.id] {
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                }
+            }
+        }
+    }
+
+    private var cameraStatus: String {
+        if model.camera?.peerId == peer.id {
+            return "Showing in a separate window. For Zoom or Meet, capture that window in OBS and start OBS Virtual Camera."
+        }
+        if model.cameraRequests.contains(peer.id) { return "Tap the notification on the phone to start the camera." }
+        return "Use the phone as a camera on this Mac. It starts only after you tap the notification on the phone, and can also be started from the phone."
     }
 
     private func screenStatus(_ data: PhoneSnapshot) -> String {

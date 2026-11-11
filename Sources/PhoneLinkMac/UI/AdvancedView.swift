@@ -9,7 +9,44 @@ struct AdvancedView: View {
 
     private static let donationURL = URL(string: "https://buymeacoffee.com/fannydevz")!
 
+    /// One tool as the overview and the category pages know it.
+    private struct Entry {
+        let id: String
+        let icon: String
+        let title: String
+        let detail: String
+        let category: AdvancedCategory
+        let isOn: Binding<Bool>
+    }
+
+    private var entries: [Entry] {
+        [
+            Entry(id: "clipboard", icon: "doc.on.clipboard.fill", title: "Clipboard History",
+                  detail: "Search everything you copied, and copy text from anywhere on screen.", category: .productivity, isOn: $tools.isClipboardOn),
+            Entry(id: "launcher", icon: "magnifyingglass", title: "Launcher",
+                  detail: "One shortcut opens a search box for apps, files, windows, copies, sums, units, and DyskLink actions.", category: .productivity, isOn: $tools.isLauncherOn),
+            Entry(id: "awake", icon: "cup.and.saucer.fill", title: "Keep Awake",
+                  detail: "Stops this Mac or its screen from sleeping for as long as you choose.", category: .productivity, isOn: $tools.isAwakeOn),
+            Entry(id: "macs", icon: "laptopcomputer.and.arrow.down", title: "Other Macs",
+                  detail: "Pair with other Macs on this network to share copies, Clipboard History, and files.", category: .productivity, isOn: Bindable(Shared.model).macSyncEnabled),
+            Entry(id: "layout", icon: "rectangle.split.3x1", title: "Window Layout",
+                  detail: "Snap the front window to halves, thirds, or quarters with shortcuts, and save whole layouts.", category: .windows, isOn: $tools.isLayoutOn),
+            Entry(id: "previews", icon: "macwindow.on.rectangle", title: "Window Previews",
+                  detail: "See an app's windows when you point at its Dock icon, and switch windows with Option + Tab.", category: .windows, isOn: $tools.isPreviewsOn),
+            Entry(id: "displays", icon: "sun.max.fill", title: "Brightness and Volume",
+                  detail: "Sliders for this Mac and external monitors, here and in the menu bar.", category: .screen, isOn: $tools.isDisplaysOn),
+            Entry(id: "mouse", icon: "computermouse.fill", title: "Mouse",
+                  detail: "Pointer speed, acceleration, and wheel direction for external mice only.", category: .screen, isOn: $tools.isMouseOn),
+            Entry(id: "monitor", icon: "gauge.with.dots.needle.33percent", title: "System Monitor",
+                  detail: "CPU, memory, disk, network, battery, and the busiest apps.", category: .screen, isOn: $tools.isMonitorOn),
+            Entry(id: "notch", icon: "rectangle.topthird.inset.filled", title: "Notch",
+                  detail: "Point at the top of the screen for music, a focus timer, prayer times, weather, batteries, a file shelf, and recent copies.", category: .notch, isOn: $tools.isNotchOn),
+        ]
+    }
+
     var body: some View {
+        let layout = AdvancedLayout.shared
+        let category = layout.category
         OptionalScroll(enabled: scrolls) {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -17,36 +54,101 @@ struct AdvancedView: View {
                     Text("Extra tools for this Mac. Each one stays off until you turn it on.")
                         .font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
                 }
-                .padding(.bottom, 4)
-                sectionLabel("GENERAL")
-                loginCard
-                updatesCard
-                sectionLabel("TOOLS")
-                ToolCard(icon: "gauge.with.dots.needle.33percent", title: "System Monitor",
-                         detail: "CPU, memory, disk, network, battery, and the busiest apps.",
-                         isOn: $tools.isMonitorOn) { monitorContent }
-                ToolCard(icon: "cup.and.saucer.fill", title: "Keep Awake",
-                         detail: "Stops this Mac or its screen from sleeping for as long as you choose.",
-                         isOn: $tools.isAwakeOn) { awakeContent }
-                ToolCard(icon: "doc.on.clipboard.fill", title: "Clipboard History",
-                         detail: "Search everything you copied, and copy text from anywhere on screen.",
-                         isOn: $tools.isClipboardOn) { clipboardContent }
-                ToolCard(icon: "sun.max.fill", title: "Brightness and Volume",
-                         detail: "Sliders for this Mac and external monitors, here and in the menu bar.",
-                         isOn: $tools.isDisplaysOn) { DisplaySliders(control: tools.displays, showsOptions: true) }
-                ToolCard(icon: "computermouse.fill", title: "Mouse",
-                         detail: "Pointer speed, acceleration, and wheel direction for external mice only.",
-                         isOn: $tools.isMouseOn) { mouseContent }
-                ToolCard(icon: "macwindow.on.rectangle", title: "Window Previews",
-                         detail: "See an app's windows when you point at its Dock icon, and switch windows with Option + Tab.",
-                         isOn: $tools.isPreviewsOn) { previewsContent }
-                ToolCard(icon: "rectangle.topthird.inset.filled", title: "Notch",
-                         detail: "Point at the top of the screen for music, a focus timer, prayer times, weather, batteries, a file shelf, and recent copies.",
-                         isOn: $tools.isNotchOn) { notchContent }
-                sectionLabel("ABOUT")
-                supportCard
+                categoryBar(category)
+                    .padding(.bottom, 4)
+                switch category {
+                case .overview:
+                    overview
+                case .general:
+                    sectionLabel("START AND MENU BAR")
+                    loginCard
+                    MenuBarSettings(layout: Shared.menuBar)
+                    sectionLabel("UPDATES")
+                    updatesCard
+                    sectionLabel("ABOUT")
+                    supportCard
+                default:
+                    Text(category.detail).font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+                    ForEach(entries.filter { $0.category == category }, id: \.id) { entry in
+                        ToolCard(id: entry.id, icon: entry.icon, title: entry.title, detail: entry.detail, isOn: entry.isOn) {
+                            content(for: entry.id)
+                        }
+                    }
+                }
             }
-            .padding(.horizontal, 28).padding(.top, 38).padding(.bottom, 28)
+            .padding(.horizontal, 28).padding(.top, 10).padding(.bottom, 28)
+        }
+    }
+
+    @ViewBuilder private func content(for id: String) -> some View {
+        switch id {
+        case "clipboard": clipboardContent
+        case "launcher": launcherContent
+        case "awake": awakeContent
+        case "macs": otherMacsContent
+        case "layout": layoutContent
+        case "previews": previewsContent
+        case "displays": DisplaySliders(control: tools.displays, showsOptions: true)
+        case "mouse": mouseContent
+        case "monitor": monitorContent
+        case "notch": notchContent
+        default: EmptyView()
+        }
+    }
+
+    /// The pages of Advanced, each with how many of its tools are on. In a narrow window only the icons show.
+    private func categoryBar(_ selected: AdvancedCategory) -> some View {
+        ViewThatFits(in: .horizontal) {
+            chips(selected, showsLabels: true)
+            chips(selected, showsLabels: false)
+        }
+    }
+
+    private func chips(_ selected: AdvancedCategory, showsLabels: Bool) -> some View {
+        HStack(spacing: 6) {
+            ForEach(AdvancedCategory.allCases) { category in
+                let tools = entries.filter { $0.category == category }
+                let on = tools.filter { $0.isOn.wrappedValue }.count
+                let chosen = category == selected
+                Button { AdvancedLayout.shared.category = category } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: category.icon).font(.system(size: 11, weight: .semibold))
+                        if showsLabels || chosen {
+                            Text(category.label).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        }
+                        if on > 0 {
+                            Text("\(on)").font(.system(size: 10.5, weight: .bold)).monospacedDigit()
+                                .padding(.horizontal, 5).frame(minWidth: 16, minHeight: 16)
+                                .background(chosen ? Theme.ink.opacity(0.18) : Theme.mint.opacity(0.18), in: Capsule())
+                        }
+                    }
+                    .fixedSize()
+                    .foregroundStyle(chosen ? Theme.ink : Theme.textPrimary)
+                    .padding(.horizontal, 11).frame(height: 30)
+                    .background(chosen ? Theme.mint : Theme.panelRaised, in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(category.label)
+            }
+        }
+    }
+
+    /// Every tool at a glance, grouped by page. A tile opens its page; the switch turns it on or off here.
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(AdvancedCategory.allCases.filter { $0.hasTools }) { category in
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionLabel(category.label.uppercased())
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                        ForEach(entries.filter { $0.category == category }, id: \.id) { entry in
+                            ToolTile(icon: entry.icon, title: entry.title, detail: entry.detail, isOn: entry.isOn) {
+                                AdvancedLayout.shared.category = category
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -104,7 +206,7 @@ struct AdvancedView: View {
                         .background(Theme.mint.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Check for updates").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                        Text("Once a day, reads the list of releases on GitHub and tells you when a new version is out. Nothing is downloaded until you choose Download.")
+                        Text("Once a day, reads the list of releases on GitHub and tells you when a new version is out. Nothing is downloaded until you choose Install or Download.")
                             .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -122,7 +224,13 @@ struct AdvancedView: View {
                     }
                     Spacer()
                     if updates.available != nil {
-                        Button("Download") { updates.download() }.buttonStyle(PrimaryButtonStyle())
+                        if updates.canInstall {
+                            Button(updates.isInstalling ? "Installing…" : "Install and restart") { updates.install() }
+                                .buttonStyle(PrimaryButtonStyle()).disabled(updates.isInstalling)
+                            Button("Download") { updates.download() }.buttonStyle(SecondaryButtonStyle())
+                        } else {
+                            Button("Download") { updates.download() }.buttonStyle(PrimaryButtonStyle())
+                        }
                     }
                     Button(updates.isChecking ? "Checking…" : "Check now") { updates.check(manual: true) }
                         .buttonStyle(SecondaryButtonStyle()).disabled(updates.isChecking)
@@ -263,6 +371,8 @@ struct AdvancedView: View {
                 Button("Reset shortcuts") { tools.resetShortcuts() }.buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
             }
+            Toggle("Control + Option + 1 to 9 pastes the 1st to 9th item", isOn: $tools.isQuickPasteOn)
+                .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
             if let problem = tools.shortcutProblem {
                 Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
             }
@@ -294,15 +404,49 @@ struct AdvancedView: View {
                 Text("\(tools.clipboard.entries.count) saved").font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(Theme.textPrimary)
                 Spacer()
+                Button("Import from Ditto or CopyQ…") { importClipboard() }.buttonStyle(SecondaryButtonStyle())
                 Button("Clear history") { confirmClear() }.buttonStyle(SecondaryButtonStyle(tint: Theme.coral))
                     .disabled(tools.clipboard.unpinnedCount == 0)
             }
+            Text("Choose Ditto.db copied from Windows, a CopyQ export (.cpq) saved without a password, or CopyQ's data folder (~/.config/copyq). Items already saved here are skipped.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func importClipboard() {
+        let panel = NSOpenPanel()
+        panel.message = "Choose Ditto.db, a CopyQ .cpq file, or CopyQ's data folder"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        let copyq = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/copyq")
+        if FileManager.default.fileExists(atPath: copyq.path) { panel.directoryURL = copyq }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let alert = NSAlert()
+        do {
+            let clips = try ClipboardImport.read(url)
+            let result = tools.clipboard.importClips(clips)
+            if result.added == 0 {
+                alert.messageText = clips.isEmpty ? "Nothing to import" : "Everything here is already saved"
+                alert.informativeText = clips.isEmpty ? "No text or images were found in this file." : "\(clips.count) items were found, and all of them are already in Clipboard History."
+            } else {
+                alert.messageText = "Imported \(result.added) items"
+                alert.informativeText = result.trimmed > 0
+                    ? "\(result.trimmed) of the oldest items didn't fit the limit and were removed. Choose Unlimited to keep everything, then import again."
+                    : "They are in Clipboard History, sorted by date."
+            }
+        } catch {
+            alert.messageText = "Couldn't import"
+            alert.informativeText = error.localizedDescription
+        }
+        alert.runModal()
     }
 
     private func limitPicker(_ choices: [Int], _ value: Int, set: @escaping (Int) -> Void) -> some View {
         Picker("", selection: Binding(get: { value }, set: set)) {
-            ForEach(choices, id: \.self) { Text("\($0)").tag($0) }
+            ForEach(choices, id: \.self) { Text($0 == ClipboardHistory.unlimited ? "Unlimited" : "\($0)").tag($0) }
         }
         .labelsHidden().pickerStyle(.menu).fixedSize()
     }
@@ -380,12 +524,121 @@ struct AdvancedView: View {
         .tint(Theme.mint)
     }
 
+    // MARK: Other Macs
+
+    private var otherMacsContent: some View {
+        let model = Shared.model
+        let paired = model.peers.filter { $0.isMac && $0.isPaired }
+        let waiting = model.nearbyMacs.subtracting(model.peers.map(\.id)).count
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Turn this on in DyskLink on each Mac. They find each other on the same Wi-Fi or Ethernet, then appear in the sidebar. Pair once with the 6-digit code, the same way as a phone.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if paired.isEmpty {
+                Text(waiting > 0 ? "Found \(waiting) Mac\(waiting == 1 ? "" : "s"). Connecting…" : "No other Macs paired yet.")
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.textFaint)
+            }
+            ForEach(paired) { mac in
+                HStack(spacing: 9) {
+                    Image(systemName: "laptopcomputer").foregroundStyle(mac.isConnected ? Theme.mint : Theme.textFaint)
+                    Text(mac.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Text(mac.isConnected ? "Connected" : "Not connected").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+                }
+            }
+            Toggle("Merge Clipboard History when the Macs connect", isOn: Bindable(model).sharesClipboardHistory)
+                .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+            Text("Copies go straight between the Macs, encrypted, and never through the internet. A paired Mac can share copies and files and ring this Mac, but it can't control the mouse, keyboard, or commands.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Launcher
+
+    private var launcherContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Shortcut", selection: $tools.launcherKey) {
+                ForEach(ToolsModel.LauncherKey.allCases) { Text($0.label).tag($0) }
+            }
+            .frame(width: 260)
+            if let problem = tools.launcherProblem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Type to find apps, files, and open windows, or a sum such as 12*(3+4), or a unit such as 10 km to mi. Copies show when Clipboard History is on, and saved window layouts when Window Layout is on. Files come from the Spotlight index, so the results match Spotlight. DyskLink doesn't change any macOS settings, so to use Command + Space, turn off Spotlight's shortcut first.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+    }
+
+    // MARK: Window Layout
+
+    private var layoutContent: some View {
+        let layout = tools.layout
+        return VStack(alignment: .leading, spacing: 10) {
+            if !Shared.model.isInputTrusted { accessibilityRow("Moving windows needs Accessibility.") }
+            if let problem = layout.shortcutProblem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+            }
+            Text("Press Control + Option with a key to move the front window.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], spacing: 6) {
+                ForEach(WindowSpot.allCases) { spot in
+                    HStack(spacing: 8) {
+                        Text(spot.key.name).font(.system(size: 11.5, weight: .semibold).monospaced())
+                            .foregroundStyle(Theme.textPrimary)
+                            .frame(minWidth: 52).padding(.vertical, 3)
+                            .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        Text(spot.label).font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+            }
+            Text("Control + Option + Command + ← or → moves the window to the other screen. Control + Option + Shift + G puts every window on that screen into a grid.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().overlay(Theme.stroke)
+            Text("Saved layouts").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            HStack(spacing: 8) {
+                DyskField(icon: "rectangle.3.group", placeholder: "Name, such as Work", text: Bindable(layout).draftName) {
+                    layout.saveCurrent()
+                }
+                .frame(width: 240)
+                Button("Save the windows as they are") { layout.saveCurrent() }.buttonStyle(SecondaryButtonStyle())
+            }
+            ForEach(layout.layouts) { saved in
+                HStack(spacing: 10) {
+                    Text(saved.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Text("\(saved.windows.count) windows").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+                    Spacer()
+                    Button("Restore") { layout.restore(saved) }.buttonStyle(SecondaryButtonStyle())
+                    Button { layout.delete(saved) } label: { Image(systemName: "trash").foregroundStyle(Theme.coral) }
+                        .buttonStyle(.plain).help("Delete")
+                }
+            }
+            Text("Restoring puts each app's windows back where they were, matched by app and title. Apps that aren't open are skipped. Saved layouts can also be restored from the menu bar.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     // MARK: Window Previews
 
     private var previewsContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Switch windows with Option + Tab", isOn: Bindable(tools.previews).usesSwitcher)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary).tint(Theme.mint)
+            HStack(spacing: 16) {
+                Picker("Option + Tab shows", selection: Bindable(tools.previews).switcherLayout) {
+                    ForEach(WindowPreviews.SwitcherLayout.allCases) { Text($0.label).tag($0) }
+                }
+                .frame(width: 290)
+                .disabled(!tools.previews.usesSwitcher)
+                Picker("Style", selection: Bindable(tools.previews).style) {
+                    ForEach(WindowPreviews.Style.allCases) { Text($0.label).tag($0) }
+                }
+                .frame(width: 190)
+            }
+            .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
             if let problem = tools.previews.shortcutProblem {
                 Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
             }
@@ -443,12 +696,23 @@ struct AdvancedView: View {
                 Text("Nothing shows at the top of the screen until you point at its center, or click there if you chose clicking.")
                     .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Toggle("Fit more icons beside the camera", isOn: Binding(
-                    get: { MenuBarSpacing.isTight },
-                    set: { MenuBarSpacing.isTight = $0; notch.modeChanged() }
-                ))
-                .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
-                Text("Brings menu bar icons closer together so the camera hides fewer of them, without changing the screen size. It applies after you log out and back in, and turning it off puts the normal spacing back the same way.")
+                HStack(spacing: 8) {
+                    Text("Menu bar icon spacing").font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    ForEach(MenuBarSpacing.levels, id: \.label) { level in
+                        let chosen = MenuBarSpacingChoice.shared.value == level.value
+                        Button(level.label) {
+                            MenuBarSpacingChoice.shared.value = level.value
+                            notch.modeChanged()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(chosen ? Theme.ink : Theme.textPrimary)
+                        .padding(.horizontal, 10).frame(height: 26)
+                        .background(chosen ? Theme.mint : Theme.panelRaised, in: Capsule())
+                    }
+                }
+                Text("Closer icons fit more beside the camera, so it hides fewer of them, without changing the screen size. Applies to every app's icon after you log out and back in.")
                     .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("It uses the built-in screen, or a thin bar at the top of the main screen when the lid is closed. The song title comes from Music, Spotify, or YouTube in a browser, and the buttons control whichever player is active. Shelf files aren't copied or moved.")
@@ -493,7 +757,6 @@ struct AdvancedView: View {
                         get: { notch.isEnabled(section) && notch.hasData(section) },
                         set: { notch.setShown(section, $0) }
                     ))
-                    .toggleStyle(.checkbox)
                     .disabled(!notch.hasData(section) || (notch.isShown(section) && !notch.canHide(section)))
                 }
             }
@@ -521,6 +784,16 @@ struct AdvancedView: View {
                 if notch.readsBrowsers, !Shared.model.isInputTrusted {
                     accessibilityRow("Reading browser windows needs Accessibility.")
                 }
+                Toggle("Show album art, song position, and video details", isOn: Bindable(notch).readsDetails)
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
+                    .padding(.top, 4)
+                Text("Asks Music and Spotify for album art, Music for where the song is, and Safari or Chrome-based browsers for a YouTube video's position, length, channel, and thumbnail. macOS asks once for each app (Automation). Browsers also need Allow JavaScript from Apple Events turned on. Firefox isn't supported yet. Apps are only asked while they're open, and art comes from Spotify's and YouTube's own image servers.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if notch.readsDetails, let problem = notch.detailsProblem {
+                    Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                }
+                FirefoxExtensionRow(heard: notch.extensionHeard).padding(.top, 4)
             }
             .padding(.top, 2)
         }
@@ -631,17 +904,19 @@ struct AdvancedView: View {
         let todos = tools.notch.model.todos
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                TextField("New task", text: Bindable(todos).draft)
-                    .textFieldStyle(.roundedBorder).frame(width: 300)
-                    .onSubmit { todos.addDraft() }
+                DyskField(icon: "plus", placeholder: "New task", text: Bindable(todos).draft) { todos.addDraft() }
+                    .frame(width: 300)
                 Button("Add") { todos.addDraft() }.buttonStyle(SecondaryButtonStyle())
                     .disabled(todos.draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            ForEach(todos.visible(Date())) { task in
+                TodoRenameRow(todos: todos, task: task)
             }
             if todos.list.items.contains(where: \.isDone) {
                 Button("Clear finished tasks") { todos.clearDone() }.buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
             }
-            Text("Add, check off, and remove tasks in the notch. Up to \(TodoList.maxItems) tasks are kept on this Mac, and tasks finished on an earlier day are removed.")
+            Text("Add, check off, rename, and remove tasks here, in the notch, or from the phone. Up to \(TodoList.maxItems) tasks are kept on this Mac, and tasks finished on an earlier day are removed.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -695,9 +970,10 @@ struct AdvancedView: View {
         let weather = tools.notch.model.weather
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                TextField("Search a city", text: Bindable(weather).query)
-                    .textFieldStyle(.roundedBorder).frame(width: 220)
-                    .onSubmit { weather.search(weather.query) }
+                DyskField(icon: "magnifyingglass", placeholder: "Search a city", text: Bindable(weather).query) {
+                    weather.search(weather.query)
+                }
+                .frame(width: 220)
                 Button("Search") { weather.search(weather.query) }.buttonStyle(SecondaryButtonStyle())
                 if let place = weather.place {
                     Text(place.label).font(.system(size: 12)).foregroundStyle(Theme.mint).lineLimit(1)
@@ -758,6 +1034,7 @@ struct AdvancedView: View {
 }
 
 private struct ToolCard<Content: View>: View {
+    let id: String
     let icon: String
     let title: String
     let detail: String
@@ -765,25 +1042,124 @@ private struct ToolCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
+        let layout = AdvancedLayout.shared
+        let isOpen = !layout.isOpen("folded.\(id)")
         Card {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
-                    Image(systemName: icon)
-                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.mint)
-                        .frame(width: 34, height: 34)
-                        .background(Theme.mint.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    ToolIcon(icon: icon, isOn: isOn)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
                         Text(detail).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
+                    if isOn {
+                        Button { layout.toggle("folded.\(id)") } label: {
+                            Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
+                                .rotationEffect(.degrees(isOpen ? 0 : -90))
+                                .foregroundStyle(Theme.textSecondary)
+                                .frame(width: 26, height: 26)
+                                .background(Theme.panelRaised, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(isOpen ? "Hide settings" : "Show settings")
+                    }
                     Toggle("", isOn: $isOn).labelsHidden().toggleStyle(.switch).tint(Theme.mint)
                 }
-                if isOn { content }
+                if isOn, isOpen {
+                    Divider().overlay(Theme.stroke)
+                    content
+                }
             }
         }
     }
+}
+
+private struct ToolIcon: View {
+    let icon: String
+    let isOn: Bool
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 15, weight: .semibold)).foregroundStyle(isOn ? Theme.mint : Theme.textSecondary)
+            .frame(width: 34, height: 34)
+            .background((isOn ? Theme.mint : Color.white).opacity(isOn ? 0.12 : 0.05),
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// A tool in the overview: its name, a line about it, and its switch.
+private struct ToolTile: View {
+    let icon: String
+    let title: String
+    let detail: String
+    @Binding var isOn: Bool
+    let open: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                ToolIcon(icon: icon, isOn: isOn)
+                Spacer()
+                Toggle("", isOn: $isOn).labelsHidden().toggleStyle(.switch).tint(Theme.mint)
+            }
+            Text(title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            Text(detail).font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary)
+                .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                Text(isOn ? "Settings" : "Details")
+                Image(systemName: "arrow.right")
+            }
+            .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(isOn ? Theme.mint : Theme.textFaint)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .background(Theme.panel.opacity(0.82), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(isOn ? Theme.mint.opacity(0.35) : Theme.stroke))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture(perform: open)
+    }
+}
+
+enum AdvancedCategory: String, CaseIterable, Identifiable {
+    case overview, general, productivity, windows, screen, notch
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .overview: "Overview"
+        case .general: "General"
+        case .productivity: "Productivity"
+        case .windows: "Windows"
+        case .screen: "Screen"
+        case .notch: "Notch"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .overview: "square.grid.2x2.fill"
+        case .general: "gearshape.fill"
+        case .productivity: "bolt.fill"
+        case .windows: "macwindow"
+        case .screen: "display"
+        case .notch: "rectangle.topthird.inset.filled"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .productivity: "Copy, find, and share faster, and keep this Mac awake."
+        case .windows: "Arrange windows and see them before you switch."
+        case .screen: "Brightness, sound, the mouse, and how hard this Mac is working."
+        case .notch: "The panel that opens from the top of the screen."
+        default: ""
+        }
+    }
+
+    var hasTools: Bool { self != .overview && self != .general }
 }
 
 private struct StatValue: View {
@@ -966,8 +1342,6 @@ struct DisplaySliders: View {
     }
 }
 
-/// Which parts of a card are open, kept between launches.
-@MainActor
 @Observable
 final class AdvancedLayout {
     static let shared = AdvancedLayout()
@@ -975,8 +1349,14 @@ final class AdvancedLayout {
     /// Snapshots change what is open without saving it.
     var persists = true
 
+    /// The page of Advanced on show.
+    var category: AdvancedCategory {
+        didSet { if persists { UserDefaults.standard.set(category.rawValue, forKey: "advanced.category") } }
+    }
+
     private init() {
         open = Set(UserDefaults.standard.stringArray(forKey: "advanced.open") ?? ["pages"])
+        category = UserDefaults.standard.string(forKey: "advanced.category").flatMap(AdvancedCategory.init) ?? .overview
     }
 
     func isOpen(_ id: String) -> Bool { open.contains(id) }
@@ -987,4 +1367,90 @@ final class AdvancedLayout {
     }
 
     func setOpen(_ ids: Set<String>) { open = ids }
+}
+
+/// One task in Advanced, with its title editable in place. Return or Save keeps the new title.
+private struct TodoRenameRow: View {
+    let todos: TodoModel
+    let task: TodoItem
+
+    var body: some View {
+        let draft = todos.renameDrafts[task.id]
+        HStack(spacing: 8) {
+            Button { todos.toggle(task.id) } label: {
+                Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(task.isDone ? Theme.mint : Theme.textSecondary)
+            }
+            .buttonStyle(.plain)
+            DyskField(placeholder: "Task", text: Binding(
+                get: { todos.renameDrafts[task.id] ?? task.title },
+                set: { todos.renameDrafts[task.id] = $0 }
+            ), clearable: false) { todos.saveRename(task.id) }
+            .frame(width: 268)
+            if let draft, draft != task.title {
+                Button("Save") { todos.saveRename(task.id) }.buttonStyle(SecondaryButtonStyle())
+            }
+            Button { todos.delete(task.id) } label: {
+                Image(systemName: "trash").foregroundStyle(Theme.coral)
+            }
+            .buttonStyle(.plain)
+            .help("Remove")
+        }
+    }
+}
+
+
+/// Installs the Firefox extension's helper and shows whether the extension has spoken lately.
+private struct FirefoxExtensionRow: View {
+    let heard: Date?
+    @Bindable private var state = FirefoxExtensionState.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Firefox and Zen").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                Spacer(minLength: 0)
+                if state.installed {
+                    Button("Remove") { state.remove() }.buttonStyle(.borderless).font(.system(size: 12))
+                }
+                Button(state.installed ? "Reinstall extension" : "Install Firefox extension") { state.install() }
+                    .font(.system(size: 12))
+            }
+            Text("Firefox can't be asked with AppleScript, so a small DyskLink extension tells the notch what YouTube plays: title, channel, progress, and thumbnail. It talks only to DyskLink on this Mac. After installing, open about:debugging in Firefox, choose This Firefox › Load Temporary Add-on, and pick manifest.json in the folder that opens.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let heard, Date().timeIntervalSince(heard) < NotchModel.extensionTimeout {
+                Text("Extension connected.").font(.system(size: 12)).foregroundStyle(Theme.mint)
+            } else if state.installed {
+                Text("Helper installed. Waiting for the extension: open a YouTube video in Firefox.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+            }
+            if let error = state.error {
+                Text(error).font(.system(size: 12)).foregroundStyle(Theme.amber)
+            }
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class FirefoxExtensionState {
+    static let shared = FirefoxExtensionState()
+    private(set) var installed = BrowserExtension.isInstalled
+    private(set) var error: String?
+
+    func install() {
+        do {
+            try BrowserExtension.install()
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        installed = BrowserExtension.isInstalled
+    }
+
+    func remove() {
+        BrowserExtension.remove()
+        installed = BrowserExtension.isInstalled
+    }
 }

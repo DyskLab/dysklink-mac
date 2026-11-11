@@ -5,7 +5,7 @@ import IOKit
 import Observation
 import os
 
-private let log = Logger(subsystem: "id.phonelink.mac", category: "Displays")
+private let log = Logger(subsystem: "id.dysklink.mac", category: "Displays")
 
 /// DDC/CI messages, the standard way to change settings inside a monitor over its cable.
 enum DDC {

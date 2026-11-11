@@ -2,7 +2,7 @@ import AppKit
 import CryptoKit
 import Observation
 
-struct ClipEntry: Codable, Identifiable, Equatable {
+struct ClipEntry: Codable, Identifiable, Equatable, Sendable {
     var id = UUID()
     var text: String?
     var imageFile: String?
@@ -23,8 +23,10 @@ final class ClipboardHistory {
     private(set) var maxEntries: Int
     private(set) var maxImages: Int
 
-    static let entryChoices = [50, 100, 200, 500, 1000]
-    static let imageChoices = [10, 30, 60, 100]
+    /// 0 means no limit.
+    static let unlimited = 0
+    static let entryChoices = [50, 100, 200, 500, 1000, 5000, unlimited]
+    static let imageChoices = [10, 30, 60, 100, 500, unlimited]
     static let defaultEntries = 200
     static let defaultImages = 30
     private static let maxTextBytes = 1_048_576
@@ -40,6 +42,8 @@ final class ClipboardHistory {
     @ObservationIgnored private var lastChange = NSPasteboard.general.changeCount
     @ObservationIgnored private var pendingSave: DispatchWorkItem?
     @ObservationIgnored private var thumbnails: [String: NSImage] = [:]
+    /// Saves run here in order, so a long history doesn't stall typing in the panel.
+    private static let saveQueue = DispatchQueue(label: "id.dysklink.clipboard.save", qos: .utility)
 
     private var storeFile: URL { directory.appendingPathComponent("clipboard-history.json") }
 
@@ -47,10 +51,11 @@ final class ClipboardHistory {
         self.directory = directory
         self.defaults = defaults
         ignoresPasswords = defaults.object(forKey: "clipboard.ignorePasswords") as? Bool ?? true
-        let entries = defaults.integer(forKey: "clipboard.maxEntries")
-        let images = defaults.integer(forKey: "clipboard.maxImages")
-        maxEntries = Self.entryChoices.contains(entries) ? entries : Self.defaultEntries
-        maxImages = Self.imageChoices.contains(images) ? images : Self.defaultImages
+        // A missing setting must not read as 0, which means no limit.
+        let entries = defaults.object(forKey: "clipboard.maxEntries") as? Int
+        let images = defaults.object(forKey: "clipboard.maxImages") as? Int
+        maxEntries = entries.flatMap { Self.entryChoices.contains($0) ? $0 : nil } ?? Self.defaultEntries
+        maxImages = images.flatMap { Self.imageChoices.contains($0) ? $0 : nil } ?? Self.defaultImages
         load()
     }
 
@@ -212,6 +217,8 @@ final class ClipboardHistory {
 
     /// Entries are newest first, so the oldest unpinned ones are removed.
     static func trimmed(_ entries: [ClipEntry], maxEntries: Int, maxImages: Int) -> (kept: [ClipEntry], removed: [ClipEntry]) {
+        let maxEntries = maxEntries == unlimited ? Int.max : maxEntries
+        let maxImages = maxImages == unlimited ? Int.max : maxImages
         var images = 0
         var total = 0
         var kept: [ClipEntry] = []
@@ -242,20 +249,66 @@ final class ClipboardHistory {
     private func scheduleSave() {
         pendingSave?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.saveNow() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingSave = nil
+                self.prepareDirectory()
+                let entries = self.entries, file = self.storeFile
+                Self.saveQueue.async { Self.write(entries, to: file) }
+            }
         }
         pendingSave = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
+    /// Waits for the write, for quitting and for actions that can't be undone.
     func saveNow() {
         pendingSave?.cancel()
         pendingSave = nil
         prepareDirectory()
-        guard let data = try? JSONEncoder().encode(entries),
-              (try? data.write(to: storeFile, options: .atomic)) != nil
-        else { return }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: storeFile.path)
+        let entries = entries, file = storeFile
+        Self.saveQueue.sync { Self.write(entries, to: file) }
+    }
+
+    nonisolated private static func write(_ entries: [ClipEntry], to file: URL) {
+        guard let data = try? JSONEncoder().encode(entries), (try? data.write(to: file, options: .atomic)) != nil else { return }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    // MARK: Import
+
+    /// Adds copies from another clipboard app, newest first, without repeating what is already saved.
+    /// Returns how many were added, and how many the current limits removed again.
+    func importClips(_ clips: [ImportedClip]) -> (added: Int, trimmed: Int) {
+        var texts = Set(entries.compactMap(\.text))
+        var images = Set(entries.compactMap(\.imageFile))
+        // Copies with no date go below what is saved now, in the order they came.
+        var undated = (entries.map(\.date).min() ?? Date()).addingTimeInterval(-1)
+        var added: [ClipEntry] = []
+        for clip in clips {
+            let date: Date
+            if let known = clip.date { date = known } else { date = undated; undated.addTimeInterval(-1) }
+            if let text = clip.text {
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= Self.maxTextBytes,
+                      !(ignoresPasswords && PasswordFilter.looksLikePassword(text)), texts.insert(text).inserted else { continue }
+                added.append(ClipEntry(text: text, date: date))
+            } else if let data = clip.image, data.count <= Self.maxImageBytes {
+                let name = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() + ".png"
+                guard images.insert(name).inserted else { continue }
+                prepareDirectory()
+                guard (try? data.write(to: imageURL(name), options: .atomic)) != nil else { continue }
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: imageURL(name).path)
+                added.append(ClipEntry(imageFile: name, date: date))
+            }
+        }
+        guard !added.isEmpty else { return (0, 0) }
+        let before = entries.count + added.count
+        entries = (entries + added).sorted { $0.date > $1.date }
+        let result = Self.trimmed(entries, maxEntries: maxEntries, maxImages: maxImages)
+        result.removed.forEach(removeImage)
+        entries = result.kept
+        saveNow()
+        return (added.count, before - entries.count)
     }
 
     private func load() {

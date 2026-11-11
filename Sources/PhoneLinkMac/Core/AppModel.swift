@@ -1,3 +1,4 @@
+import VirtualDisplay
 import AppKit
 import CryptoKit
 import Foundation
@@ -23,15 +24,25 @@ struct Peer: Identifiable, Equatable {
     var isConnected: Bool
     var info: DeviceInfo?
     var lastSeen: Date?
+
+    var isMac: Bool { platform == "macos" }
 }
 
 struct PairingPrompt: Identifiable, Equatable {
     var id: String { peerId }
     let peerId: String
     let peerName: String
+    /// The code this Mac shows. Empty when this Mac is the one typing.
     let code: String
+    /// True when the other device asked, so this Mac shows the code and the other types it.
     let startedByPeer: Bool
+    /// This Mac typed the code and waits for the answer.
     var localAccepted = false
+    var error: String?
+    var attempts = 0
+    /// The other device has an older DyskLink that can't type codes.
+    var outdated = false
+    var showsCode: Bool { startedByPeer }
 }
 
 @MainActor
@@ -44,7 +55,9 @@ final class AppModel {
     }
 
     private(set) var serverState: ServerState = .starting
-    private(set) var peers: [Peer] = []
+    private(set) var peers: [Peer] = [] {
+        didSet { updateBadge() }
+    }
     private(set) var addresses: [String] = []
     var pairingPrompt: PairingPrompt?
     var selectedPeerId: String?
@@ -56,11 +69,37 @@ final class AppModel {
     /// Called when a pairing needs the user, even if the window is closed.
     @ObservationIgnored var onNeedsAttention: (() -> Void)?
     /// Called each time a paired phone reports its status.
+    /// Recent text copies to share with a paired Mac, newest first. Nil when Clipboard History is off.
+    @ObservationIgnored var clipboardHistoryProvider: (() -> [SyncedClip]?)?
+    @ObservationIgnored var onClipboardHistory: ((_ clips: [SyncedClip]) -> Void)?
     @ObservationIgnored var onPeerInfo: ((_ peerId: String, _ name: String, _ info: DeviceInfo) -> Void)?
+    /// The notch's Todo list, water, and Pomodoro, sent to each phone when it connects.
+    @ObservationIgnored var notchState: (() -> NotchState)?
+    /// A phone asked to change the notch's data.
+    @ObservationIgnored var onNotchAction: ((NotchAction) -> Void)?
+    /// A new phone notification arrived, for the notch to show briefly.
+    @ObservationIgnored var onPhoneNotification: ((PhoneAlert) -> Void)?
+    /// A phone asked to lock the Mac or change Keep Awake.
+    @ObservationIgnored var onMacAction: ((String) -> Void)?
+    /// Keep Awake's state for the phone: `active`, `idle`, or `unavailable`.
+    @ObservationIgnored var keepAwakeState: (() -> String)?
+    @ObservationIgnored var chargeState: (() -> MacCharge?)?
+    /// A call on the phone changed state.
+    @ObservationIgnored var onCall: ((_ state: String) -> Void)?
+
+    let ringer = MacRinger()
+    /// Phones that are ringing because this Mac asked them to.
+    private(set) var ringingPhones: Set<String> = []
 
     var hasPairedDevices: Bool { !records.isEmpty }
 
     private(set) var transfers: [Transfer] = []
+    /// Every finished transfer with any device, newest first, up to 200.
+    private(set) var history: [FileRecord] = []
+    var showsHistory = false
+    /// The Mac care page: cleaner, duplicates, uninstall, and startup.
+    var showsCare = false
+    var historyFilter = FileHistoryView.Filter.all
     private(set) var commands: [SavedCommand] = []
     private(set) var isInputTrusted = DeviceInput.isTrusted
     var newCommandName = ""
@@ -68,16 +107,209 @@ final class AppModel {
     var clipboardEnabled = UserDefaults.standard.object(forKey: "clipboardEnabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(clipboardEnabled, forKey: "clipboardEnabled") }
     }
+    /// The phone whose leaving locks this Mac. Nil when off.
+    var autoLockPhone = UserDefaults.standard.string(forKey: "autolock.phone") {
+        didSet {
+            UserDefaults.standard.set(autoLockPhone, forKey: "autolock.phone")
+            autoLockWork?.cancel()
+        }
+    }
+    /// Seconds the phone has to be gone before the Mac locks.
+    var autoLockDelay = UserDefaults.standard.object(forKey: "autolock.delay") as? Int ?? AutoLock.defaultDelay {
+        didSet { UserDefaults.standard.set(autoLockDelay, forKey: "autolock.delay") }
+    }
+    @ObservationIgnored private var autoLockWork: DispatchWorkItem?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    /// Shows one-time codes from the phone's SMS and notifications under the notch.
+    var codesEnabled = UserDefaults.standard.object(forKey: "codes.enabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(codesEnabled, forKey: "codes.enabled") }
+    }
+    /// A one-time code arrived on a phone.
+    @ObservationIgnored var onCode: ((CodeNotice) -> Void)?
+    /// The same code often comes as an SMS and as a notification, so it's shown once.
+    @ObservationIgnored private var recentCodes: [String: Date] = [:]
+    /// Lets paired phones open a shell on this Mac. Off by default, and turning it off ends open sessions.
+    /// Lets paired phones view and control this Mac's screen. Off by default; turning it off ends viewing.
+    var screenShareEnabled = UserDefaults.standard.bool(forKey: "macscreen.enabled") || TestEnv.value("PHONELINK_TEST_MACSCREEN") == "1" {
+        didSet {
+            UserDefaults.standard.set(screenShareEnabled, forKey: "macscreen.enabled")
+            if !screenShareEnabled { for id in Array(macScreens.keys) { endMacScreen(id, error: "Screen viewing was turned off on the Mac") } }
+        }
+    }
+    /// Phones viewing this screen now.
+    private(set) var macScreens: [String: MacScreenViewer] = [:] {
+        didSet {
+            guard Set(macScreens.keys) != Set(oldValue.keys) else { return }
+            let names = macScreens.keys.sorted().map { records[$0]?.name ?? "A phone" }
+            TestEnv.log("MACSCREEN_WATCHERS \(names.count)")
+            onMacScreenWatchers?(names)
+        }
+    }
+    // MARK: Audio sharing
+
+    /// Paired phones may listen to this Mac's sound. Off by default, like viewing the screen.
+    var audioShareEnabled = UserDefaults.standard.bool(forKey: "audio.enabled") || TestEnv.value("PHONELINK_TEST_AUDIO") == "1" {
+        didSet {
+            UserDefaults.standard.set(audioShareEnabled, forKey: "audio.enabled")
+            if !audioShareEnabled { for id in audioListeners { stopListening(id, error: "Listening was turned off on the Mac") } }
+        }
+    }
+    /// Phones hearing this Mac now.
+    private(set) var audioListeners: Set<String> = [] {
+        didSet {
+            guard audioListeners != oldValue else { return }
+            onAudioListeners?(audioListeners.sorted().map { records[$0]?.name ?? "A phone" })
+        }
+    }
+    @ObservationIgnored var onAudioListeners: (([String]) -> Void)?
+    /// The phone whose sound this Mac is playing.
+    private(set) var phoneAudioFrom: String?
+    /// Muted on this Mac only; the phone keeps sending, so unmuting needs no new Android prompt.
+    var phoneAudioMuted = false {
+        didSet { phoneAudio.muted = phoneAudioMuted }
+    }
+    @ObservationIgnored private var audioCapture: MacAudioCapture?
+    @ObservationIgnored private var audioInFlight: [String: Int] = [:]
+    @ObservationIgnored private var audioChunksSent = 0
+    @ObservationIgnored private lazy var phoneAudio = PhoneAudioPlayer()
+    static let audioMaxInFlight = 6
+
+    private func handleAudio(_ envelope: Envelope, from id: String, session: PeerSession) {
+        switch envelope.type {
+        case MessageType.audioListen:
+            guard audioShareEnabled else {
+                var reply = Envelope(type: MessageType.audioStopped)
+                reply.error = "Turn on \"Let phones hear this Mac\" in DyskLink on the Mac first."
+                return session.send(reply)
+            }
+            audioListeners.insert(id)
+            var started = Envelope(type: MessageType.audioStarted)
+            started.audioRate = AudioPCM.rate
+            started.audioChannels = AudioPCM.channels
+            session.send(started)
+            TestEnv.log("MAC_AUDIO_LISTEN")
+            startAudioCapture()
+        case MessageType.audioStop:
+            stopListening(id, error: nil)
+        case MessageType.audioStarted:
+            if let other = phoneAudioFrom, other != id { sessions[other]?.send(Envelope(type: MessageType.audioStop)) }
+            phoneAudioFrom = id
+            // Sound that comes with the phone's screen is kept closer to the picture.
+            phoneAudio.start(rate: envelope.audioRate ?? AudioPCM.rate, channels: envelope.audioChannels ?? AudioPCM.channels,
+                             tight: screen?.peerId == id)
+            phoneAudioMuted = false
+            TestEnv.log("PHONE_AUDIO_STARTED tight=\(screen?.peerId == id)")
+        case MessageType.audioFrame:
+            guard phoneAudioFrom == id, let data = envelope.audio.flatMap({ Data(base64Encoded: $0) }), !data.isEmpty else { return }
+            phoneAudio.feed(data)
+            if phoneAudio.played == 1 { TestEnv.log("PHONE_AUDIO_PLAYING \(data.count)") }
+        case MessageType.audioStopped:
+            if phoneAudioFrom == id { phoneAudio.stop(); phoneAudioFrom = nil }
+        default:
+            break
+        }
+    }
+
+    private func startAudioCapture() {
+        guard audioCapture == nil else { return }
+        let capture = MacAudioCapture()
+        capture.onChunk = { [weak self] chunk in
+            let text = chunk.base64EncodedString()
+            Task { @MainActor in self?.sendAudio(text) }
+        }
+        capture.onStop = { [weak self] error in
+            Task { @MainActor in self?.audioListeners.forEach { self?.stopListening($0, error: error ?? "Recording stopped") } }
+        }
+        audioCapture = capture
+        Task {
+            do {
+                try await capture.start()
+            } catch {
+                for id in audioListeners { stopListening(id, error: "Can't record the Mac's sound. Allow Screen Recording for DyskLink.") }
+            }
+        }
+    }
+
+    /// Each phone gets the chunk unless too many are still on their way, which happens on a slow network.
+    private func sendAudio(_ text: String) {
+        var envelope = Envelope(type: MessageType.audioFrame)
+        envelope.audio = text
+        for id in audioListeners {
+            guard let session = sessions[id], audioInFlight[id, default: 0] < Self.audioMaxInFlight else { continue }
+            audioInFlight[id, default: 0] += 1
+            session.send(envelope) { [weak self] _ in
+                Task { @MainActor in self?.audioInFlight[id, default: 1] -= 1 }
+            }
+        }
+        audioChunksSent += 1
+        if audioChunksSent == 1 { TestEnv.log("MAC_AUDIO_SENT") }
+    }
+
+    /// Stops sending this Mac's sound to a phone, and recording when nobody listens.
+    func stopListening(_ id: String, error: String?) {
+        guard audioListeners.remove(id) != nil else { return }
+        audioInFlight[id] = nil
+        var reply = Envelope(type: MessageType.audioStopped)
+        reply.error = error
+        sessions[id]?.send(reply)
+        TestEnv.log("MAC_AUDIO_STOPPED")
+        if audioListeners.isEmpty {
+            audioCapture?.stop()
+            audioCapture = nil
+            audioChunksSent = 0
+        }
+    }
+
+    /// Asks the phone to stop sending its sound.
+    func stopPhoneAudio() {
+        guard let id = phoneAudioFrom else { return }
+        sessions[id]?.send(Envelope(type: MessageType.audioStop))
+        phoneAudio.stop()
+        phoneAudioFrom = nil
+    }
+
+    /// The phones watching or using this Mac's screen, for the notch.
+    @ObservationIgnored var onMacScreenWatchers: (([String]) -> Void)?
+    var terminalEnabled = UserDefaults.standard.bool(forKey: "terminal.enabled") || TestEnv.value("PHONELINK_TEST_TERMINAL") == "1" {
+        didSet {
+            UserDefaults.standard.set(terminalEnabled, forKey: "terminal.enabled")
+            if !terminalEnabled { endTerminals() }
+        }
+    }
+    /// Open shells, by session id, with the phone each belongs to.
+    private(set) var terminals: [String: (peerId: String, shell: PtyShell)] = [:]
+    private static let maxTerminalsPerPhone = 4
+
+    /// Finds other Macs with DyskLink on this network and connects to the paired ones. Off by default.
+    var macSyncEnabled = UserDefaults.standard.bool(forKey: "macs.sync") || TestEnv.value("PHONELINK_TEST_MAC_SYNC") == "1" {
+        didSet { UserDefaults.standard.set(macSyncEnabled, forKey: "macs.sync"); applyMacSync() }
+    }
+    /// When a Mac connects, both send their recent text copies so the histories match.
+    var sharesClipboardHistory = UserDefaults.standard.object(forKey: "macs.history") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(sharesClipboardHistory, forKey: "macs.history") }
+    }
+    /// Other Macs seen on the network, by device ID.
+    private(set) var nearbyMacs: Set<String> = []
 
     /// Phone data is kept in memory only, and cleared when the phone turns the feature off or unpairs.
-    private(set) var phoneData: [String: PhoneSnapshot] = [:]
+    private(set) var phoneData: [String: PhoneSnapshot] = [:] {
+        didSet { updateBadge() }
+    }
     var peerTab: PeerTab = .overview
     var contactQuery = ""
+    var smsQuery = ""
     var smsThread: Int64?
     var smsAddress = ""
     var smsDraft = ""
 
     private(set) var screen: ScreenSession?
+    private(set) var camera: CameraSession?
+    /// Phones over a USB cable, through adb.
+    let usb = UsbBridge()
+    private(set) var cameraRequests: Set<String> = []
+    private(set) var cameraError: [String: String] = [:]
+    @ObservationIgnored private let cameraDecoder = VideoDecoder()
+    @ObservationIgnored private var lastCameraSync = Date.distantPast
     private(set) var screenRequests: Set<String> = []
     private(set) var screenError: [String: String] = [:]
 
@@ -90,7 +322,6 @@ final class AppModel {
     @ObservationIgnored private var records: [String: PairedRecord] = [:]
     @ObservationIgnored private var infos: [String: DeviceInfo] = [:]
     @ObservationIgnored private var lastSeen: [String: Date] = [:]
-    @ObservationIgnored private var remoteAccepted: Set<String> = []
     @ObservationIgnored private var networkName: String?
     @ObservationIgnored private let pathMonitor = NWPathMonitor()
     @ObservationIgnored private var infoTimer: Timer?
@@ -99,12 +330,25 @@ final class AppModel {
     @ObservationIgnored private var incomingFiles: [String: IncomingFile] = [:]
     @ObservationIgnored private var cancelledSends: Set<String> = []
     @ObservationIgnored private var incomingContacts: [String: [ContactItem]] = [:]
+    @ObservationIgnored private var screenTimeAsked: [String: Date] = [:]
     @ObservationIgnored private let notifier = MacNotifier()
     @ObservationIgnored private var didProbePhone = false
+    @ObservationIgnored private var didProbeGallery = false
     @ObservationIgnored private let decoder = VideoDecoder()
     @ObservationIgnored private var lastSyncRequest = Date.distantPast
     @ObservationIgnored private var didShowTrustCard = false
     @ObservationIgnored private var trustTimer: Timer?
+    @ObservationIgnored private var browser: NWBrowser?
+    @ObservationIgnored private var macEndpoints: [String: NWEndpoint] = [:]
+    @ObservationIgnored private var dialing: [String: PeerSession] = [:]
+    @ObservationIgnored private var macTimer: Timer?
+    /// What a paired Mac may send. Input, commands, and phone data stay phone-only.
+    private static let macMessageTypes: Set<String> = [
+        MessageType.hello, MessageType.pairRequest, MessageType.pairAccept, MessageType.pairReject, MessageType.unpair,
+        MessageType.info, MessageType.ping, MessageType.pong, MessageType.clipboard, MessageType.clipboardHistory,
+        MessageType.ring, MessageType.fileOffer, MessageType.fileChunk, MessageType.fileDone, MessageType.fileCancel,
+        MessageType.fileResult,
+    ]
 
     private var directory: URL {
         #if DEBUG
@@ -117,6 +361,15 @@ final class AppModel {
     }
     private var recordsURL: URL { directory.appendingPathComponent("paired.json") }
     private var commandsURL: URL { directory.appendingPathComponent("commands.json") }
+    private var historyURL: URL { directory.appendingPathComponent("history.json") }
+    /// Synced photos go to Pictures/DyskLink/<phone>, one folder per phone.
+    private func photoFolder(for id: String) -> URL {
+        let base = TestEnv.value("PHONELINK_PHOTO_DIR").map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("DyskLink", isDirectory: true)
+        let phone = FileNames.sanitize(records[id]?.name ?? peers.first { $0.id == id }?.name ?? "Phone")
+        return base.appendingPathComponent(phone, isDirectory: true)
+    }
+
     private var downloadFolder: URL {
         if let path = TestEnv.value("PHONELINK_DOWNLOAD_DIR") { return URL(fileURLWithPath: path, isDirectory: true) }
         return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
@@ -127,18 +380,30 @@ final class AppModel {
 
     func start() {
         guard listener == nil else { return }
+        // After sleep the phone needs a moment to reconnect, so the wait starts again.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let id = self.autoLockPhone, self.autoLockWork != nil, self.sessions[id] == nil else { return }
+                self.scheduleAutoLock()
+            }
+        }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             loadRecords()
             loadCommands()
+            loadHistory()
             let identity = try LocalIdentity.loadOrCreate(in: directory)
             self.identity = identity
             try startListener(identity: identity)
             startNetworkMonitor()
             startInfoTimer()
             clipboard.onChange = { [weak self] text in self?.shareClipboard(text) }
+            ringer.onStopped = { [weak self] in self?.broadcastRingStopped() }
             clipboard.start()
             rebuildPeers()
+            applyMacSync()
         } catch {
             serverState = .failed(error.localizedDescription)
         }
@@ -169,7 +434,9 @@ final class AppModel {
         let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: testPort ?? PhoneLinkProtocol.port)!)
         // Test instances aren't advertised, so real phones don't find them.
         if testPort == nil {
-            listener.service = NWListener.Service(name: LocalDevice.name, type: PhoneLinkProtocol.serviceType)
+            // The ID lets other Macs skip this one and decide which side connects.
+            let txt = NWTXTRecord(["id": identity.deviceId, "platform": "macos"])
+            listener.service = NWListener.Service(name: LocalDevice.name, type: PhoneLinkProtocol.serviceType, domain: nil, txtRecord: txt)
         }
         listener.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
@@ -185,6 +452,8 @@ final class AppModel {
         }
         listener.start(queue: .main)
         self.listener = listener
+        // Test instances don't touch real phones on USB.
+        if testPort == nil || TestEnv.value("PHONELINK_TEST_USB") == "1" { usb.start(port: testPort ?? PhoneLinkProtocol.port) }
     }
 
     private func startNetworkMonitor() {
@@ -220,7 +489,10 @@ final class AppModel {
     // MARK: - Connections
 
     private func accept(_ connection: NWConnection) {
-        let session = PeerSession(connection: connection)
+        attach(PeerSession(connection: connection))
+    }
+
+    private func attach(_ session: PeerSession) {
         let key = ObjectIdentifier(session)
         retained[key] = session
         session.onReady = { [weak self] session in
@@ -243,15 +515,24 @@ final class AppModel {
 
     private func sessionClosed(_ session: PeerSession) {
         retained[ObjectIdentifier(session)] = nil
+        for (key, value) in dialing where value === session { dialing[key] = nil }
         guard let id = session.deviceId, sessions[id] === session else { return }
         sessions[id] = nil
         lastSeen[id] = Date()
+        if id == autoLockPhone, records[id] != nil { scheduleAutoLock() }
+        ringingPhones.remove(id)
+        if audioListeners.contains(id) { stopListening(id, error: nil) }
+        if phoneAudioFrom == id { phoneAudio.stop(); phoneAudioFrom = nil }
         cancelIncomingFiles(from: id)
         // The phone resends active notifications when it reconnects.
         phoneData[id]?.notifications = []
         phoneData[id]?.filesLoading = false
         screenRequests.remove(id)
         if screen?.peerId == id { endScreen() }
+        endTerminals(of: id)
+        if camera?.peerId == id { endCamera() }
+        cameraRequests.remove(id)
+        if macScreens[id] != nil { endMacScreen(id, error: nil) }
         for index in transfers.indices where transfers[index].peerId == id && transfers[index].status == .active {
             transfers[index].status = .failed
             transfers[index].detail = "Connection lost"
@@ -260,17 +541,218 @@ final class AppModel {
         rebuildPeers()
     }
 
+    // MARK: - This screen on a phone
+
+    private func handleMacScreen(_ envelope: Envelope, from id: String, session: PeerSession) {
+        switch envelope.type {
+        case MessageType.macScreenStart:
+            let mode = envelope.text ?? ""
+            startMacScreen(for: id, session: session, extend: mode.hasPrefix("extend") ? envelope.screen : nil,
+                           large: mode == "extend-large", display: envelope.displayId)
+        case MessageType.macScreenSync:
+            macScreens[id]?.encoder.requestKeyFrame()
+        case MessageType.macScreenStop:
+            endMacScreen(id, error: nil)
+        case MessageType.macScreenPointer:
+            guard let viewer = macScreens[id], let control = envelope.control,
+                  let x = control.x, let y = control.y, x.isFinite, y.isFinite else { return }
+            guard isInputTrusted || TestEnv.isDryRun else { return showTrustCardIfNeeded() }
+            let frame = viewer.displayFrame
+            let point = CGPoint(x: frame.minX + CGFloat(min(max(x, 0), 1)) * frame.width,
+                                y: frame.minY + CGFloat(min(max(y, 0), 1)) * frame.height)
+            DeviceInput.pointer(control.kind, at: point)
+        default:
+            break
+        }
+    }
+
+    private func startMacScreen(for id: String, session: PeerSession, extend: ScreenInfo? = nil, large: Bool = false,
+                                display: UInt32? = nil) {
+        // Only one of this Mac's own displays can be picked.
+        let display = display.flatMap { wanted in MacScreenViewer.displays().contains { $0.id == wanted } ? wanted : nil }
+        func refuse(_ reason: String) {
+            var reply = Envelope(type: MessageType.macScreenStopped)
+            reply.error = reason
+            session.send(reply)
+        }
+        guard screenShareEnabled else {
+            return refuse("Turn on \"View this screen from the phone\" in DyskLink on the Mac first.")
+        }
+        let wanted = extend.flatMap { SecondDisplay.size(requested: $0, large: large) }
+        if let viewer = macScreens[id], (viewer.extraDisplay != nil) != (extend != nil)
+            || (wanted != nil && (viewer.extraSize?.width != wanted?.width || viewer.extraSize?.height != wanted?.height
+                || viewer.extraLarge != large))
+            || (extend == nil && display != nil && macScreens[id]?.displayID != display) {
+            // Switching between viewing and extending, or turning the phone, starts over.
+            endMacScreen(id, error: nil)
+        }
+        if let viewer = macScreens[id] {
+            // Asked again, for example after the app came back: send the size and a fresh picture.
+            var started = Envelope(type: MessageType.macScreenStarted)
+            started.screen = ScreenInfo(width: viewer.width, height: viewer.height)
+            started.text = viewer.displayName
+            if viewer.extraDisplay == nil {
+                started.displays = MacScreenViewer.displays()
+                started.displayId = viewer.displayID ?? CGMainDisplayID()
+            }
+            session.send(started)
+            viewer.encoder.requestKeyFrame()
+            return
+        }
+        guard TestEnv.isDryRun || CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            return refuse("Allow Screen Recording for DyskLink in System Settings › Privacy & Security on the Mac, then try again.")
+        }
+        var extra: DLVirtualDisplay?
+        if extend != nil {
+            guard let size = wanted else { return refuse("The phone asked for a display size this Mac can't make.") }
+            let name = "\(records[id]?.name ?? "Phone") (DyskLink)"
+            // Each orientation is its own display, so macOS remembers where each one sits.
+            let serial = (UInt32(id.prefix(8), radix: 16) ?? 1) & ~3 | (size.height > size.width ? 1 : 0) | (large ? 2 : 0)
+            if TestEnv.isDryRun {
+                TestEnv.log("SECOND_DISPLAY \(size.width)x\(size.height)\(large ? " large" : "")")
+                return refuse("Extra displays aren't made in tests.")
+            }
+            guard let made = SecondDisplay.make(name: name, width: size.width, height: size.height, serial: serial, sharp: !large) else {
+                return refuse("macOS didn't make the extra display.")
+            }
+            extra = made
+        }
+        var config = MacScreenEncoder.Config()
+        if extra != nil { config.maxSide = 1920 }
+        let encoder = MacScreenEncoder(config: config)
+        let viewer = MacScreenViewer(encoder: encoder)
+        viewer.extraDisplay = extra
+        viewer.extraSize = wanted
+        viewer.extraLarge = large
+        viewer.displayID = extra == nil ? display : nil
+        viewer.bitrate = config.bitrate
+        viewer.maxBitrate = config.bitrate
+        macScreens[id] = viewer
+        encoder.onFrame = { [weak self] data, key in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.sendMacScreenFrame(data, key: key, to: id) } }
+        }
+        encoder.onStopped = { [weak self] error in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.endMacScreen(id, error: error ?? "Recording stopped") } }
+        }
+        Task { @MainActor in
+            do {
+                let started = try await encoder.start(displayID: viewer.extraDisplay?.displayID ?? viewer.displayID)
+                guard macScreens[id] === viewer else { return encoder.stop() }
+                viewer.width = started.width
+                viewer.height = started.height
+                viewer.displayFrame = started.displayFrame
+                viewer.displayName = started.displayName
+                var reply = Envelope(type: MessageType.macScreenStarted)
+                reply.screen = ScreenInfo(width: started.width, height: started.height)
+                reply.text = started.displayName
+                if viewer.extraDisplay == nil {
+                    reply.displays = MacScreenViewer.displays()
+                    reply.displayId = viewer.displayID ?? CGMainDisplayID()
+                    TestEnv.log("MACSCREEN_DISPLAYS \(reply.displays?.count ?? 0)")
+                }
+                sessions[id]?.send(reply)
+                let name = records[id]?.name ?? "A phone"
+                TestEnv.log("MACSCREEN_STARTED \(started.width)x\(started.height)")
+                if viewer.extraDisplay != nil {
+                    notifier.show(id: "macscreen:\(id)", title: "\(name) is now an extra display", subtitle: "DyskLink",
+                                  body: "Drag windows onto it. Arrange it in System Settings › Displays.")
+                } else {
+                    notifier.show(id: "macscreen:\(id)", title: "\(name) is viewing this screen", subtitle: "DyskLink",
+                                  body: "Turn off View this screen from the phone to stop it.")
+                }
+            } catch {
+                macScreens[id] = nil
+                encoder.stop()
+                viewer.extraDisplay = nil
+                refuse("The screen couldn't be recorded: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Sends a frame unless the network has fallen behind, then waits for a key frame so the picture stays whole.
+    private func sendMacScreenFrame(_ data: Data, key: Bool, to id: String) {
+        guard let viewer = macScreens[id], let session = sessions[id] else { return }
+        if data.count > PhoneLinkProtocol.maxScreenFrameBytes {
+            viewer.waitsForKey = true
+            viewer.encoder.requestKeyFrame()
+            return
+        }
+        if viewer.windowSent + viewer.windowDropped >= MacScreenViewer.adaptEvery {
+            let next = MacScreenViewer.nextBitrate(current: viewer.bitrate, sent: viewer.windowSent,
+                                                   dropped: viewer.windowDropped, max: viewer.maxBitrate)
+            if next != viewer.bitrate {
+                viewer.bitrate = next
+                viewer.encoder.setBitrate(next)
+            }
+            viewer.windowSent = 0
+            viewer.windowDropped = 0
+        }
+        if !key, viewer.waitsForKey || viewer.inFlight >= MacScreenViewer.maxInFlight {
+            if !viewer.waitsForKey { viewer.encoder.requestKeyFrame() }
+            viewer.waitsForKey = true
+            viewer.dropped += 1
+            viewer.windowDropped += 1
+            return
+        }
+        viewer.windowSent += 1
+        viewer.waitsForKey = false
+        viewer.inFlight += 1
+        viewer.sent += 1
+        if viewer.sent == 1 { TestEnv.log("MACSCREEN_FRAME key=\(key) bytes=\(data.count)") }
+        var envelope = Envelope(type: MessageType.macScreenFrame)
+        envelope.video = data.base64EncodedString()
+        envelope.keyFrame = key
+        session.send(envelope) { [weak viewer] _ in viewer?.inFlight -= 1 }
+    }
+
+    func endMacScreen(_ id: String, error: String?) {
+        guard let viewer = macScreens.removeValue(forKey: id) else { return }
+        viewer.encoder.stop()
+        // Windows on the extra display move back to the others when it goes away.
+        viewer.extraDisplay = nil
+        notifier.remove(id: "macscreen:\(id)")
+        TestEnv.log("MACSCREEN_STOPPED sent=\(viewer.sent) dropped=\(viewer.dropped)")
+        var reply = Envelope(type: MessageType.macScreenStopped)
+        reply.error = error
+        sessions[id]?.send(reply)
+    }
+
+    /// Waits for the chosen phone to come back, and locks the Mac when it doesn't.
+    private func scheduleAutoLock() {
+        autoLockWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let id = self.autoLockPhone else { return }
+                let lock = AutoLock.shouldLock(phoneConnected: self.sessions[id] != nil,
+                                               screenLocked: AutoLock.isScreenLocked, macOnline: !self.addresses.isEmpty)
+                guard lock else { return }
+                let name = self.records[id]?.name ?? "The phone"
+                TestEnv.log("AUTOLOCK \(name)")
+                MacActions.lockScreen()
+                self.notifier.show(id: "autolock", title: "Mac locked", subtitle: "DyskLink",
+                                   body: "\(name) went away, so this Mac was locked.")
+            }
+        }
+        autoLockWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(autoLockDelay), execute: work)
+    }
+
     private func handle(_ envelope: Envelope, from session: PeerSession) {
         guard let id = session.deviceId else { return }
         // Every message except hello only applies to registered connections.
         guard envelope.type == MessageType.hello || sessions[id] === session else { return }
+        if isMac(id, session), !Self.macMessageTypes.contains(envelope.type) { return }
         switch envelope.type {
         case MessageType.hello:
             guard let hello = envelope.hello else { return }
+            if hello.platform == "macos", !macSyncEnabled { return session.close() }
             // The newest connection replaces the old one, which may be dead.
             if let old = sessions[id], old !== session { old.close() }
             sessions[id] = session
             session.hello = hello
+            if session.isLoopback { TestEnv.log("USB_SESSION \(hello.name)") }
+            if id == autoLockPhone { autoLockWork?.cancel() }
             if records[id] != nil {
                 if hello.paired {
                     records[id]?.name = hello.name
@@ -282,15 +764,42 @@ final class AppModel {
                 }
             }
             rebuildPeers()
+            #if DEBUG
+            if TestEnv.value("PHONELINK_TEST_PAIR_MAC") == "1", hello.platform == "macos", records[id] == nil {
+                requestPairing(with: id)
+            }
+            #endif
         case MessageType.pairRequest:
             guard records[id] == nil, session.hello != nil else { return }
             beginPairing(with: id, startedByPeer: true)
         case MessageType.pairAccept:
-            guard pairingPrompt?.peerId == id else { return }
-            remoteAccepted.insert(id)
-            finishPairingIfReady(id)
+            guard var prompt = pairingPrompt, prompt.peerId == id, let identity else { return }
+            if prompt.showsCode {
+                if envelope.key == Pairing.proof(prompt.code, identity.deviceId, id) {
+                    session.send(Envelope(type: MessageType.pairAccept))
+                    completePairing(id)
+                } else {
+                    prompt.attempts += 1
+                    if prompt.attempts >= Pairing.maxAttempts { return rejectPairing() }
+                    prompt.error = "A wrong code was typed on \(prompt.peerName)."
+                    pairingPrompt = prompt
+                    var wrong = Envelope(type: MessageType.pairReject)
+                    wrong.error = Pairing.wrongCode
+                    session.send(wrong)
+                }
+            } else if prompt.localAccepted {
+                completePairing(id)
+            }
         case MessageType.pairReject:
-            if pairingPrompt?.peerId == id { clearPairing() }
+            guard var prompt = pairingPrompt, prompt.peerId == id else { return }
+            if envelope.error == Pairing.wrongCode, !prompt.showsCode {
+                prompt.localAccepted = false
+                pairingEntry = ""
+                prompt.error = "That code isn't right. Check the code on \(prompt.peerName) and try again."
+                pairingPrompt = prompt
+            } else {
+                clearPairing()
+            }
         case MessageType.unpair:
             removeRecord(id)
             rebuildPeers()
@@ -301,9 +810,23 @@ final class AppModel {
             print("INFO \(hello(of: session)) battery=\(info.batteryPercent.map(String.init) ?? "-") os=\(info.osVersion ?? "-")")
             #endif
             rebuildPeers()
-            onPeerInfo?(id, peers.first { $0.id == id }?.name ?? "Phone", info)
+            if !isMac(id, session) { onPeerInfo?(id, peers.first { $0.id == id }?.name ?? "Phone", info) }
         case MessageType.ping:
             session.send(Envelope(type: MessageType.pong))
+        case MessageType.notchAction:
+            guard records[id] != nil, let action = envelope.notchAction else { return }
+            TestEnv.log("NOTCH_ACTION \(action.kind) \(action.text ?? "")")
+            onNotchAction?(action)
+        case MessageType.macAction:
+            guard records[id] != nil, let action = envelope.macAction else { return }
+            TestEnv.log("MAC_ACTION \(action)")
+            onMacAction?(action)
+            broadcastInfo()
+        case MessageType.ring:
+            guard records[id] != nil else { return }
+            if envelope.ring == "start" { ringer.start(from: hello(of: session)) }
+            else if envelope.ring == "stop" { ringer.stop() }
+            else if envelope.ring == "stopped" { ringingPhones.remove(id) }
         case MessageType.clipboard:
             guard records[id] != nil else { return }
             var receipt = Envelope(type: MessageType.clipboardAck, key: envelope.key)
@@ -316,6 +839,10 @@ final class AppModel {
             }
             // Only the phone asks for a receipt, because its connection can die without warning.
             if envelope.key != nil { session.send(receipt) }
+        case MessageType.clipboardHistory:
+            guard records[id] != nil, clipboardEnabled, sharesClipboardHistory, let clips = envelope.clips else { return }
+            TestEnv.log("CLIPBOARD_HISTORY \(clips.count)")
+            onClipboardHistory?(Array(clips.prefix(PhoneLinkProtocol.maxSyncedClips)))
         case MessageType.media:
             guard records[id] != nil, let action = envelope.media else { return }
             showTrustCardIfNeeded()
@@ -327,6 +854,15 @@ final class AppModel {
         case MessageType.commandRun:
             guard records[id] != nil, let commandId = envelope.commandId else { return }
             runCommand(commandId, for: session)
+        case MessageType.audioListen, MessageType.audioStarted, MessageType.audioFrame, MessageType.audioStop, MessageType.audioStopped:
+            guard records[id] != nil, !isMac(id, session) else { return }
+            handleAudio(envelope, from: id, session: session)
+        case MessageType.macScreenStart, MessageType.macScreenSync, MessageType.macScreenStop, MessageType.macScreenPointer:
+            guard records[id] != nil else { return }
+            handleMacScreen(envelope, from: id, session: session)
+        case MessageType.terminalOpen, MessageType.terminalInput, MessageType.terminalResize, MessageType.terminalClose:
+            guard records[id] != nil, let message = envelope.terminal else { return }
+            handleTerminal(envelope.type, message, from: id, session: session)
         case MessageType.fileOffer, MessageType.fileChunk, MessageType.fileDone,
              MessageType.fileCancel, MessageType.fileResult:
             guard records[id] != nil, let file = envelope.file else { return }
@@ -334,9 +870,12 @@ final class AppModel {
         case MessageType.screenStarted, MessageType.screenFrame, MessageType.screenStopped:
             guard records[id] != nil else { return }
             handleScreen(envelope, from: id, session: session)
+        case MessageType.cameraStarted, MessageType.cameraFrame, MessageType.cameraStopped:
+            guard records[id] != nil, !isMac(id, session) else { return }
+            handleCamera(envelope, from: id, session: session)
         case MessageType.features, MessageType.notificationPosted, MessageType.notificationRemoved,
              MessageType.smsMessages, MessageType.smsNew, MessageType.smsResult, MessageType.call,
-             MessageType.contacts, MessageType.fsListing:
+             MessageType.contacts, MessageType.fsListing, MessageType.usage, MessageType.gallery:
             guard records[id] != nil else { return }
             handlePhone(envelope, from: id, session: session)
         default:
@@ -352,13 +891,19 @@ final class AppModel {
         beginPairing(with: id, startedByPeer: false)
     }
 
-    func acceptPairing() {
-        guard var prompt = pairingPrompt, let session = sessions[prompt.peerId] else { return }
+    /// Sends the code typed on this Mac. The other device checks it.
+    func submitPairingCode(_ typed: String) {
+        let digits = typed.filter(\.isNumber)
+        guard var prompt = pairingPrompt, !prompt.showsCode, !prompt.outdated, digits.count == 6,
+              let session = sessions[prompt.peerId], let identity else { return }
         prompt.localAccepted = true
+        prompt.error = nil
         pairingPrompt = prompt
-        session.send(Envelope(type: MessageType.pairAccept))
-        finishPairingIfReady(prompt.peerId)
+        session.send(Envelope(type: MessageType.pairAccept, key: Pairing.proof(digits, identity.deviceId, prompt.peerId)))
     }
+
+    /// What's typed in the code box on this Mac.
+    var pairingEntry = ""
 
     func rejectPairing() {
         guard let prompt = pairingPrompt else { return }
@@ -379,11 +924,18 @@ final class AppModel {
             sessions[id]?.send(Envelope(type: MessageType.pairReject))
             return
         }
-        if pairingPrompt?.peerId == id { return }
-        remoteAccepted.remove(id)
+        if let current = pairingPrompt, current.peerId == id {
+            // Both asked at once: the smaller ID shows the code, the other types it.
+            guard startedByPeer, !current.showsCode, identity.deviceId < id else { return }
+        }
+        let testCode = ProcessInfo.processInfo.environment["PHONELINK_TEST_AUTO_ACCEPT"] == "1"
+        pairingEntry = ""
         pairingPrompt = PairingPrompt(
             peerId: id, peerName: hello.name,
-            code: Pairing.code(identity.deviceId, id), startedByPeer: startedByPeer
+            code: startedByPeer ? (testCode ? "123456" : Pairing.newCode()) : "", startedByPeer: startedByPeer,
+            error: hello.protocolVersion < Pairing.typedSince
+                ? "\(hello.name) has an older DyskLink. Update it there, then pair again." : nil,
+            outdated: hello.protocolVersion < Pairing.typedSince
         )
         onNeedsAttention?()
         pairingTimeout?.cancel()
@@ -395,22 +947,25 @@ final class AppModel {
         #if DEBUG
         // For automated tests only. Not in release builds.
         if ProcessInfo.processInfo.environment["PHONELINK_TEST_AUTO_ACCEPT"] == "1" {
-            print("PAIRING_CODE \(pairingPrompt?.code ?? "")")
-            acceptPairing()
+            print("PAIRING_CODE 123456")
+            if !startedByPeer { submitPairingCode("123456") }
         }
         #endif
     }
 
-    private func finishPairingIfReady(_ id: String) {
-        guard let prompt = pairingPrompt, prompt.peerId == id, prompt.localAccepted,
-              remoteAccepted.contains(id), let session = sessions[id], let hello = session.hello
-        else { return }
+    private func completePairing(_ id: String) {
+        guard let session = sessions[id], let hello = session.hello else { return }
         records[id] = PairedRecord(name: hello.name, platform: hello.platform, model: hello.model, pairedAt: Date())
         saveRecords()
         clearPairing()
         selectedPeerId = id
         #if DEBUG
         print("PAIRING_DONE \(hello.name)")
+        // The integration test checks that the Mac locks once the test phone leaves.
+        if let seconds = TestEnv.value("PHONELINK_TEST_AUTOLOCK").flatMap(Int.init), hello.platform != "macos" {
+            autoLockPhone = id
+            autoLockDelay = seconds
+        }
         #endif
         sendInitialState(to: session)
         rebuildPeers()
@@ -419,15 +974,31 @@ final class AppModel {
     private func clearPairing() {
         pairingTimeout?.cancel()
         pairingTimeout = nil
-        if let id = pairingPrompt?.peerId { remoteAccepted.remove(id) }
         pairingPrompt = nil
+        pairingEntry = ""
     }
 
     // MARK: - Features
 
     private func sendInitialState(to session: PeerSession) {
         session.send(Envelope(type: MessageType.info, info: currentInfo()))
+        if let id = session.deviceId, isMac(id, session) {
+            if clipboardEnabled, sharesClipboardHistory, let clips = clipboardHistoryProvider?(), !clips.isEmpty {
+                var envelope = Envelope(type: MessageType.clipboardHistory)
+                envelope.clips = MacSync.fitting(clips)
+                session.send(envelope)
+            }
+            #if DEBUG
+            if let text = TestEnv.value("PHONELINK_TEST_SHARE_CLIPBOARD") { shareClipboard(text) }
+            #endif
+            return
+        }
         sendCommandList(to: session)
+        if let state = notchState?() {
+            var envelope = Envelope(type: MessageType.notchState)
+            envelope.notch = state
+            session.send(envelope)
+        }
         #if DEBUG
         if let path = TestEnv.value("PHONELINK_TEST_SEND_FILE"), let id = session.deviceId {
             sendFile(URL(fileURLWithPath: path), to: id)
@@ -442,18 +1013,65 @@ final class AppModel {
         }
     }
 
+    /// Sends the notch's data to every paired phone after it changed on the Mac or from a phone.
+    func broadcastNotch(_ state: NotchState) {
+        var envelope = Envelope(type: MessageType.notchState)
+        envelope.notch = state
+        for (id, session) in sessions where records[id] != nil { session.send(envelope) }
+    }
+
+    /// Makes the phone ring loudly, even when it is on silent, until it is stopped or 30 seconds pass.
+    func ringPhone(_ id: String, _ on: Bool) {
+        guard records[id] != nil, let session = sessions[id] else { return }
+        var envelope = Envelope(type: MessageType.ring)
+        envelope.ring = on ? "start" : "stop"
+        session.send(envelope)
+        if on {
+            ringingPhones.insert(id)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(MacRinger.duration))
+                self?.ringingPhones.remove(id)
+            }
+        } else {
+            ringingPhones.remove(id)
+        }
+    }
+
+    private func broadcastRingStopped() {
+        var envelope = Envelope(type: MessageType.ring)
+        envelope.ring = "stopped"
+        for (id, session) in sessions where records[id] != nil { session.send(envelope) }
+    }
+
+    /// The version of DyskLink on a connected phone. Nil for apps older than 0.2.0, which don't say.
+    func phoneAppVersion(_ id: String) -> String? { sessions[id]?.hello?.appVersion }
+
     func sendMedia(_ action: String, to id: String) {
         guard records[id] != nil else { return }
         sessions[id]?.send(Envelope(type: MessageType.media, media: action))
     }
 
+    /// Commands from tools, such as restoring a saved window layout, listed after the user's own.
+    @ObservationIgnored var toolCommands: (() -> [CommandItem])?
+    /// Runs a tool command. Returns nil when the ID isn't one.
+    @ObservationIgnored var runToolCommand: ((String) -> String?)?
+
+    /// Sends the command list again, after tool commands change.
+    func toolCommandsChanged() {
+        for (id, session) in sessions where records[id] != nil { sendCommandList(to: session) }
+    }
+
     private func sendCommandList(to session: PeerSession) {
         // Script contents are deliberately not sent to the phone.
-        let items = commands.map { CommandItem(id: $0.id, name: $0.name) }
+        let items = commands.map { CommandItem(id: $0.id, name: $0.name) } + (toolCommands?() ?? [])
         session.send(Envelope(type: MessageType.commandsList, commands: items))
     }
 
     private func runCommand(_ commandId: String, for session: PeerSession) {
+        if let output = runToolCommand?(commandId) {
+            TestEnv.log("TOOL_COMMAND \(commandId)")
+            return session.send(Envelope(type: MessageType.commandResult, commandResult: CommandResult(id: commandId, exitCode: 0, output: output)))
+        }
         guard let command = commands.first(where: { $0.id == commandId }) else {
             let result = CommandResult(id: commandId, exitCode: -1, output: "Command not found")
             return session.send(Envelope(type: MessageType.commandResult, commandResult: result))
@@ -503,7 +1121,93 @@ final class AppModel {
         MessageType.notificationPosted: "notifications", MessageType.notificationRemoved: "notifications",
         MessageType.smsMessages: "sms", MessageType.smsNew: "sms", MessageType.smsResult: "sms",
         MessageType.call: "calls", MessageType.contacts: "contacts", MessageType.fsListing: "files",
+        MessageType.usage: "screentime", MessageType.gallery: "gallery",
     ]
+
+    // MARK: Gallery
+
+    /// What to do with each gallery file on its way, by file name.
+    private var galleryWanted: [String: GalleryAction] = [:]
+    enum GalleryAction { case open, save }
+
+    private static func galleryRequest(offset: Int) -> Envelope {
+        var envelope = Envelope(type: MessageType.galleryList)
+        envelope.offset = offset
+        return envelope
+    }
+
+    private static func galleryGet(_ id: Int64) -> Envelope {
+        var envelope = Envelope(type: MessageType.galleryGet)
+        envelope.galleryId = id
+        return envelope
+    }
+
+    /// Loads the next page of the phone's gallery, or starts over.
+    func loadGallery(_ id: String, reset: Bool = false) {
+        guard records[id] != nil, let session = sessions[id] else { return }
+        var data = phone(id)
+        guard data.features.contains("gallery") else { return }
+        if reset { data.gallery = []; data.galleryEnd = false; data.galleryError = nil; data.galleryLoading = false }
+        guard !data.galleryLoading, !data.galleryEnd else { return }
+        data.galleryLoading = true
+        phoneData[id] = data
+        session.send(Self.galleryRequest(offset: data.gallery.count))
+    }
+
+    /// Copies of opened photos are kept here, so opening one again doesn't download it again.
+    func galleryFolder(for id: String) -> URL {
+        let phone = FileNames.sanitize(records[id]?.name ?? peers.first { $0.id == id }?.name ?? "Phone")
+        let base = TestEnv.value("PHONELINK_DATA_DIR").map { URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("Gallery") }
+            ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("DyskLink/Gallery", isDirectory: true)
+        return base.appendingPathComponent(phone, isDirectory: true)
+    }
+
+    /// Opens a photo or video, or saves it to Downloads/DyskLink.
+    func galleryItem(_ item: GalleryItem, on id: String, action: GalleryAction) {
+        let name = FileNames.sanitize(item.name)
+        let cached = galleryFolder(for: id).appendingPathComponent(name)
+        if let size = (try? FileManager.default.attributesOfItem(atPath: cached.path))?[.size] as? NSNumber, size.int64Value == item.size || item.size <= 0 {
+            return finishGallery(cached, action: action)
+        }
+        guard records[id] != nil, let session = sessions[id] else { return }
+        galleryWanted[name] = action
+        session.send(Self.galleryGet(item.id))
+    }
+
+    private func finishGallery(_ url: URL, action: GalleryAction) {
+        TestEnv.log("GALLERY_FILE \(url.lastPathComponent) \(action == .open ? "open" : "save")")
+        switch action {
+        case .open:
+            if !TestEnv.isDryRun { NSWorkspace.shared.open(url) }
+        case .save:
+            try? FileManager.default.createDirectory(at: downloadFolder, withIntermediateDirectories: true)
+            let target = FileNames.unique(in: downloadFolder, name: url.lastPathComponent)
+            if (try? FileManager.default.copyItem(at: url, to: target)) != nil, !TestEnv.isDryRun {
+                NSWorkspace.shared.activateFileViewerSelecting([target])
+            }
+        }
+    }
+
+    /// Asks the phone for today's screen time, at most once a minute.
+    func requestScreenTime(_ id: String, force: Bool = false) {
+        guard records[id] != nil, let session = sessions[id], phone(id).features.contains("screentime") else { return }
+        if !force, let last = screenTimeAsked[id], Date().timeIntervalSince(last) < 60 { return }
+        screenTimeAsked[id] = Date()
+        session.send(Envelope(type: MessageType.usageList))
+    }
+
+    /// Shows the code under the notch when the text has one. True when it did.
+    private func foundCode(_ text: String, source: String, from id: String) -> Bool {
+        guard codesEnabled, let code = OneTimeCode.find(in: text) else { return false }
+        let now = Date()
+        recentCodes = recentCodes.filter { now.timeIntervalSince($0.value) < 120 }
+        TestEnv.log("PHONE_CODE \(code)")
+        if recentCodes[code] == nil {
+            recentCodes[code] = now
+            onCode?(CodeNotice(code: code, source: source, phone: peers.first { $0.id == id }?.name ?? "Phone"))
+        }
+        return true
+    }
 
     private func handlePhone(_ envelope: Envelope, from id: String, session: PeerSession) {
         var data = phone(id)
@@ -520,11 +1224,21 @@ final class AppModel {
             if !features.isDisjoint(with: ["notifications", "calls", "sms"]) { notifier.prepare() }
             if features.contains("sms") { session.send(Envelope(type: MessageType.smsList)) }
             if features.contains("contacts") { session.send(Envelope(type: MessageType.contactsList)) }
+            if features.contains("screentime"), !previous.contains("screentime") || !wasKnown {
+                screenTimeAsked[id] = Date()
+                session.send(Envelope(type: MessageType.usageList))
+            }
+            if features.contains("gallery"), !wasKnown || !previous.contains("gallery") {
+                data.gallery = []
+                data.galleryEnd = false
+                data.galleryLoading = true
+                session.send(Self.galleryRequest(offset: 0))
+            }
             if features.contains("files"), !wasKnown || !previous.contains("files") {
                 data.beginListing("")
                 session.send(Envelope(type: MessageType.fsList, path: ""))
             }
-            if TestEnv.value("PHONELINK_TEST_PROBE_PHONE") == "1", features.count == 7, !didProbePhone {
+            if TestEnv.value("PHONELINK_TEST_PROBE_PHONE") == "1", features.count >= 7, !didProbePhone {
                 didProbePhone = true
                 data.pendingSms = "uji-sms"
                 probePhone(session)
@@ -533,7 +1247,8 @@ final class AppModel {
             guard let item = envelope.notification else { return }
             data.upsert(item)
             TestEnv.log("PHONE_NOTIFICATION \(item.app) \(item.title ?? "") silent=\(item.silent == true)")
-            if item.silent != true {
+            if item.silent != true, !foundCode([item.title, item.text].compactMap { $0 }.joined(separator: " "), source: item.title ?? item.app, from: id) {
+                onPhoneNotification?(PhoneAlert(peerId: id, phone: peers.first { $0.id == id }?.name ?? "Phone", item: item))
                 notifier.show(id: "\(id):\(item.key)", title: item.title ?? item.app, subtitle: item.app, body: item.text ?? "")
             }
         case MessageType.notificationRemoved:
@@ -548,6 +1263,11 @@ final class AppModel {
             data.merge(items)
             TestEnv.log("PHONE_SMS \(envelope.type) \(items.map(\.body).joined(separator: "|"))")
             // With notifications on, the phone's SMS app already posts its own notification.
+            if isNew {
+                for item in items where !item.outgoing && !known.contains(item.id) {
+                    _ = foundCode(item.body, source: data.name(for: item.address), from: id)
+                }
+            }
             if isNew, !data.features.contains("notifications") {
                 for item in items where !item.outgoing && !known.contains(item.id) {
                     notifier.show(id: "\(id):sms:\(item.id)", title: data.name(for: item.address), subtitle: "SMS", body: item.body)
@@ -564,6 +1284,7 @@ final class AppModel {
             data.lastCall = call
             let name = call.number.map(data.name(for:)) ?? "Unknown number"
             TestEnv.log("PHONE_CALL \(call.state) \(name)")
+            onCall?(call.state)
             switch call.state {
             case "ringing": notifier.show(id: "\(id):call", title: "Incoming call", subtitle: nil, body: name)
             case "missed": notifier.show(id: "\(id):call", title: "Missed call", subtitle: nil, body: name)
@@ -579,12 +1300,48 @@ final class AppModel {
             if TestEnv.value("PHONELINK_TEST_PROBE_PHONE") == "1" {
                 TestEnv.log("PHONE_VCARD \(ContactExport.vcard(data.contacts).replacingOccurrences(of: "\r\n", with: "~"))")
             }
+        case MessageType.usage:
+            guard let report = envelope.usage else { return }
+            data.usage = UsageReport(since: report.since, totalMs: max(0, report.totalMs),
+                                     apps: Array(report.apps.prefix(12)), unlocks: report.unlocks)
+            data.usageTime = Date()
+            TestEnv.log("PHONE_USAGE \(report.totalMs / 60_000) \(report.apps.map { "\($0.name) \($0.ms / 60_000)" }.joined(separator: ",")) unlocks=\(report.unlocks ?? -1)")
+        case MessageType.gallery:
+            data.receiveGallery(envelope.gallery ?? [], more: envelope.more == true, end: envelope.galleryEnd == true, error: envelope.error)
+            TestEnv.log("PHONE_GALLERY \(data.gallery.count) end=\(data.galleryEnd)")
+            if TestEnv.value("PHONELINK_TEST_PROBE_PHONE") == "1", let first = data.gallery.first, !didProbeGallery {
+                didProbeGallery = true
+                galleryWanted[FileNames.sanitize(first.name)] = .save
+                session.send(Self.galleryGet(first.id))
+            }
         case MessageType.fsListing:
             data.receiveListing(path: envelope.path ?? "", entries: envelope.entries ?? [], more: envelope.more == true, error: envelope.error)
             TestEnv.log("PHONE_FS \(envelope.path ?? "") \((envelope.entries ?? []).map(\.name).joined(separator: ",")) \(envelope.error ?? "")")
         default:
             break
         }
+    }
+
+    /// Notifications from every connected phone that shares them, newest first, for the notch.
+    /// Phone notifications on all connected phones, for the Dock and menu bar number.
+    private(set) var alertCount = 0
+
+    private func updateBadge() {
+        let count = peers.filter { $0.isPaired && $0.isConnected }.reduce(0) { $0 + (phoneData[$1.id]?.notifications.count ?? 0) }
+        guard count != alertCount else { return }
+        alertCount = count
+        if !TestEnv.isDryRun { NSApp?.dockTile.badgeLabel = count > 0 ? "\(count)" : nil }
+    }
+
+    var phoneAlerts: [PhoneAlert] {
+        peers.filter { $0.isPaired && $0.isConnected }.flatMap { peer in
+            phone(peer.id).notifications.map { PhoneAlert(peerId: peer.id, phone: peer.name, item: $0) }
+        }
+        .sorted { $0.item.time > $1.item.time }
+    }
+
+    var hasPhoneAlerts: Bool {
+        peers.contains { $0.isPaired && $0.isConnected && phone($0.id).features.contains("notifications") }
     }
 
     func dismissNotification(_ key: String, on id: String) {
@@ -602,6 +1359,72 @@ final class AppModel {
         data.smsStatus = .sending
         phoneData[id] = data
         session.send(Envelope(type: MessageType.smsSend, smsSend: SmsSend(id: requestId, address: target, body: body)))
+    }
+
+    // MARK: Terminal
+
+    private func handleTerminal(_ type: String, _ message: TerminalMessage, from id: String, session: PeerSession) {
+        let key = "\(id):\(message.id)"
+        switch type {
+        case MessageType.terminalOpen:
+            guard terminalEnabled else {
+                return session.send(Envelope(type: MessageType.terminalClosed, terminal: TerminalMessage(
+                    id: message.id, error: "Terminal is turned off on the Mac. Turn it on in DyskLink on the Mac, on this phone's page.")))
+            }
+            guard terminals[key] == nil else { return }
+            guard terminals.values.filter({ $0.peerId == id }).count < Self.maxTerminalsPerPhone else {
+                return session.send(Envelope(type: MessageType.terminalClosed, terminal: TerminalMessage(
+                    id: message.id, error: "Close a terminal first. Up to \(Self.maxTerminalsPerPhone) can be open.")))
+            }
+            let shell = PtyShell(id: message.id)
+            shell.onOutput = { [weak self, weak session] data in
+                Task { @MainActor in
+                    guard self?.terminals[key] != nil else { return }
+                    session?.send(Envelope(type: MessageType.terminalOutput, terminal: TerminalMessage(id: message.id, data: data.base64EncodedString())))
+                }
+            }
+            shell.onExit = { [weak self, weak session] code in
+                Task { @MainActor in
+                    guard let self, self.terminals.removeValue(forKey: key) != nil else { return }
+                    TestEnv.log("TERMINAL_CLOSED \(code)")
+                    session?.send(Envelope(type: MessageType.terminalClosed, terminal: TerminalMessage(id: message.id, exitCode: Int(code))))
+                }
+            }
+            do {
+                try shell.start(cols: message.cols ?? 80, rows: message.rows ?? 24)
+            } catch {
+                return session.send(Envelope(type: MessageType.terminalClosed, terminal: TerminalMessage(id: message.id, error: "The shell couldn't start.")))
+            }
+            terminals[key] = (id, shell)
+            TestEnv.log("TERMINAL_OPENED")
+            session.send(Envelope(type: MessageType.terminalOpened, terminal: TerminalMessage(id: message.id)))
+            let phone = peers.first { $0.id == id }?.name ?? "A phone"
+            // Always visible on the Mac, so a terminal never opens unnoticed.
+            notifier.show(id: "terminal:\(key)", title: "Terminal opened from \(phone)", subtitle: nil,
+                          body: "It runs as you. Turn Terminal off on the phone's page in DyskLink to stop it.")
+        case MessageType.terminalInput:
+            guard let shell = terminals[key]?.shell, let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return }
+            shell.write(data)
+        case MessageType.terminalResize:
+            guard let shell = terminals[key]?.shell, let cols = message.cols, let rows = message.rows else { return }
+            shell.resize(cols: cols, rows: rows)
+        case MessageType.terminalClose:
+            terminals[key]?.shell.hangUp()
+        default:
+            break
+        }
+    }
+
+    func terminalCount(of id: String) -> Int { terminals.values.filter { $0.peerId == id }.count }
+
+    func endTerminals(of id: String? = nil) {
+        for (key, value) in terminals where id == nil || value.peerId == id {
+            value.shell.hangUp()
+            terminals[key] = nil
+            let sessionId = String(key.split(separator: ":", maxSplits: 1).last ?? "")
+            sessions[value.peerId]?.send(Envelope(type: MessageType.terminalClosed, terminal: TerminalMessage(
+                id: sessionId, error: "The terminal was ended on the Mac.")))
+        }
     }
 
     func composeSms(to number: String) {
@@ -733,6 +1556,81 @@ final class AppModel {
         }
     }
 
+    // MARK: - Phone camera
+
+    private func handleCamera(_ envelope: Envelope, from id: String, session: PeerSession) {
+        switch envelope.type {
+        case MessageType.cameraStarted:
+            guard let info = envelope.screen, info.width > 0, info.height > 0 else { return }
+            if let current = camera, current.peerId != id {
+                return session.send(Envelope(type: MessageType.cameraStop))
+            }
+            let rotation = ((envelope.rotation ?? 0) % 360 + 360) % 360 / 90 * 90
+            let facing = envelope.text == "front" ? "front" : "back"
+            let name = session.hello?.name ?? records[id]?.name ?? "Phone"
+            let isNew = camera == nil
+            TestEnv.log("CAMERA_STARTED \(info.width)x\(info.height) \(facing) \(rotation)")
+            cameraRequests.remove(id)
+            cameraError[id] = nil
+            let sizeChanged = camera?.info != info
+            camera = CameraSession(peerId: id, peerName: name, info: info, facing: facing, rotation: rotation)
+            if isNew || sizeChanged {
+                cameraDecoder.reset()
+                cameraDecoder.onFrame = { buffer in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { CameraWindow.display(buffer) } }
+                }
+            }
+            if !TestEnv.isDryRun, let camera { CameraWindow.show(model: self, session: camera) }
+            session.send(Envelope(type: MessageType.cameraSync))
+        case MessageType.cameraFrame:
+            guard camera?.peerId == id, let text = envelope.video, let data = Data(base64Encoded: text) else { return }
+            if !cameraDecoder.decode(data), Date().timeIntervalSince(lastCameraSync) > 1 {
+                lastCameraSync = Date()
+                session.send(Envelope(type: MessageType.cameraSync))
+            }
+        case MessageType.cameraStopped:
+            TestEnv.log("CAMERA_STOPPED \(envelope.error ?? "")")
+            cameraRequests.remove(id)
+            cameraError[id] = envelope.error
+            if camera?.peerId == id { endCamera() }
+        default:
+            break
+        }
+    }
+
+    /// The phone shows a notification; the camera only starts after a tap there.
+    func requestCamera(from id: String) {
+        guard records[id] != nil, let session = sessions[id] else { return }
+        cameraError[id] = nil
+        cameraRequests.insert(id)
+        session.send(Envelope(type: MessageType.cameraRequest))
+    }
+
+    func cancelCameraRequest(for id: String) { cameraRequests.remove(id) }
+
+    /// True when this device is connected through a USB cable.
+    func isUsb(_ id: String) -> Bool { sessions[id]?.isLoopback == true }
+
+    func stopCamera() {
+        guard let current = camera else { return }
+        sessions[current.peerId]?.send(Envelope(type: MessageType.cameraStop))
+        endCamera()
+    }
+
+    func cameraControl(_ action: String) {
+        guard let current = camera else { return }
+        var envelope = Envelope(type: MessageType.cameraControl)
+        envelope.text = action
+        sessions[current.peerId]?.send(envelope)
+    }
+
+    private func endCamera() {
+        camera = nil
+        cameraDecoder.reset()
+        cameraDecoder.onFrame = nil
+        CameraWindow.close()
+    }
+
     func requestScreen(from id: String) {
         guard records[id] != nil, let session = sessions[id] else { return }
         screenError[id] = nil
@@ -792,7 +1690,9 @@ final class AppModel {
         else { return }
         let transferId = UUID().uuidString
         let name = FileNames.sanitize(url.lastPathComponent)
-        transfers.insert(Transfer(id: transferId, peerId: id, name: name, size: size, outgoing: true), at: 0)
+        var outgoing = Transfer(id: transferId, peerId: id, name: name, size: size, outgoing: true)
+        outgoing.location = url
+        transfers.insert(outgoing, at: 0)
         Task { [weak self] in
             defer { try? handle.close() }
             let failure = await Self.upload(handle, id: transferId, name: name, size: size, session: session) { sent in
@@ -841,7 +1741,10 @@ final class AppModel {
             guard let size = file.size, size >= 0, incomingFiles[file.id] == nil else { return }
             let name = FileNames.sanitize(file.name)
             do {
-                incomingFiles[file.id] = try IncomingFile(peerId: id, name: name, size: size, folder: downloadFolder)
+                let folder = file.kind == "photo" ? photoFolder(for: id) : file.kind == "gallery" ? galleryFolder(for: id) : downloadFolder
+                let incoming = try IncomingFile(peerId: id, name: name, size: size, folder: folder)
+                incoming.kind = file.kind
+                incomingFiles[file.id] = incoming
                 transfers.insert(Transfer(id: file.id, peerId: id, name: name, size: size, outgoing: false), at: 0)
             } catch {
                 replyFile(file.id, ok: false, error: "Can't save the file", to: session)
@@ -863,9 +1766,37 @@ final class AppModel {
             incomingFiles[file.id] = nil
             do {
                 try item.handle.close()
-                let target = FileNames.unique(in: downloadFolder, name: item.name)
+                // A photo sent again, such as from catching up on earlier photos, isn't saved twice.
+                let existing = item.folder.appendingPathComponent(item.name)
+                if item.folder.standardizedFileURL.path == photoFolder(for: id).standardizedFileURL.path, FileNames.sameFile(existing, size: item.size, sha256: hash) {
+                    try? FileManager.default.removeItem(at: item.partURL)
+                    updateTransfer(file.id) { $0.location = existing }
+                    replyFile(file.id, ok: true, error: nil, to: session)
+                    finishTransfer(file.id, status: .done, detail: "Already on this Mac")
+                    TestEnv.log("PHOTO_DUPLICATE \(item.name)")
+                    return
+                }
+                if item.kind == "gallery" {
+                    // A gallery copy replaces an older one of the same name.
+                    let target = item.folder.appendingPathComponent(item.name)
+                    try? FileManager.default.removeItem(at: target)
+                    try FileManager.default.moveItem(at: item.partURL, to: target)
+                    updateTransfer(file.id) { $0.location = target }
+                    replyFile(file.id, ok: true, error: nil, to: session)
+                    finishTransfer(file.id, status: .done, detail: nil)
+                    finishGallery(target, action: galleryWanted.removeValue(forKey: item.name) ?? .open)
+                    return
+                }
+                let target = FileNames.unique(in: item.folder, name: item.name)
                 try FileManager.default.moveItem(at: item.partURL, to: target)
                 updateTransfer(file.id) { $0.location = target }
+                if item.kind == "scan", target.pathExtension.lowercased() == "pdf" {
+                    // The text layer is added afterwards, so the scan is there right away.
+                    Task.detached(priority: .utility) {
+                        let pages = SearchablePDF.addText(to: target)
+                        TestEnv.log("SCAN_TEXT \(pages)")
+                    }
+                }
                 replyFile(file.id, ok: true, error: nil, to: session)
                 finishTransfer(file.id, status: .done, detail: nil)
             } catch {
@@ -915,12 +1846,49 @@ final class AppModel {
     }
 
     private func finishTransfer(_ id: String, status: TransferStatus, detail: String?) {
+        var finished: Transfer?
         updateTransfer(id) { transfer in
             guard transfer.status == .active else { return }
             transfer.status = status
             transfer.detail = detail
+            finished = transfer
         }
+        if let finished { record(finished) }
         if transfers.count > 20 { transfers.removeLast(transfers.count - 20) }
+    }
+
+    // MARK: - File history
+
+    private func record(_ transfer: Transfer) {
+        let device = peers.first { $0.id == transfer.peerId }?.name ?? records[transfer.peerId]?.name ?? "Device"
+        history.insert(FileRecord(
+            id: transfer.id, device: device, name: transfer.name, size: transfer.size, outgoing: transfer.outgoing,
+            date: Date(), ok: transfer.status == .done, detail: transfer.detail, path: transfer.location?.path
+        ), at: 0)
+        if history.count > 200 { history.removeLast(history.count - 200) }
+        saveHistory()
+    }
+
+    func clearHistory() {
+        history = []
+        saveHistory()
+    }
+
+    func removeFromHistory(_ id: String) {
+        history.removeAll { $0.id == id }
+        saveHistory()
+    }
+
+    private func loadHistory() {
+        guard let data = try? Data(contentsOf: historyURL),
+              let decoded = try? JSONDecoder().decode([FileRecord].self, from: data) else { return }
+        history = decoded
+    }
+
+    private func saveHistory() {
+        guard let data = try? JSONEncoder().encode(history) else { return }
+        try? data.write(to: historyURL, options: [.atomic])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: historyURL.path)
     }
 
     // MARK: - Login item
@@ -948,8 +1916,13 @@ final class AppModel {
     private func currentInfo() -> DeviceInfo {
         var info = LocalDevice.info(network: networkName)
         info.inputTrusted = DeviceInput.isTrusted
+        info.keepAwake = keepAwakeState?()
+        info.charge = chargeState?()
         return info
     }
+
+    /// Tells paired devices about a change on this Mac, such as its charging.
+    func infoChanged() { broadcastInfo() }
 
     private func broadcastInfo() {
         let info = currentInfo()
@@ -967,6 +1940,98 @@ final class AppModel {
         screenRequests.remove(id)
         if screen?.peerId == id { endScreen() }
         saveRecords()
+    }
+
+    // MARK: - Other Macs
+
+    private func isMac(_ id: String, _ session: PeerSession?) -> Bool {
+        (session?.hello?.platform ?? sessions[id]?.hello?.platform ?? records[id]?.platform) == "macos"
+    }
+
+    private func applyMacSync() {
+        guard identity != nil else { return }
+        if macSyncEnabled {
+            startBrowser()
+            macTimer?.invalidate()
+            // Bonjour doesn't report every reconnect, so lost connections are retried on a timer.
+            macTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.dialMacs() }
+            }
+            dialMacs()
+        } else {
+            browser?.cancel()
+            browser = nil
+            macTimer?.invalidate()
+            macTimer = nil
+            macEndpoints = [:]
+            nearbyMacs = []
+            dialing.values.forEach { $0.close() }
+            dialing = [:]
+            for (id, session) in sessions where isMac(id, session) { session.close() }
+        }
+    }
+
+    private func startBrowser() {
+        guard browser == nil, TestEnv.value("PHONELINK_PORT") == nil else { return }
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: PhoneLinkProtocol.serviceType, domain: nil), using: .tcp)
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            MainActor.assumeIsolated {
+                guard let self, let mine = self.identity?.deviceId else { return }
+                var found: [String: NWEndpoint] = [:]
+                for result in results {
+                    guard case .bonjour(let txt) = result.metadata, txt["platform"] == "macos",
+                          let id = txt["id"], id != mine else { continue }
+                    found[id] = result.endpoint
+                }
+                self.macEndpoints = found
+                self.nearbyMacs = Set(found.keys)
+                self.dialMacs()
+            }
+        }
+        browser.start(queue: .main)
+        self.browser = browser
+    }
+
+    /// Only the Mac with the smaller ID connects, so two Macs never hold two connections to each other.
+    private func dialMacs() {
+        guard macSyncEnabled, let identity else { return }
+        for (id, endpoint) in macEndpoints where MacSync.shouldDial(from: identity.deviceId, to: id)
+            && sessions[id] == nil && dialing[id] == nil {
+            dial(endpoint, key: id)
+        }
+        #if DEBUG
+        if let target = TestEnv.value("PHONELINK_TEST_CONNECT_MAC"), sessions.isEmpty, dialing[target] == nil {
+            let parts = target.split(separator: ":")
+            if parts.count == 2, let port = NWEndpoint.Port(String(parts[1])) {
+                dial(.hostPort(host: NWEndpoint.Host(String(parts[0])), port: port), key: target)
+            }
+        }
+        #endif
+    }
+
+    private func dial(_ endpoint: NWEndpoint, key: String) {
+        guard let identity, let parameters = Self.clientParameters(identity) else { return }
+        let session = PeerSession(connection: NWConnection(to: endpoint, using: parameters))
+        dialing[key] = session
+        attach(session)
+    }
+
+    private static func clientParameters(_ identity: LocalIdentity) -> NWParameters? {
+        let tls = NWProtocolTLS.Options()
+        let security = tls.securityProtocolOptions
+        guard let localIdentity = sec_identity_create(identity.identity) else { return nil }
+        sec_protocol_options_set_local_identity(security, localIdentity)
+        sec_protocol_options_set_min_tls_protocol_version(security, .TLSv12)
+        // Self-signed certificate. Trust comes from the fingerprint at pairing, as with phones.
+        sec_protocol_options_set_verify_block(security, { _, _, complete in complete(true) }, .main)
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 20
+        tcp.noDelay = true
+        tcp.connectionTimeout = 8
+        let parameters = NWParameters(tls: tls, tcp: tcp)
+        parameters.includePeerToPeer = false
+        return parameters
     }
 
     private func rebuildPeers() {
@@ -1011,6 +2076,12 @@ final class AppModel {
 
     #if DEBUG
     /// Sample data for UI preview images.
+    func loadSnapshotHistory(_ records: [FileRecord], filter: FileHistoryView.Filter) {
+        history = records
+        historyFilter = filter
+        showsHistory = true
+    }
+
     func loadSnapshotState(_ peers: [Peer], prompt: PairingPrompt?, addresses: [String],
                            phone: PhoneSnapshot = PhoneSnapshot(), tab: PeerTab = .overview) {
         self.peers = peers
