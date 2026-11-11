@@ -43,13 +43,13 @@ done
 cd "$ANDROID_DIR"
 JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 17)}" \
 DYSKLINK_IT_PORT=$PORT DYSKLINK_IT_DOWNLOADS="$DOWNLOADS" DYSKLINK_IT_PHOTOS="$WORK/photos" \
-    ./gradlew :app:testDebugUnitTest --rerun-tasks --console=plain 2>&1 \
+    ./gradlew :core:test :app:testDebugUnitTest --rerun-tasks --continue --console=plain 2>&1 \
     | sed 's/\x1b\[[0-9;]*m//g' | grep -E "^e: |FAILED|BUILD|AssertionError|tests completed"
 RESULT=${PIPESTATUS[0]}
 
-python3 - app/build/test-results/testDebugUnitTest <<'EOF'
+python3 - core/build/test-results/test app/build/test-results/testDebugUnitTest <<'EOF'
 import glob, sys, xml.etree.ElementTree as E
-for path in sorted(glob.glob(sys.argv[1] + "/*.xml")):
+for path in sorted(p for folder in sys.argv[1:] for p in glob.glob(folder + "/*.xml")):
     root = E.parse(path).getroot()
     print(f"{root.get('name').split('.')[-1]}: {root.get('tests')} tests, "
           f"{root.get('failures')} failed, {root.get('errors')} errors, {root.get('skipped')} skipped")
