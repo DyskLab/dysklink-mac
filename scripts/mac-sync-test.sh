@@ -77,6 +77,23 @@ else
     echo "FAILED ping p95 ${RTT_MAX:-?} ms during the transfer (limit ${LATENCY_LIMIT_MS:-150})"; RESULT=1
 fi
 
+# Both Macs list bin1, so the file went in binary frames.
+check present "$WORK/a-big.log" "BINARY_OUT file.chunk"
+check present "$WORK/b-big.log" "BINARY_IN file.chunk"
+
+# Mac B acts like an app before binary frames (no caps in its hello): the same file goes as JSON and arrives whole.
+rm -f "${WORK:?}/db/big.bin"
+A_ENV="PHONELINK_TEST_SEND_FILE=$WORK/big.bin PHONELINK_TEST_LATENCY=1" B_ENV="PHONELINK_TEST_READ_MBPS=12 PHONELINK_TEST_NO_CAPS=1" WAIT=14 run json 1 "lama"
+grep -h "LATENCY" "$WORK/a-json.log" | sed 's/^/    JSON: /'
+check present "$WORK/b-json.log" "CLIPBOARD_SET lama"
+check absent "$WORK/a-json.log" "BINARY_"
+check absent "$WORK/b-json.log" "BINARY_"
+if [ "$(shasum -a 256 < "$WORK/big.bin")" = "$(cat "$WORK/db/big.bin" 2>/dev/null | shasum -a 256)" ] && grep -q "status=done" "$WORK/a-json.log"; then
+    echo "OK  large file arrived whole over JSON"
+else
+    echo "FAILED large file over JSON"; RESULT=1
+fi
+
 run off 0 "tidak-boleh"
 check absent "$WORK/b-off.log" "CLIPBOARD_SET tidak-boleh"
 check absent "$WORK/b-off.log" "CLIPBOARD_IMAGE_SET"

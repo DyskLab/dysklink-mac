@@ -54,13 +54,13 @@ enum BrowserExtension {
             try manager.createDirectory(at: extensionFolder.deletingLastPathComponent(), withIntermediateDirectories: true)
             try manager.copyItem(at: bundled, to: extensionFolder)
             // A packed copy too, for browsers that accept unsigned add-ons.
-            let xpi = extensionFolder.appendingPathComponent("dysklink-youtube.xpi")
-            let zip = Process()
-            zip.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-            zip.currentDirectoryURL = extensionFolder
-            zip.arguments = ["-qr", xpi.path, "manifest.json", "background.js", "content.js", "icons"]
-            try? zip.run()
-            zip.waitUntilExit()
+            // Install is a button on the main thread, and nothing waits for the packed copy, so zip runs in the background.
+            let folder = extensionFolder
+            let xpi = folder.appendingPathComponent("dysklink-youtube.xpi")
+            DispatchQueue.global(qos: .utility).async {
+                _ = ProcessRunner.run("/usr/bin/zip", ["-qr", xpi.path, "manifest.json", "background.js", "content.js", "icons"],
+                                      timeout: 60, directory: folder)
+            }
         }
         NSWorkspace.shared.activateFileViewerSelecting([extensionFolder.appendingPathComponent("manifest.json")])
     }

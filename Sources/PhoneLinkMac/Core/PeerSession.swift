@@ -22,8 +22,8 @@ final class PeerSession: @unchecked Sendable {
     var hello: Hello?
 
     var onReady: ((PeerSession) -> Void)?
-    /// The message, and for `file.chunk`, `screen.frame`, `camera.frame`, and `audio.frame` its payload already
-    /// decoded from base64 (the base64 field is then cleared). The payload is nil when the base64 was invalid.
+    /// The message, and for `file.chunk`, `screen.frame`, `camera.frame`, and `audio.frame` its payload: the raw bytes
+    /// of a binary frame, or the base64 field decoded (the field is then cleared). Nil when the base64 was invalid.
     var onMessage: ((PeerSession, Envelope, Data?) -> Void)?
     var onClose: ((PeerSession) -> Void)?
 
@@ -38,6 +38,9 @@ final class PeerSession: @unchecked Sendable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var closed = false
+    /// Read from any thread, so it has its own lock.
+    private var negotiation = BinaryNegotiation()
+    private let negotiationLock = NSLock()
     private var bulk: [(frame: Data, handed: (Bool) -> Void)] = []
     /// Bulk frames given to the connection that it hasn't taken yet.
     private var bulkInFlight = 0
@@ -125,6 +128,31 @@ final class PeerSession: @unchecked Sendable {
 
     // MARK: - Sending
 
+    /// Media and file data go out as binary frames: both hellos listed `bin1`. Any thread.
+    var binary: Bool { negotiationLock.withLock { negotiation.binary } }
+
+    private func note(sent envelope: Envelope) {
+        guard envelope.type == MessageType.hello else { return }
+        negotiationLock.withLock { negotiation.sent(envelope) }
+    }
+
+    private func note(received envelope: Envelope) {
+        guard envelope.type == MessageType.hello else { return }
+        negotiationLock.withLock { negotiation.received(envelope) }
+    }
+
+    #if DEBUG
+    private var loggedBinary: Set<String> = []
+    #endif
+
+    /// Tests only: logs the first binary frame of each kind each way, so the scripts can tell which format was used.
+    private func logBinary(_ direction: String, _ type: String, _ bytes: Int) {
+        #if DEBUG
+        let first = negotiationLock.withLock { loggedBinary.insert(direction + type).inserted }
+        if first { TestEnv.log("BINARY_\(direction) \(type) \(bytes)") }
+        #endif
+    }
+
     /// The length-prefixed frame, or nil when it's larger than the other side accepts. Such a frame would make the
     /// receiver close the connection, so it's dropped here and the connection stays up.
     private func frame(_ envelope: Envelope) -> Data? {
@@ -176,28 +204,57 @@ final class PeerSession: @unchecked Sendable {
     /// bulk message, once it went out of the bulk queue), so senders can tell when it falls behind.
     func send(_ envelope: Envelope, completion: ((Bool) -> Void)? = nil) {
         let done = completion.map { completion in { (ok: Bool) in DispatchQueue.main.async { completion(ok) } } }
+        note(sent: envelope)
         queue.async { [self] in
             guard !closed, let frame = frame(envelope) else { done?(false); return }
             enqueue(frame, bulk: Self.bulkTypes.contains(envelope.type), done: done)
         }
     }
 
-    /// A message with one large base64 field, made from `data` on the session queue: `macscreen.frame` with
-    /// `video`, or `audio.frame` with `audio`. `after` is more JSON after it, such as `,"keyFrame":true`.
+    /// `macscreen.frame` (H.264, `video`) or `audio.frame` (PCM, `audio`) made from `data` on the session queue: a
+    /// binary frame for a `bin1` peer, else JSON with the payload in base64 (and `keyFrame` when given), as before.
     /// `completion` runs on the main queue.
-    func sendBase64(type: String, field: String, data: Data, after: String = "", completion: ((Bool) -> Void)? = nil) {
+    func sendMedia(type: String, data: Data, keyFrame: Bool? = nil, completion: ((Bool) -> Void)? = nil) {
         let done = completion.map { completion in { (ok: Bool) in DispatchQueue.main.async { completion(ok) } } }
         queue.async { [self] in
-            guard !closed, let frame = Self.base64Frame(type: type, fields: "\(Self.jsonString(field)):", data: data, after: after)
+            let binary = binary
+            guard !closed, let frame = Self.mediaFrame(type: type, data: data, keyFrame: keyFrame, binary: binary)
             else { done?(false); return }
+            if binary { logBinary("OUT", type, data.count) }
             enqueue(frame, bulk: Self.bulkTypes.contains(type), done: done)
         }
+    }
+
+    /// The frame `sendMedia` sends.
+    static func mediaFrame(type: String, data: Data, keyFrame: Bool?, binary: Bool) -> Data? {
+        if binary {
+            guard let frame = BinaryFrame.frame(header: BinaryFrame.header(type: type, keyFrame: keyFrame), payload: data) else {
+                print("Dropped a \(type) message of \(data.count) bytes, over the \(PhoneLinkProtocol.maxFrameBytes)-byte limit")
+                return nil
+            }
+            return frame
+        }
+        let field = type == MessageType.audioFrame ? "audio" : "video"
+        return base64Frame(type: type, fields: "\(jsonString(field)):", data: data, after: keyFrame.map { ",\"keyFrame\":\($0)" } ?? "")
+    }
+
+    /// The frame `sendChunk` sends: binary for a `bin1` peer, else JSON with base64 `file.data`.
+    static func chunkFrame(id: String, data: Data, binary: Bool) -> Data? {
+        if binary {
+            guard let frame = BinaryFrame.frame(header: BinaryFrame.chunkHeader(id: id), payload: data) else {
+                print("Dropped a file.chunk of \(data.count) bytes, over the \(PhoneLinkProtocol.maxFrameBytes)-byte limit")
+                return nil
+            }
+            return frame
+        }
+        return base64Frame(type: MessageType.fileChunk, fields: #""file":{"id":\#(jsonString(id)),"data":"#, data: data, after: "}")
     }
 
     /// Waits until the message went out, so large files don't pile up in memory. A bulk message counts as gone once
     /// it left the bulk queue.
     func sendAndWait(_ envelope: Envelope) async -> Bool {
-        await withCheckedContinuation { continuation in
+        note(sent: envelope)
+        return await withCheckedContinuation { continuation in
             queue.async { [self] in
                 guard !closed, let frame = frame(envelope) else { return continuation.resume(returning: false) }
                 enqueue(frame, bulk: Self.bulkTypes.contains(envelope.type)) { continuation.resume(returning: $0) }
@@ -205,10 +262,12 @@ final class PeerSession: @unchecked Sendable {
         }
     }
 
-    /// One `file.chunk`. The base64 and JSON are made on the caller's thread, then it waits its turn in the bulk lane.
+    /// One `file.chunk`. The frame (binary, or base64 and JSON) is made on the caller's thread, then it waits its turn
+    /// in the bulk lane.
     func sendChunk(id: String, data: Data) async -> Bool {
-        guard let frame = Self.base64Frame(type: MessageType.fileChunk, fields: #""file":{"id":\#(Self.jsonString(id)),"data":"#,
-                                           data: data, after: "}") else { return false }
+        let binary = binary
+        guard let frame = Self.chunkFrame(id: id, data: data, binary: binary) else { return false }
+        if binary { logBinary("OUT", MessageType.fileChunk, data.count) }
         return await withCheckedContinuation { continuation in
             queue.async { [self] in
                 guard !closed else { return continuation.resume(returning: false) }
@@ -360,17 +419,30 @@ final class PeerSession: @unchecked Sendable {
                 if isComplete || error != nil { self.closeOnQueue() }
                 return
             }
-            let length = data.reduce(0) { ($0 << 8) | Int($1) }
-            guard length > 0, length <= PhoneLinkProtocol.maxFrameBytes else { return self.closeOnQueue() }
-            self.receiveBody(length: length)
+            let word = data.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            guard let (binary, length) = BinaryFrame.length(word: word) else { return self.closeOnQueue() }
+            self.receiveBody(length: length, binary: binary)
         }
     }
 
-    private func receiveBody(length: Int) {
+    private func receiveBody(length: Int, binary: Bool) {
         connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, _, error in
             guard let self else { return }
             guard error == nil, let data, data.count == length else { return self.closeOnQueue() }
-            if let (envelope, payload) = self.decode(data) {
+            let message: (Envelope, Data?)?
+            if binary {
+                // A malformed binary frame is a protocol error, unlike a JSON message that doesn't parse.
+                guard let parsed = BinaryFrame.parse(data, decoder: self.decoder) else {
+                    print("Closed a connection over a malformed binary frame of \(length) bytes")
+                    return self.closeOnQueue()
+                }
+                message = parsed
+                self.logBinary("IN", parsed.0.type, parsed.1.count)
+            } else {
+                message = self.decode(data)
+            }
+            if let (envelope, payload) = message {
+                self.note(received: envelope)
                 if envelope.type == MessageType.pong { self.pongArrived() }
                 self.deliveredPending += length
                 DispatchQueue.main.async {

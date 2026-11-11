@@ -39,7 +39,7 @@ struct MenuBarView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var width: CGFloat { layout.visible.filter(isAvailable).contains(.powerFlow) ? 390 : 330 }
+    private var width: CGFloat { layout.visible.filter(isAvailable).contains(.powerFlow) ? 340 : 330 }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 12) {

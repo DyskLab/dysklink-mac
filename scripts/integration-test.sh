@@ -115,6 +115,14 @@ check present "SCREEN_STARTED 720x1280"
 check present "SCREEN_STOPPED"
 check absent "SCREEN_STARTED 1234x1234"
 check absent "PHONE_SMS sms.new sebelum-diaktifkan"
+# Binary frames: used with the phone whose hello lists bin1 (MacIntegrationTest.binaryFramesWithTheMac); the other
+# test phones list nothing, like 1.1.x apps, and their tests check they got JSON.
+check present "BINARY_IN file.chunk"
+check present "BINARY_IN audio.frame"
+check present "BINARY_IN camera.frame"
+check present "BINARY_OUT audio.frame 7680"
+check present "BINARY_OUT macscreen.frame"
+check present "CAMERA_STOPPED uji-biner"
 
 cd "$MAC_DIR"
 if "$(swift build --show-bin-path)/PhoneLinkMac" --video-selftest; then

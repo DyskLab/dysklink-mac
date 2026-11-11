@@ -149,25 +149,22 @@ enum NativeChargeLimit {
     }
 
     static func read() -> Int? {
-        guard let output = try? Shell.run("/usr/bin/pmset", ["-g", "battlimit"]) else { return nil }
+        guard let output = try? Shell.run("/usr/bin/pmset", ["-g", "battlimit"], timeout: 10) else { return nil }
         return parse(output)
     }
 }
 
 enum Shell {
+    /// Output and errors together; throws when the tool fails, can't start, or runs past `timeout`.
+    /// Nil waits as long as it takes, which an admin password prompt needs.
     @discardableResult
-    static func run(_ path: String, _ arguments: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let text = String(decoding: data, as: UTF8.self)
-        if process.terminationStatus != 0 { throw NSError(domain: "DyskLink", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text]) }
+    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval? = nil) throws -> String {
+        guard let result = ProcessRunner.run(path, arguments, timeout: timeout, errorOutput: .merge) else {
+            throw NSError(domain: "DyskLink", code: -1, userInfo: [NSLocalizedDescriptionKey: "\(path) couldn't be started."])
+        }
+        let text = result.text
+        if result.timedOut { throw NSError(domain: "DyskLink", code: -2, userInfo: [NSLocalizedDescriptionKey: "\(path) didn't finish in time."]) }
+        if result.status != 0 { throw NSError(domain: "DyskLink", code: Int(result.status), userInfo: [NSLocalizedDescriptionKey: text]) }
         return text
     }
 }
@@ -322,7 +319,8 @@ enum ChargeHelper {
 
     /// Switches the charger input through sudo, without a password thanks to the installed rule.
     static func setAdapter(on: Bool) throws {
-        try Shell.run("/usr/bin/sudo", ["-n", path, "adapter", on ? "on" : "off"])
+        // Also runs on the main thread before sleep and at quit, so a stuck sudo can't hold those up for long.
+        try Shell.run("/usr/bin/sudo", ["-n", path, "adapter", on ? "on" : "off"], timeout: 5)
     }
 }
 
@@ -624,15 +622,15 @@ final class ChargeControl {
     func startCalibration() { calibration = .draining }
 
     /// For snapshots: shows the controls as if the helper were installed.
-    func preview(temperature: Double, lastCalibration: Date) {
+    func preview(temperature: Double, lastCalibration: Date, reason: ChargeReason = .limit, adapterOff: Bool = true) {
         previewing = true
         available = true
         installed = true
         self.temperature = temperature
         self.lastCalibration = lastCalibration
         settings.limiter = true
-        reason = .limit
-        adapterOff = true
+        self.reason = reason
+        self.adapterOff = adapterOff
         let now = Date()
         // A day of sailing between 75 and 80%, with a dip in the afternoon.
         levelPoints = (0..<480).map { i in

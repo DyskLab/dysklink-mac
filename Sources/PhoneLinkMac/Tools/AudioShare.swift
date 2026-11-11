@@ -178,6 +178,11 @@ final class PhoneAudioPlayer {
         for channel in 0..<channels { samples[channel].withUnsafeBufferPointer { out[channel].update(from: $0.baseAddress!, count: frames) } }
         played += 1
         if TestEnv.isDryRun { return }
+        if started, queued == 0 {
+            // The queue ran dry: a gap in the sound (a bin1 phone sends nothing during silence) or the network.
+            // A little silence first gives the sound that comes back the same cushion it had at the start.
+            scheduleSilence(frames: frames * (limit == Self.tightQueued ? 1 : 2))
+        }
         queued += 1
         let generation = generation
         node.scheduleBuffer(buffer) { [weak self] in
@@ -189,6 +194,24 @@ final class PhoneAudioPlayer {
         if !started, queued >= (limit == Self.tightQueued ? 2 : Self.startAfter) {
             started = true
             node.play()
+        }
+    }
+
+    private func scheduleSilence(frames: Int) {
+        guard let format, frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
+        else { return }
+        // A new buffer's samples are zero.
+        buffer.frameLength = AVAudioFrameCount(frames)
+        if let out = buffer.floatChannelData {
+            for channel in 0..<Int(format.channelCount) { out[channel].update(repeating: 0, count: frames) }
+        }
+        queued += 1
+        let generation = generation
+        node.scheduleBuffer(buffer) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                self.queued = max(0, self.queued - 1)
+            }
         }
     }
 

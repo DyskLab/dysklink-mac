@@ -74,17 +74,11 @@ struct LocalIdentity {
     }
 
     private static func openssl(_ arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-        process.arguments = arguments
-        let errors = Pipe()
-        process.standardError = errors
-        process.standardOutput = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let detail = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw Failure.openssl(detail)
+        // Runs once, on first launch, during start-up on the main thread. ProcessRunner doesn't spin the run loop,
+        // so nothing re-enters start-up while openssl works.
+        guard let result = ProcessRunner.run("/usr/bin/openssl", arguments, timeout: 60, errorOutput: .capture) else {
+            throw Failure.openssl("openssl couldn't be started")
         }
+        guard result.succeeded else { throw Failure.openssl(result.timedOut ? "openssl didn't finish" : result.errorText) }
     }
 }

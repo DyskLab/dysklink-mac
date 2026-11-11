@@ -45,14 +45,51 @@ drop such a message instead of sending it (the Mac logs and drops it, and the co
 { "type": "info", "info": { "batteryPercent": 80 } }
 ```
 
+### Binary frames (`bin1`)
+Since 1.2, `hello.caps` lists optional features as strings; the only one so far is `"bin1"`. Receivers ignore
+unknown fields, so older apps (1.1.x and before, on Mac, Android, Windows, and Linux) ignore `caps`, and unknown
+entries in it are ignored too. A side sends binary frames only when **its own** hello listed `bin1` and the other
+side's **first** hello did; before that hello arrives, and always with older apps, everything stays JSON. Someone in
+the middle can only remove `bin1` (TLS protects the rest), which just falls back to JSON.
+
+```text
+[UInt32 BE: 0x80000000 | length][UInt16 BE: header length][header: UTF-8 JSON][raw payload]
+```
+
+- The top bit of the first word marks a binary frame; `length` is the rest of the word and counts everything after
+  it (2 + header + payload), at most 1 MiB like a JSON frame. Older apps close the connection on such a word, which
+  is why they never get one.
+- The header is the usual envelope without its base64 field, for example `{"type":"macscreen.frame","keyFrame":true}`
+  or `{"type":"file.chunk","file":{"id":"…"}}`. The payload is that field's raw bytes. Any base64 field still in the
+  header is ignored. A missing `keyFrame` means false, so binary headers leave it out unless it's true.
+- A receiver closes the connection on a malformed binary frame: `length` below 3 or over 1 MiB, a header length of 0
+  or past `length`, a header that isn't a JSON message, or a frame cut short. (A JSON frame whose text doesn't parse
+  is still only dropped.)
+- Binary frames may carry any message type, but only these are sent that way, with the payload in place of:
+
+| Type | Payload (was) |
+|---|---|
+| `macscreen.frame`, `screen.frame`, `camera.frame` | `video`: H.264 Annex B |
+| `audio.frame` | `audio`: 16-bit PCM |
+| `file.chunk` | `file.data`: the file bytes. `file.done` keeps the SHA-256 of all of them |
+
+Raw media is a quarter smaller than base64 and costs no encoding. Everything else, including `file.offer` and
+`file.done`, stays JSON. Live and file messages keep their own lanes and the file window works as before. A video
+frame larger than 760 KiB is still dropped, since the same frame may have to go out as base64.
+
+Fixed vector (Mac and Kotlin tests check both produce exactly these bytes): `file.chunk` id `abc` with bytes
+`00 01 02 ff` is `8000002f 0029` + UTF-8 `{"type":"file.chunk","file":{"id":"abc"}}` + `000102ff`; `audio.frame` with
+`01 00 ff ff` is `8000001c 0016` + `{"type":"audio.frame"}` + `0100ffff`.
+
 ## Message types
 
 | Type | Content | Condition |
 |---|---|---|
-| `hello` | `hello`: `name`, `platform`, `model`, `protocolVersion`, `paired`, `appVersion` (0.2.0 and later) | First message from both sides |
-| `pair.request` | - | Before pairing |
-| `pair.accept` | - | The user confirmed the code |
-| `pair.reject` | - | The user declined or the timeout expired |
+| `hello` | `hello`: `name`, `platform`, `model`, `protocolVersion`, `paired`, `appVersion` (0.2.0 and later), `caps` (1.2 and later, see Binary frames) | First message from both sides |
+| `pair.request` | `pake` (`v`, `nonce`) | Before pairing |
+| `pair.pake` | `pake` (`v`, `nonce`, `y`) | Showing side, after `pair.request` |
+| `pair.accept` | `pake` (`v`, `y`, `confirm` from the typing side; `confirm` from the showing side) | The code was typed, or it checked out |
+| `pair.reject` | `error` (`wrong-code`, `update-required`, or readable text) | The user declined, a check failed, or the timeout expired |
 | `unpair` | - | Any time |
 | `info` | `info`: see `DeviceInfo` | Paired only |
 | `ping`, `pong` | - | Any time |
@@ -64,7 +101,7 @@ drop such a message instead of sending it (the Mac logs and drops it, and the co
 | `command.run` | `commandId` | Phone to Mac, paired only |
 | `command.result` | `commandResult`: `id`, `exitCode`, `output` | Mac to phone, paired only |
 | `file.offer` | `file`: `id`, `name`, `size` | Paired only |
-| `file.chunk` | `file`: `id`, `data` (base64) | Paired only |
+| `file.chunk` | `file`: `id`, `data` (base64; raw in a binary frame to a `bin1` peer) | Paired only |
 | `file.done` | `file`: `id`, `sha256` | Paired only |
 | `file.cancel` | `file`: `id` | Paired only |
 | `file.result` | `file`: `id`, `ok`, `error` | Paired only |
@@ -90,18 +127,53 @@ Messages other than `hello`, `pair.*`, `unpair`, `ping`, and `pong` are dropped 
 If the other side sends `paired: false`, this side removes its pairing too.
 
 ## Pairing
-Since protocol version 2 the code is random: the device that receives `pair.request` shows a 6-digit code, the
-user types it on the device that asked, and that device sends `pair.accept` with `key` =
-SHA-256 hex of `"dysklink-pair-v2:" + code + ":" + min(idA, idB) + ":" + max(idA, idB)`. The device showing the
-code checks it and answers `pair.accept`, or `pair.reject` with `error: "wrong-code"` (5 tries). The steps below
-describe version 1, kept for older apps.
+Since protocol version 3, pairing uses CPace (draft-irtf-cfrg-cpace, the CPace255 suite: X25519, Elligator 2,
+SHA-512), so a device in the middle gets at most one online guess of the 6-digit code per attempt. **T** is the
+device that asks and types the code, **S** the device that shows it. All `pake` fields are in the normal envelope;
+binary values are base64, and receivers ignore unknown fields.
 
-1. One side sends `pair.request`. Android does this automatically for a new Mac while its app is open, unless
-   the user has declined or unpaired that Mac before.
-2. Both sides show the same 6-digit code.
-3. Each user compares the code, and that side then sends `pair.accept`.
-4. Pairing finishes once the local user agrees **and** `pair.accept` from the other side has arrived.
-5. The request is canceled after 60 seconds.
+1. T sends `pair.request` with `pake: {"v": 1, "nonce": nonceT}` (16 random bytes).
+2. S shows a random 6-digit code, picks a random scalar `ya`, and answers `pair.pake` with
+   `pake: {"v": 1, "nonce": nonceS, "y": Ya}` (16 random bytes, 32-byte point). It keeps `ya` while the code shows.
+3. The user types the code on T. With a fresh scalar `yb` each try, T sends `pair.accept` with
+   `pake: {"v": 1, "y": Yb, "confirm": confirmT}`.
+4. S checks `confirmT` in constant time. Wrong (or a low-order `Yb`): `pair.reject` with `error: "wrong-code"`,
+   counted by the limits below, and the same code can be typed again. Right: S saves the pairing and sends
+   `pair.accept` with `pake: {"v": 1, "confirm": confirmS}`. T saves the pairing only if `confirmS` matches;
+   otherwise it sends `pair.reject` and gives up.
+
+```text
+PRS  = UTF-8 of the 6-digit code
+sid  = nonceT || nonceS
+CI   = lv_cat("dysklink-pair-v3", fingerprint of T's certificate, fingerprint of S's certificate)
+       (fingerprints as each side sees them on this TLS connection: lowercase hex SHA-256 of the DER, as ASCII)
+G    = calculate_generator(SHA-512, PRS, CI, sid)       generator_string + Elligator 2, as in the draft
+Ya   = X25519(ya, G)   Yb = X25519(yb, G)               S is CPace's A, T is B; ADa = ADb = empty
+K    = X25519(ya, Yb) = X25519(yb, Ya)                  all zeros: abort
+ISK  = SHA-512(lv_cat("CPace255_ISK", sid, K) || lv_cat(Ya, "") || lv_cat(Yb, ""))
+confirmT = first 32 bytes of HMAC-SHA512(ISK, "dysklink-confirm-T")
+confirmS = first 32 bytes of HMAC-SHA512(ISK, "dysklink-confirm-S")
+```
+
+A device in the middle has its own certificate on each leg, so CI differs on the two legs and it can't relay.
+A second `pair.request` from the same device while its code shows keeps the code (and the wrong tries); with a new
+nonce S answers a new `pair.pake` for that code. A new code always gets a new `ya` and `nonceS`.
+
+Version 1 and 2 pairing are no longer accepted for new pairings, and there is no fallback. When the other side's
+`hello.protocolVersion` is below 3, its `pair.request` has no valid `pake`, or its `pair.accept` has only the
+version 2 `key`, no code is shown or checked: the answer is `pair.reject` with `error: "update-required"` and the
+user sees "Update DyskLink on <name> to pair". Already paired devices are unaffected: trust still comes from the
+fingerprint saved at pairing.
+
+The limits below (wrong codes per device and in total, the 60-second timeout, and on the Mac one new prompt per
+2 seconds) apply unchanged. When both ask at once, the device with the smaller ID shows the code.
+
+### Version 1 (no longer accepted)
+1. One side sent `pair.request`.
+2. Both sides showed the same 6-digit code.
+3. Each user compared the code, and that side then sent `pair.accept`.
+4. Pairing finished once the local user agreed **and** `pair.accept` from the other side had arrived.
+5. The request was canceled after 60 seconds.
 
 ### Code formula
 ```text
@@ -127,7 +199,7 @@ chunks, sends a `ping` after about every 128 KiB of file messages, and keeps at 
 |---|---|---|
 | `screen.request` | - | Mac to phone, `screen` feature. Only shows a notification on the phone |
 | `screen.started` | `screen`: `width`, `height`. Sent again when the phone rotates | Phone to Mac |
-| `screen.frame` | `video` (H.264 Annex B in base64), `keyFrame` | Phone to Mac |
+| `screen.frame` | `video` (H.264 Annex B in base64, or raw in a binary frame), `keyFrame` | Phone to Mac |
 | `screen.sync` | - | Mac to phone, requests a key frame for its own session |
 | `screen.stop` | - | Mac to phone, for its own session only |
 | `screen.stopped` | `error` | Phone to Mac |
@@ -261,29 +333,22 @@ Between two phones only the one with the smaller ID dials. Pairing is the same 6
 Allowed between phones: `hello`, `pair.*`, `unpair`, `info`, `clipboard` (the receiver answers `clipboard.ack`), `ring`,
 `ping`/`pong`, and `file.*`. Everything else from a phone is dropped.
 
-## Pairing, version 2
+## Pairing, version 2 (no longer accepted)
 
-From protocol version 2 the code is typed, not compared.
+Version 2 typed the code: the device that received `pair.request` showed a random code, and the requesting device
+sent `pair.accept` with `key = hex(SHA-256("dysklink-pair-v2:<code>:<smaller id>:<larger id>"))`. A device in the
+middle could take that hash and try all 10^6 codes offline, so version 3 replaced it with CPace (see Pairing above).
+New apps answer this `key` with `pair.reject` `error = "update-required"`.
 
-1. The device that wants to pair sends `pair.request`.
-2. The device that receives it shows a random 6-digit code.
-3. The code is typed on the requesting device, which sends `pair.accept` with
-   `key = hex(SHA-256("dysklink-pair-v2:<code>:<smaller id>:<larger id>"))`. The IDs are the certificate
-   fingerprints each side sees, so a device in the middle can't reuse the code.
-4. When the key matches, the showing device saves the pairing and answers `pair.accept`. The typing device saves it then.
-   A wrong key gets `pair.reject` with `error = "wrong-code"`, and the code can be typed again. After 5 wrong tries the
-   showing device sends `pair.reject` with a readable `error` (older apps treat any other error as a plain reject).
-
-Guessing is limited on the showing device (the Mac since 1.0.x):
+Guessing is limited on the showing device (the Mac since 1.0.x), and the same limits apply to version 3:
 - Wrong codes count per device across prompts, so a new `pair.request` doesn't give five fresh tries.
 - After 5 wrong codes that device waits 60 seconds, then twice as long after each further 5, up to 1 hour. During
   the wait its `pair.request` gets `pair.reject` with `error` saying how long to wait. A right code clears its count.
 - 15 wrong codes from any devices within 10 minutes close pairing for everyone for 10 minutes.
-- While a code is showing, another `pair.request` from the same device is ignored (no new code), and requests from
+- While a code is showing, another `pair.request` from the same device doesn't make a new code, and requests from
   one device closer than 2 seconds apart are dropped without an answer.
 
-When both ask at once, the device with the smaller ID shows the code. A device whose `hello.protocolVersion` is below 2
-can't pair this way and is asked to update. Paired devices reconnect without a code, as before.
+When both ask at once, the device with the smaller ID shows the code. Paired devices reconnect without a code.
 
 ## Codes, quick note
 
@@ -306,7 +371,7 @@ ports 9 and 7.
 |---|---|---|
 | `macscreen.start` | - | Phone to Mac. Refused with `macscreen.stopped` unless "View this screen from the phone" is on and Screen Recording is allowed |
 | `macscreen.started` | `screen`: `width`, `height` (even, longer side up to 1600), `text`: display name | Mac to phone |
-| `macscreen.frame` | `video` (H.264 Annex B in base64), `keyFrame` | Mac to phone |
+| `macscreen.frame` | `video` (H.264 Annex B in base64, or raw in a binary frame), `keyFrame` | Mac to phone |
 | `macscreen.sync` | - | Phone to Mac, asks for a key frame |
 | `macscreen.pointer` | `control`: `kind` (`move`, `down`, `drag`, `up`, `click`, `double`, `right`), `x`, `y` from 0 to 1 | Phone to Mac, needs Accessibility |
 | `macscreen.stop` / `macscreen.stopped` | `error` on stopped | Either way |
@@ -328,7 +393,7 @@ The phone sends photos added after sync was turned on, oldest first, one at a ti
 |---|---|---|
 | `camera.request` | - | Mac to phone. The phone shows a notification; the camera starts only after a tap |
 | `camera.started` | `screen` (encoded size), `text` (`front`/`back`), `rotation` (clockwise degrees to turn upright) | Phone to Mac, sent again when the lens or the way the phone is held changes |
-| `camera.frame` | `video` (H.264 Annex B in base64), `keyFrame` | Phone to Mac |
+| `camera.frame` | `video` (H.264 Annex B in base64, or raw in a binary frame), `keyFrame` | Phone to Mac |
 | `camera.sync` | - | Mac to phone, asks for a key frame |
 | `camera.control` | `text`: `switch` or `torch` | Mac to phone, only for its own stream |
 | `camera.stop` / `camera.stopped` | `error` on stopped | Either way |
@@ -345,6 +410,9 @@ replaces the old session as it does for any newer hello. The Mac sees USB sessio
 `control` with `kind` `tdown`, `tmove`, or `tup`, `x` and `y` from 0 to 1, and `key` holding the finger number from
 0 to 9. Fingers move together, so a joystick can be held while other keys tap. The Mac repeats held fingers with
 `tmove` every 1.5 seconds; the phone lifts all fingers after 5 seconds without any. Plain `down`/`drag`/`up` lift them.
+The Mac gives fingers 0–7 to its keys (joysticks, taps, skills, swipes), 8 to the click spot and 9 to the mouse or
+look finger. Swipes and combos are plain `tdown`, `tmove` about every 16 ms, and `tup` on one finger; auto-fire and
+combos may lift and press the same finger again within tens of milliseconds. Nothing new is sent.
 
 ## Phone as an extra display
 
@@ -365,13 +433,21 @@ Needs the `gallery` feature on the phone.
 
 ## Sound sharing
 
-Sound is 16-bit little-endian interleaved PCM, 48 kHz stereo, in 40 ms chunks (7,680 bytes) sent as base64.
-Either side can send its sound; the receiver keeps a short queue and drops chunks when it falls behind.
+Sound is 16-bit little-endian interleaved PCM, 48 kHz stereo, in 40 ms chunks (7,680 bytes), raw in a binary frame
+to a `bin1` peer and as base64 to anyone else. Either side can send its sound; the receiver keeps a short queue and
+drops chunks when it falls behind.
+
+Silence: toward a `bin1` peer only, a sender stops sending chunks that are digitally silent (no sample above ±8, about
+-72 dBFS) once 200 ms of them (5 chunks) have gone out, and starts again with the first chunk that isn't. There is no
+marker or keepalive: a receiver plays silence by itself when its queue runs dry, and when a chunk comes after its
+queue ran dry (a gap of more than about 200 ms on Android) it first plays 40 ms of silence (beside a screen) or 80 ms,
+the same head start it takes when sound starts, so the sound that comes back doesn't stutter or drift. Older
+receivers keep getting every chunk, silence included.
 
 | Type | Fields | Notes |
 |---|---|---|
 | `audio.listen` | - | Phone to Mac. Refused with `audio.stopped` and `error` unless "Let phones hear this Mac" is on |
 | `audio.started` | `audioRate`, `audioChannels` | From the side that sends sound, before its chunks |
-| `audio.frame` | `audio` | One chunk. The Mac keeps at most 6 unconfirmed chunks per phone in flight |
+| `audio.frame` | `audio` (or the binary payload) | One chunk. The Mac keeps at most 6 unconfirmed chunks per phone in flight |
 | `audio.stop` | - | Asks the other side to stop sending its sound. A phone screen goes on without sound |
 | `audio.stopped` | `error` (optional) | The sender stopped |

@@ -321,19 +321,31 @@ final class MacCareModel {
         startupItems = Startup.items(home: home)
     }
 
+    /// launchctl waits for the agent to stop or start, so it runs off the main thread.
     func setStartup(_ item: StartupItem, on: Bool) {
-        do {
-            _ = on ? try Startup.turnOn(item, home: home) : try Startup.turnOff(item, home: home)
-            startupError = nil
-        } catch {
-            startupError = "Couldn't change \(item.label): \(error.localizedDescription)"
+        let home = home
+        Task.detached(priority: .userInitiated) {
+            let failure: String?
+            do {
+                _ = on ? try Startup.turnOn(item, home: home) : try Startup.turnOff(item, home: home)
+                failure = nil
+            } catch {
+                failure = "Couldn't change \(item.label): \(error.localizedDescription)"
+            }
+            await MainActor.run {
+                self.startupError = failure
+                self.loadStartup()
+            }
         }
-        loadStartup()
     }
 
     func removeStartup(_ item: StartupItem) {
-        if !item.isOff { _ = Startup.launchctl(["bootout", "gui/\(getuid())", item.url.path]) }
-        trash([CareItem(url: item.url, size: 0)]) { _ in self.loadStartup() }
+        Task.detached(priority: .userInitiated) {
+            if !item.isOff { _ = Startup.launchctl(["bootout", "gui/\(getuid())", item.url.path]) }
+            await MainActor.run {
+                self.trash([CareItem(url: item.url, size: 0)]) { _ in self.loadStartup() }
+            }
+        }
     }
 
     func openLoginItems() {

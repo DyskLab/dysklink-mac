@@ -266,14 +266,24 @@ enum DeviceInput {
 
     /// An ad-hoc signature changes with every build, so an old grant looks enabled in Settings but
     /// doesn't apply. So this app's entry is removed first, then permission is requested from scratch.
-    static func requestTrust() {
-        if !isTrusted, let bundle = Bundle.main.bundleIdentifier {
-            let reset = Process()
-            reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            reset.arguments = ["reset", "Accessibility", bundle]
-            try? reset.run()
-            reset.waitUntilExit()
+    /// tccutil runs on a background thread so the main thread never waits for it; `done` runs on main after the prompt.
+    @MainActor
+    static func requestTrust(then done: @escaping @MainActor @Sendable () -> Void = {}) {
+        guard !isTrusted, let bundle = Bundle.main.bundleIdentifier else {
+            promptForTrust()
+            return done()
         }
+        Task.detached(priority: .userInitiated) {
+            _ = ProcessRunner.run("/usr/bin/tccutil", ["reset", "Accessibility", bundle], timeout: 10)
+            await MainActor.run {
+                promptForTrust()
+                done()
+            }
+        }
+    }
+
+    @MainActor
+    private static func promptForTrust() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
@@ -625,25 +635,13 @@ enum CommandRunner {
         let id = command.id
         let script = command.script
         DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", script]
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = output
-            process.standardInput = FileHandle.nullDevice
-            do {
-                try process.run()
-            } catch {
-                return completion(CommandResult(id: id, exitCode: -1, output: error.localizedDescription))
+            // Stopped after the timeout. A command that leaves something running in the background no longer
+            // keeps this waiting on the output pipe.
+            guard let result = ProcessRunner.run("/bin/zsh", ["-c", script], timeout: timeout, errorOutput: .merge) else {
+                return completion(CommandResult(id: id, exitCode: -1, output: "The shell couldn't be started."))
             }
-            let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            killer.cancel()
-            let text = String(decoding: data.suffix(maxOutputBytes), as: UTF8.self)
-            completion(CommandResult(id: id, exitCode: process.terminationStatus, output: text))
+            let text = String(decoding: result.output.suffix(maxOutputBytes), as: UTF8.self)
+            completion(CommandResult(id: id, exitCode: result.status, output: text))
         }
     }
 }

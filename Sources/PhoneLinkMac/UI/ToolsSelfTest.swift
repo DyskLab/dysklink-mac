@@ -44,8 +44,10 @@ enum ToolsSelfTest {
         testMacCare(folder)
         testOneTimeCode()
         testBattery()
+        testPowerSplit()
         testMenuBarLayout()
         testGameKeys()
+        testGameKeysMore()
         testChargePolicy()
         testPlayerDetails()
         testPowerSettings()
@@ -61,6 +63,9 @@ enum ToolsSelfTest {
         testAudioPCM()
         testSharedInputEdges()
         testCoreSafety()
+        testProcessRunner()
+        CpaceSelfTest.run(check)
+        BinaryFrameSelfTest.run(check)
         // A laptop with a monitor above it, offset to the left, like a common desk.
         let laptop = CGRect(x: 0, y: 0, width: 1470, height: 956)
         let monitor = CGRect(x: -204, y: -1080, width: 1920, height: 1080)
@@ -90,6 +95,13 @@ enum ToolsSelfTest {
               && LocalDevice.parseWake("Battery Power:\n womp 0\nAC Power:\n womp 1\n") == true
               && LocalDevice.parseWake("Battery Power:\n womp 1\nAC Power:\n womp 0\n") == false)
         check("ether from ifconfig", LocalDevice.parseEther("en0: flags=8863<UP>\n\tether C6:3A:1E:42:7F:A0\n\tinet 192.168.1.4") == "c6:3a:1e:42:7f:a0")
+        // The main thread only reads the cache, so it's filled off main first, as the app does at start.
+        let warmed = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = LocalDevice.wakeForNetwork; _ = LocalDevice.wake; warmed.signal() }
+        check("local device warms up off main", warmed.wait(timeout: .now() + 5) == .success)
+        let mainStart = Date()
+        _ = LocalDevice.etherAddress("en-not-there")
+        check("local device never runs ifconfig on main", Date().timeIntervalSince(mainStart) < 0.05)
         if let wake = LocalDevice.wake {
             print("WAKE live \(wake.macs) \(wake.broadcast) enabled=\(String(describing: LocalDevice.wakeForNetwork))")
             check("wake address looks right", wake.macs.allSatisfy { $0.split(separator: ":").count == 6 && $0 != "02:00:00:00:00:00" } && wake.broadcast.hasSuffix(".255"))
@@ -160,6 +172,50 @@ enum ToolsSelfTest {
     }
 
     /// Pairing limits, numbers from another Mac, and what decides a device's kind.
+    /// The runner must never spin the run loop, never stall on a full pipe, and stop tools that hang.
+    private static func testProcessRunner() {
+        let basic = ProcessRunner.run("/bin/sh", ["-c", "echo hello; echo oops >&2; exit 3"], errorOutput: .capture)
+        check("process runner returns output and status", basic?.text == "hello\n" && basic?.errorText == "oops\n"
+              && basic?.status == 3 && basic?.timedOut == false && basic?.succeeded == false)
+        let merged = ProcessRunner.run("/bin/sh", ["-c", "echo out; echo err >&2"], errorOutput: .merge)
+        check("process runner merges errors", merged?.text.contains("out") == true && merged?.text.contains("err") == true)
+        check("process runner reports a tool that can't start", ProcessRunner.run("/nonexistent/dysklink-tool") == nil)
+        let slowStart = Date()
+        let slow = ProcessRunner.run("/bin/sleep", ["5"], timeout: 0.3)
+        let slowTook = Date().timeIntervalSince(slowStart)
+        check("process runner times out and stops the tool", slow?.timedOut == true && slow?.status != 0 && slowTook < 2)
+        let big = ProcessRunner.run("/bin/sh", ["-c", "yes a | head -c 300000; yes b | head -c 200000 >&2"],
+                                    timeout: 10, errorOutput: .capture)
+        check("process runner reads more than a pipe holds", big?.output.count == 300_000 && big?.errorOutput.count == 200_000
+              && big?.timedOut == false && big?.status == 0)
+        let childStart = Date()
+        let child = ProcessRunner.run("/bin/sh", ["-c", "sleep 5 & echo done"], timeout: 4)
+        check("process runner returns while a child holds the pipe", child?.text == "done\n" && child?.status == 0
+              && Date().timeIntervalSince(childStart) < 3)
+
+        // From the main thread with a timer and a queued block waiting: neither may run during the call.
+        final class Calls: @unchecked Sendable {
+            var depth = 0, deepest = 0, ranInside = false, count = 0
+        }
+        let calls = Calls()
+        let call = {
+            if calls.depth > 0 { calls.ranInside = true }
+            calls.depth += 1
+            calls.deepest = max(calls.deepest, calls.depth)
+            calls.count += 1
+            _ = ProcessRunner.run("/bin/sleep", ["0.2"], timeout: 2)
+            calls.depth -= 1
+        }
+        let timer = Timer(timeInterval: 0.01, repeats: false) { _ in call() }
+        RunLoop.main.add(timer, forMode: .common)
+        DispatchQueue.main.async { call() }
+        call()
+        let alone = calls.count == 1
+        let drained = Date().addingTimeInterval(1.5)
+        while calls.count < 3, Date() < drained { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        check("process runner on main lets nothing re-enter", alone && !calls.ranInside && calls.deepest == 1 && calls.count == 3)
+    }
+
     private static func testCoreSafety() {
         check("key codes 0...127 pass", RemoteLimits.keyCode(0) == 0 && RemoteLimits.keyCode(127) == 127)
         check("key codes outside 0...127 are refused", RemoteLimits.keyCode(70000) == nil && RemoteLimits.keyCode(-1) == nil && RemoteLimits.keyCode(128) == nil)
@@ -598,6 +654,123 @@ enum ToolsSelfTest {
         check("game key points survive rotation", roundTrips)
     }
 
+    private static func testGameKeysMore() {
+        func near(_ a: Float?, _ b: Double) -> Bool { abs(Double(a ?? -9) - b) < 0.0005 }
+        // Two joysticks with different key sets, each on its own finger.
+        let move = GameKey(kind: .joystick, label: "WASD", x: 0.2, y: 0.7, radius: 0.1)
+        let camera = GameKey(kind: .joystick, label: "↑←↓→", x: 0.8, y: 0.7, radius: 0.1, keySet: .arrows)
+        var two = GameKeyEngine(keys: [move, camera], aspect: 1)
+        let w = two.keyDown(13), up = two.keyDown(126)
+        check("two joysticks use separate fingers", w.first?.key == "0" && up.first?.key == "1" && w.count == 2 && up.count == 2)
+        let d = two.keyDown(2), left = two.keyDown(123)
+        let k = 0.1 / 2.0.squareRoot()
+        check("WASD diagonal is normalized", d.count == 1 && near(d[0].x, 0.2 + k) && near(d[0].y, 0.7 - k))
+        check("arrow diagonal is normalized", left.count == 1 && near(left[0].x, 0.8 - k) && near(left[0].y, 0.7 - k))
+        check("arrows don't move the WASD joystick", !two.handles(34) && two.keyDown(126).isEmpty)
+        check("both joysticks lift on release", two.releaseAll().count == 2 && two.down.isEmpty)
+        // Walking: Shift for full reach, half otherwise.
+        let walker = GameKey(kind: .joystick, label: "WASD", x: 0.5, y: 0.5, radius: 0.1, walk: .fullWithKey)
+        var walk = GameKeyEngine(keys: [walker], aspect: 1)
+        let half = walk.keyDown(2)
+        let full = walk.keyDown(60) // right Shift counts as Shift
+        let back = walk.keyUp(60)
+        check("walk mode starts at half reach", near(half.last?.x, 0.55))
+        check("shift pushes the joystick to full reach", full.count == 1 && near(full[0].x, 0.6))
+        check("letting go of shift walks again", back.count == 1 && near(back[0].x, 0.55))
+        var halfWith = GameKeyEngine(keys: [GameKey(kind: .joystick, label: "", x: 0.5, y: 0.5, radius: 0.1, walk: .halfWithKey)], aspect: 1)
+        let fullFirst = halfWith.keyDown(2)
+        check("the other walk mode halves with shift", near(fullFirst.last?.x, 0.6) && near(halfWith.keyDown(56).last?.x, 0.55))
+        // Skill aim.
+        let skill = GameKey(kind: .skill, keyCode: 12, label: "Q", x: 0.8, y: 0.8, radius: 0.05)
+        let far = GameKeyEngine.aimPoint(button: (0.8, 0.8), radius: 0.05, mouse: (1.0, 0.5), aspect: 1)
+        let close = GameKeyEngine.aimPoint(button: (0.8, 0.8), radius: 0.05, mouse: (0.6, 0.5), aspect: 1)
+        check("skill aim is clamped to its reach", abs(far.x - 0.85) < 1e-9 && abs(far.y - 0.8) < 1e-9)
+        check("skill aim follows the mouse's distance", abs(close.x - (0.8 + 0.1 / 0.25 * 0.05)) < 1e-9)
+        var aim = GameKeyEngine(keys: [skill], aspect: 1)
+        _ = aim.mouseMoved(to: (0.5, 1.0))
+        let press = aim.keyDown(12, now: 0)
+        check("a skill presses its button, then aims", press.map(\.kind) == ["tdown", "tmove"] && near(press[0].x, 0.8) && near(press[1].y, 0.85))
+        let follow = aim.mouseMoved(to: (0.5, 0.0))
+        check("the held skill follows the mouse", follow.count == 1 && near(follow[0].y, 0.75))
+        let cancel = aim.cancelAim()
+        check("Esc returns to the middle, then lifts", cancel.map(\.kind) == ["tmove", "tup"] && near(cancel[0].x, 0.8) && near(cancel[0].y, 0.8))
+        check("the release after a cancel does nothing", aim.keyUp(12, now: 500).isEmpty && aim.down.isEmpty)
+        _ = aim.keyDown(12, now: 1000)
+        let cast = aim.keyUp(12, now: 1500)
+        check("letting go casts where it aims", cast.count == 1 && cast[0].kind == "tup" && near(cast[0].y, 0.75))
+        var quick = GameKeyEngine(keys: [{ var k = skill; k.quickCast = true; return k }()], aspect: 1)
+        _ = quick.mouseMoved(to: (0.5, 0.0))
+        _ = quick.keyDown(12, now: 0)
+        let tapCast = quick.keyUp(12, now: 100)
+        check("quick cast taps the middle", tapCast.map(\.kind) == ["tmove", "tup"] && near(tapCast[1].y, 0.8))
+        // Swipes.
+        let line = GameKeyEngine.swipeTimeline(from: (0.2, 0.5), to: (0.6, 0.1), durationMs: 120)
+        let moves = line.filter { $0.kind == "tmove" }
+        check("swipe starts at A and ends at B", line.first == .init(at: 0, kind: "tdown", x: 0.2, y: 0.5)
+              && line.last == .init(at: 120, kind: "tup", x: 0.6, y: 0.1) && abs(moves.last!.x - 0.6) < 1e-9)
+        check("swipe moves about every 16 ms", moves.count == 8 && zip(moves, moves.dropFirst()).allSatisfy { $1.at - $0.at <= 16 + 1e-9 })
+        let swipe = GameKey(kind: .swipe, keyCode: 3, label: "F", x: 0.2, y: 0.5, toX: 0.6, toY: 0.1)
+        var swiper = GameKeyEngine(keys: [swipe], aspect: 1)
+        var played = swiper.keyDown(3, now: 0)
+        _ = swiper.keyUp(3, now: 10)
+        for t in stride(from: 8.0, through: 200, by: 8) { played += swiper.tick(now: t) }
+        check("a swipe plays to its end and lifts", played.first?.kind == "tdown" && played.last?.kind == "tup"
+              && near(played.last?.x, 0.6) && swiper.down.isEmpty && !swiper.needsTick)
+        // Auto-fire at 10 a second.
+        let fire = GameKey(kind: .tap, keyCode: 49, label: "Space", x: 0.5, y: 0.5, mode: .autoFire, rate: 10)
+        var auto = GameKeyEngine(keys: [fire], aspect: 1)
+        var shots = auto.keyDown(49, now: 0)
+        for t in stride(from: 5.0, through: 995, by: 5) { shots += auto.tick(now: t) }
+        check("auto-fire taps 10 times a second", shots.filter { $0.kind == "tdown" }.count == 10)
+        let stop = auto.keyUp(49, now: 1000)
+        check("auto-fire stops on key up with no finger down", auto.down.isEmpty && !auto.needsTick && auto.tick(now: 1200).isEmpty
+              && (stop.isEmpty || stop.allSatisfy { $0.kind == "tup" }))
+        // Hold toggle.
+        var toggle = GameKeyEngine(keys: [GameKey(kind: .tap, keyCode: 49, label: "Space", x: 0.5, y: 0.5, mode: .toggle)], aspect: 1)
+        let on = toggle.keyDown(49), letGo = toggle.keyUp(49)
+        check("hold toggle stays down after the key is let go", on.first?.kind == "tdown" && letGo.isEmpty && toggle.down.count == 1 && toggle.held().count == 1)
+        _ = toggle.keyDown(49)
+        check("pressing again lets the toggle go", toggle.down.isEmpty)
+        // Combos.
+        var combo = GameKey(kind: .tap, keyCode: 14, label: "E", x: 0.5, y: 0.5, mode: .combo)
+        combo.steps = [.init(kind: .tap, x: 0.1, y: 0.1), .init(kind: .wait, ms: 80), .init(kind: .tap, x: 0.2, y: 0.2),
+                       .init(kind: .wait, ms: 50), .init(kind: .swipe, x: 0.3, y: 0.3, toX: 0.4, toY: 0.4, ms: 32)]
+        let timeline = GameKeyEngine.comboTimeline(combo)
+        check("combo taps in order with its waits", timeline[0] == .init(at: 0, kind: "tdown", x: 0.1, y: 0.1)
+              && timeline[1].at == 40 && timeline[2] == .init(at: 120, kind: "tdown", x: 0.2, y: 0.2)
+              && timeline[4].at == 210 && timeline[4].kind == "tdown" && timeline.last == .init(at: 242, kind: "tup", x: 0.4, y: 0.4))
+        var comboEngine = GameKeyEngine(keys: [combo], aspect: 1)
+        var comboEvents = comboEngine.keyDown(14, now: 0)
+        _ = comboEngine.keyUp(14, now: 5)
+        for t in stride(from: 8.0, through: 400, by: 8) { comboEvents += comboEngine.tick(now: t) }
+        check("a combo plays every step and ends lifted", comboEvents.filter { $0.kind == "tdown" }.count == 3 && comboEngine.down.isEmpty)
+        var cut = GameKeyEngine(keys: [swipe, combo, fire], aspect: 1)
+        _ = cut.keyDown(3, now: 0); _ = cut.keyDown(14, now: 0); _ = cut.keyDown(49, now: 0)
+        let all = cut.releaseAll()
+        check("release all stops gestures and auto-fire, lifting every finger", !all.isEmpty && all.allSatisfy { $0.kind == "tup" }
+              && cut.down.isEmpty && !cut.needsTick && cut.tick(now: 300).isEmpty)
+        // The finger pool.
+        let many = (0..<10).map { GameKey(kind: .tap, keyCode: UInt16(20 + $0), label: "\($0)", x: 0.5, y: 0.5) }
+        var pool = GameKeyEngine(keys: many, aspect: 1)
+        check("only 8 keys get a finger", pool.fingers.count == GameKeyEngine.fingerPool && Set(pool.fingers.values) == Set(0..<8))
+        check("a key past the pool does nothing", pool.keyDown(29).isEmpty && !pool.handles(29))
+        let model = GameKeysModel()
+        model.preview(keys: Array(many.prefix(8)))
+        model.editing = true
+        model.pendTap(x: 0.3, y: 0.3)
+        _ = model.assign(code: 40, label: "K")
+        check("placing a ninth key is refused with a message", model.keys.count == 8 && model.message?.contains("No free finger") == true)
+        model.placeJoystick(x: 0.2, y: 0.2)
+        check("a joystick is refused too", model.joystickCount == 0)
+        // Profiles saved by the older version still load.
+        let old = #"[{"name":"PUBG","keys":[{"id":"9C1F0A57-1D7B-4C5B-9A3E-2F1C7D9E1A11","kind":"joystick","keyCode":0,"label":"WASD","x":0.2,"y":0.7,"radius":0.1},{"id":"9C1F0A57-1D7B-4C5B-9A3E-2F1C7D9E1A12","kind":"tap","keyCode":49,"label":"Space","x":0.9,"y":0.8,"radius":0.08}]}]"#
+        let decoded = try? JSONDecoder().decode([GameProfile].self, from: Data(old.utf8))
+        let keys = decoded?.first?.keys ?? []
+        check("old profile JSON decodes with defaults", keys.count == 2 && keys[0].keySet == .wasd && keys[0].walk == .off
+              && keys[1].mode == .tap && keys[1].rate == 10 && keys[1].steps.isEmpty && keys[1].duration == 120)
+        check("new fields round-trip", (try? JSONDecoder().decode(GameKey.self, from: JSONEncoder().encode(combo))) == combo)
+    }
+
     private static func testMenuBarLayout() {
         let suite = "dysklink.selftest.menubar"
         let defaults = UserDefaults(suiteName: suite)!
@@ -623,6 +796,28 @@ enum ToolsSelfTest {
         dragged.place(.login, at: .batteryLimit)
         check("dragging down moves it after the others", dragged.order.firstIndex(of: .login) == 2 && dragged.order[1] == .batteryLimit && dragged.order.first == .devices)
         dragged.reset()
+    }
+
+    private static func testPowerSplit() {
+        func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.001 }
+        // The case from the menu: the battery's lagging 12.05 W next to the Mac's 6.4 W.
+        let battery = PowerSplit(PowerSample(adapterWatts: 0, batteryWatts: -12.05, systemWatts: 6.4, gpuWatts: 0.4))
+        check("on battery the battery gives what the Mac uses", near(battery.battery, 6.4) && battery.charger == 0 && near(battery.total, 6.4))
+        check("graphics and the rest add up to the total", near((battery.gpu ?? 0) + battery.rest + battery.charging, battery.total))
+        let charging = PowerSplit(PowerSample(adapterWatts: 31, batteryWatts: 18, systemWatts: 9, gpuWatts: 1))
+        check("charging: the charger covers the Mac and the battery", near(charging.total, 27) && near(charging.charger, 27) && charging.battery == 0
+            && near(charging.charging, 18) && near((charging.gpu ?? 0) + charging.rest + charging.charging, charging.total))
+        let mixed = PowerSplit(PowerSample(adapterWatts: 20, batteryWatts: -6, systemWatts: 23, gpuWatts: 4))
+        check("mixed: the battery makes up what the charger doesn't", near(mixed.charger, 20) && near(mixed.battery, 3)
+            && near(mixed.charger + mixed.battery, mixed.total) && mixed.isMixed)
+        let losses = PowerSplit(PowerSample(adapterWatts: 12, batteryWatts: -0.5, systemWatts: 10))
+        check("an adapter reading above the total leaves the battery at zero", near(losses.charger, 10) && losses.battery == 0 && !losses.isMixed)
+        let held = PowerSplit(PowerSample(adapterWatts: 8, batteryWatts: 0.02, systemWatts: 7.5))
+        check("plugged in and held: all from the charger", near(held.charger, 7.5) && held.charging == 0)
+        let noSMC = PowerSplit(PowerSample(adapterWatts: 0, batteryWatts: -5, systemWatts: 0, gpuWatts: 9))
+        check("without the system reading the sources set the total", near(noSMC.total, 5) && near(noSMC.gpu ?? 0, 5) && noSMC.rest == 0)
+        let noise = PowerSplit(PowerSample(adapterWatts: 0.1, batteryWatts: 3, systemWatts: 6))
+        check("no charging without a charger", noise.charging == 0 && near(noise.battery, 6))
     }
 
     private static func testBattery() {
@@ -954,14 +1149,7 @@ enum ToolsSelfTest {
     }
 
     private static func assertionListed() -> Bool {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        process.arguments = ["-g", "assertions"]
-        process.standardOutput = pipe
-        try? process.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        let data = ProcessRunner.run("/usr/bin/pmset", ["-g", "assertions"])?.output ?? Data()
         // Only this process counts, because the installed app may be keeping the Mac awake at the same time.
         let mine = "pid \(getpid())("
         return String(decoding: data, as: UTF8.self).split(separator: "\n")

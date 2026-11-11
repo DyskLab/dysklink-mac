@@ -42,7 +42,7 @@ struct PairingPrompt: Identifiable, Equatable {
     var localAccepted = false
     var error: String?
     var attempts = 0
-    /// The other device has an older DyskLink that can't type codes.
+    /// The other device has an older DyskLink that can't pair with CPace. `error` says to update it.
     var outdated = false
     var showsCode: Bool { startedByPeer }
 }
@@ -183,6 +183,9 @@ final class AppModel {
     @ObservationIgnored private var audioCapture: MacAudioCapture?
     @ObservationIgnored private var audioInFlight: [String: Int] = [:]
     @ObservationIgnored private var audioChunksSent = 0
+    /// Silence held back from bin1 phones (see `SilenceGate`); older phones get every chunk.
+    @ObservationIgnored private var audioGate = SilenceGate()
+    @ObservationIgnored private var audioChunksHeld = 0
     @ObservationIgnored private lazy var phoneAudio = PhoneAudioPlayer()
     static let audioMaxInFlight = 6
 
@@ -226,8 +229,9 @@ final class AppModel {
         guard audioCapture == nil else { return }
         let capture = MacAudioCapture()
         capture.onChunk = { [weak self] chunk in
-            let text = chunk.base64EncodedString()
-            Task { @MainActor in self?.sendAudio(text) }
+            // Checked here, on the capture queue; the frame itself is made on each session's queue.
+            let silent = SilenceGate.isSilent(chunk)
+            Task { @MainActor in self?.sendAudio(chunk, silent: silent) }
         }
         capture.onStop = { [weak self] error in
             Task { @MainActor in self?.audioListeners.forEach { self?.stopListening($0, error: error ?? "Recording stopped") } }
@@ -242,14 +246,19 @@ final class AppModel {
         }
     }
 
-    /// Each phone gets the chunk unless too many are still on their way, which happens on a slow network.
-    private func sendAudio(_ text: String) {
-        var envelope = Envelope(type: MessageType.audioFrame)
-        envelope.audio = text
+    /// Each phone gets the chunk unless too many are still on their way, which happens on a slow network. Phones
+    /// with binary frames don't get digital silence after its first 200 ms; they play silence by themselves.
+    private func sendAudio(_ chunk: Data, silent: Bool) {
+        let sendSilence = audioGate.shouldSend(silent: silent)
+        if !sendSilence {
+            audioChunksHeld += 1
+            if audioChunksHeld == 1 { TestEnv.log("MAC_AUDIO_SILENCE_HELD") }
+        }
         for id in audioListeners {
             guard let session = sessions[id], audioInFlight[id, default: 0] < Self.audioMaxInFlight else { continue }
+            if !sendSilence, session.binary { continue }
             audioInFlight[id, default: 0] += 1
-            session.send(envelope) { [weak self] _ in
+            session.sendMedia(type: MessageType.audioFrame, data: chunk) { [weak self] _ in
                 Task { @MainActor in self?.audioInFlight[id, default: 1] -= 1 }
             }
         }
@@ -269,6 +278,8 @@ final class AppModel {
             audioCapture?.stop()
             audioCapture = nil
             audioChunksSent = 0
+            audioChunksHeld = 0
+            audioGate = SilenceGate()
         }
     }
 
@@ -367,6 +378,11 @@ final class AppModel {
     @ObservationIgnored private var infoTimer: Timer?
     @ObservationIgnored private var pairingTimeout: Task<Void, Never>?
     @ObservationIgnored private var pairingGuard = PairingGuard()
+    /// CPace state of the prompt: `pakeShower` while this Mac shows the code, `pakeTyper` while it types it.
+    @ObservationIgnored private var pakeShower: Pake.Shower?
+    @ObservationIgnored private var pakeTyper: Pake.Typer?
+    /// A code typed before the other side's `pair.pake` arrived.
+    @ObservationIgnored private var pendingCode: String?
     /// A pairing request waiting for the prompt rate limit, by device.
     @ObservationIgnored private var deferredPairing: String?
     /// One timer per ringing phone, so ringing again restarts it instead of an old one ending the new ring.
@@ -400,8 +416,8 @@ final class AppModel {
     static let keepaliveCount = 4
 
     private static let macMessageTypes: Set<String> = [
-        MessageType.hello, MessageType.pairRequest, MessageType.pairAccept, MessageType.pairReject, MessageType.unpair,
-        MessageType.info, MessageType.ping, MessageType.pong, MessageType.clipboard, MessageType.clipboardHistory,
+        MessageType.hello, MessageType.pairRequest, MessageType.pairPake, MessageType.pairAccept, MessageType.pairReject,
+        MessageType.unpair, MessageType.info, MessageType.ping, MessageType.pong, MessageType.clipboard, MessageType.clipboardHistory,
         MessageType.ring, MessageType.fileOffer, MessageType.fileChunk, MessageType.fileDone, MessageType.fileCancel,
         MessageType.fileResult, MessageType.remoteEnter, MessageType.remoteInput, MessageType.remoteLeave,
         MessageType.remoteExit,
@@ -454,6 +470,7 @@ final class AppModel {
             let identity = try LocalIdentity.loadOrCreate(in: directory)
             self.identity = identity
             try startListener(identity: identity)
+            LocalDevice.prewarm()
             startNetworkMonitor()
             startInfoTimer()
             clipboard.onChange = { [weak self] text in self?.shareClipboard(text) }
@@ -826,8 +843,8 @@ final class AppModel {
         viewer.inFlight += 1
         viewer.sent += 1
         if viewer.sent == 1 { TestEnv.log("MACSCREEN_FRAME key=\(key) bytes=\(data.count)") }
-        // The base64 and JSON are made on the session's queue, straight from the encoder's data.
-        session.sendBase64(type: MessageType.macScreenFrame, field: "video", data: data, after: ",\"keyFrame\":\(key)") { [weak viewer] ok in
+        // The frame (binary for a bin1 phone, else base64 and JSON) is made on the session's queue, from the encoder's data.
+        session.sendMedia(type: MessageType.macScreenFrame, data: data, keyFrame: key) { [weak viewer] ok in
             guard let viewer else { return }
             viewer.inFlight -= 1
             // A frame that didn't go out breaks the frames after it, so the next one is a key frame, smaller.
@@ -914,11 +931,24 @@ final class AppModel {
             #endif
         case MessageType.pairRequest:
             guard records[id] == nil, session.hello != nil else { return }
-            // A code already showing for this device stays; asking again doesn't make a new one.
-            if let current = pairingPrompt, current.peerId == id, current.showsCode { return }
+            // A code already showing for this device stays; asking again doesn't make a new one. A new request
+            // (a new nonce) gets a new CPace share for that same code.
+            if let current = pairingPrompt, current.peerId == id, current.showsCode {
+                guard !current.outdated, let nonce = Pake.requestNonce(envelope.pake) else { return }
+                if pakeShower?.sameRequest(nonce) != true, let identity {
+                    pakeShower = Pake.Shower(code: current.code, nonceT: nonce,
+                                             ci: Pake.channel(typing: id, showing: identity.deviceId))
+                }
+                if let shower = pakeShower {
+                    var share = Envelope(type: MessageType.pairPake)
+                    share.pake = shower.message
+                    session.send(share)
+                }
+                return
+            }
             switch pairingGuard.admit(id) {
             case .allowed:
-                beginPairing(with: id, startedByPeer: true)
+                beginPairing(with: id, startedByPeer: true, request: envelope.pake)
             case .ignored:
                 return
             case .deferred(let wait):
@@ -939,12 +969,33 @@ final class AppModel {
                 reject.error = reason
                 session.send(reject)
             }
+        case MessageType.pairPake:
+            guard let prompt = pairingPrompt, prompt.peerId == id, !prompt.showsCode, !prompt.outdated,
+                  let typer = pakeTyper else { return }
+            guard typer.received(envelope.pake) else {
+                print("Pairing with \(prompt.peerName) failed: its CPace share isn't valid")
+                return rejectPairing()
+            }
+            if let code = pendingCode {
+                pendingCode = nil
+                sendCode(code, to: session, prompt: prompt)
+            }
         case MessageType.pairAccept:
-            guard var prompt = pairingPrompt, prompt.peerId == id, let identity else { return }
+            guard var prompt = pairingPrompt, prompt.peerId == id else { return }
             if prompt.showsCode {
-                if envelope.key == Pairing.proof(prompt.code, identity.deviceId, id) {
+                guard !prompt.outdated, let shower = pakeShower else { return }
+                // Only the old key: an older app, which can't pair any more. Not counted as a wrong code.
+                guard let pake = envelope.pake else {
+                    var reject = Envelope(type: MessageType.pairReject)
+                    reject.error = Pairing.updateRequired
+                    session.send(reject)
+                    return clearPairing()
+                }
+                if let reply = shower.check(pake) {
                     pairingGuard.succeeded(id)
-                    session.send(Envelope(type: MessageType.pairAccept))
+                    var accept = Envelope(type: MessageType.pairAccept)
+                    accept.pake = reply
+                    session.send(accept)
                     completePairing(id)
                 } else {
                     prompt.attempts += 1
@@ -961,12 +1012,25 @@ final class AppModel {
                     wrong.error = Pairing.wrongCode
                     session.send(wrong)
                 }
-            } else if prompt.localAccepted {
-                completePairing(id)
+            } else if prompt.localAccepted, pendingCode == nil {
+                // Saved only once the other side proves it derived the same key from the code.
+                if pakeTyper?.confirms(envelope.pake) == true {
+                    completePairing(id)
+                } else {
+                    print("Pairing with \(prompt.peerName) failed: its confirmation didn't match")
+                    rejectPairing()
+                }
             }
         case MessageType.pairReject:
             guard var prompt = pairingPrompt, prompt.peerId == id else { return }
-            if envelope.error == Pairing.wrongCode, !prompt.showsCode {
+            if envelope.error == Pairing.updateRequired, !prompt.showsCode {
+                dropPake()
+                prompt.localAccepted = false
+                prompt.outdated = true
+                prompt.error = Pairing.updateMessage(prompt.peerName)
+                pairingPrompt = prompt
+            } else if envelope.error == Pairing.wrongCode, !prompt.showsCode {
+                pakeTyper?.wrongCode()
                 prompt.localAccepted = false
                 pairingEntry = ""
                 prompt.error = "That code isn't right. Check the code on \(prompt.peerName) and try again."
@@ -1067,20 +1131,31 @@ final class AppModel {
     // MARK: - Pairing
 
     func requestPairing(with id: String) {
-        guard records[id] == nil, let session = sessions[id] else { return }
-        session.send(Envelope(type: MessageType.pairRequest))
+        guard records[id] == nil, sessions[id] != nil else { return }
         beginPairing(with: id, startedByPeer: false)
     }
 
     /// Sends the code typed on this Mac. The other device checks it.
     func submitPairingCode(_ typed: String) {
         let digits = typed.filter(\.isNumber)
-        guard var prompt = pairingPrompt, !prompt.showsCode, !prompt.outdated, digits.count == 6,
-              let session = sessions[prompt.peerId], let identity else { return }
+        guard var prompt = pairingPrompt, !prompt.showsCode, !prompt.outdated, !prompt.localAccepted, digits.count == 6,
+              let session = sessions[prompt.peerId], let typer = pakeTyper else { return }
         prompt.localAccepted = true
         prompt.error = nil
         pairingPrompt = prompt
-        session.send(Envelope(type: MessageType.pairAccept, key: Pairing.proof(digits, identity.deviceId, prompt.peerId)))
+        // The other side's share hasn't come yet: the code goes as soon as it does.
+        if typer.ready { sendCode(digits, to: session, prompt: prompt) } else { pendingCode = digits }
+    }
+
+    /// The CPace answer for a typed code, with a fresh secret each time so the same code can be typed again.
+    private func sendCode(_ code: String, to session: PeerSession, prompt: PairingPrompt) {
+        guard let identity, let answer = pakeTyper?.answer(code: code, ci: Pake.channel(typing: identity.deviceId, showing: prompt.peerId)) else {
+            print("Pairing with \(prompt.peerName) failed: its CPace share isn't valid")
+            return rejectPairing()
+        }
+        var accept = Envelope(type: MessageType.pairAccept)
+        accept.pake = answer
+        session.send(accept)
     }
 
     /// What's typed in the code box on this Mac.
@@ -1098,8 +1173,10 @@ final class AppModel {
         rebuildPeers()
     }
 
-    private func beginPairing(with id: String, startedByPeer: Bool) {
-        guard let identity, let hello = sessions[id]?.hello else { return }
+    /// `startedByPeer`: the other side sent `pair.request` (`request` is its `pake`), so this Mac shows the code.
+    /// Otherwise this Mac asks and types the code.
+    private func beginPairing(with id: String, startedByPeer: Bool, request: PakeMessage? = nil) {
+        guard let identity, let session = sessions[id], let hello = session.hello else { return }
         // Only one request is active. Others are refused.
         if let current = pairingPrompt, current.peerId != id {
             sessions[id]?.send(Envelope(type: MessageType.pairReject))
@@ -1114,14 +1191,35 @@ final class AppModel {
         #else
         let testCode = false
         #endif
+        // Older apps only know the old code check, which a device in the middle could brute-force. They must update.
+        let nonceT = startedByPeer ? Pake.requestNonce(request) : nil
+        let outdated = hello.protocolVersion < Pairing.pakeSince || (startedByPeer && nonceT == nil)
+        let code = startedByPeer && !outdated ? (testCode ? "123456" : Pairing.newCode()) : ""
+        dropPake()
         pairingEntry = ""
         pairingPrompt = PairingPrompt(
-            peerId: id, peerName: hello.name,
-            code: startedByPeer ? (testCode ? "123456" : Pairing.newCode()) : "", startedByPeer: startedByPeer,
-            error: hello.protocolVersion < Pairing.typedSince
-                ? "\(hello.name) has an older DyskLink. Update it there, then pair again." : nil,
-            outdated: hello.protocolVersion < Pairing.typedSince
+            peerId: id, peerName: hello.name, code: code, startedByPeer: startedByPeer,
+            error: outdated ? Pairing.updateMessage(hello.name) : nil, outdated: outdated
         )
+        if outdated {
+            if startedByPeer {
+                var reject = Envelope(type: MessageType.pairReject)
+                reject.error = Pairing.updateRequired
+                session.send(reject)
+            }
+        } else if let nonceT {
+            let shower = Pake.Shower(code: code, nonceT: nonceT, ci: Pake.channel(typing: id, showing: identity.deviceId))
+            pakeShower = shower
+            var share = Envelope(type: MessageType.pairPake)
+            share.pake = shower.message
+            session.send(share)
+        } else {
+            let typer = Pake.Typer()
+            pakeTyper = typer
+            var ask = Envelope(type: MessageType.pairRequest)
+            ask.pake = typer.request
+            session.send(ask)
+        }
         onNeedsAttention?()
         pairingTimeout?.cancel()
         pairingTimeout = Task { [weak self] in
@@ -1131,7 +1229,7 @@ final class AppModel {
         }
         #if DEBUG
         // For automated tests only. Not in release builds.
-        if ProcessInfo.processInfo.environment["PHONELINK_TEST_AUTO_ACCEPT"] == "1" {
+        if ProcessInfo.processInfo.environment["PHONELINK_TEST_AUTO_ACCEPT"] == "1", !outdated {
             print("PAIRING_CODE 123456")
             if !startedByPeer { submitPairingCode("123456") }
         }
@@ -1156,9 +1254,16 @@ final class AppModel {
         rebuildPeers()
     }
 
+    private func dropPake() {
+        pakeShower = nil
+        pakeTyper = nil
+        pendingCode = nil
+    }
+
     private func clearPairing() {
         pairingTimeout?.cancel()
         pairingTimeout = nil
+        dropPake()
         pairingPrompt = nil
         pairingEntry = ""
     }
@@ -1812,9 +1917,11 @@ final class AppModel {
     }
 
     func allowInput() {
-        DeviceInput.requestTrust()
-        isInputTrusted = DeviceInput.isTrusted
-        broadcastInfo()
+        DeviceInput.requestTrust { [weak self] in
+            guard let self else { return }
+            self.isInputTrusted = DeviceInput.isTrusted
+            self.broadcastInfo()
+        }
     }
 
     private func handleScreen(_ envelope: Envelope, payload: Data?, from id: String, session: PeerSession) {

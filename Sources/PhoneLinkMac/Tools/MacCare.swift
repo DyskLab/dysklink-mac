@@ -482,15 +482,9 @@ enum Startup {
     /// Runs launchctl. Tests pass a stand-in.
     typealias Launchctl = ([String]) -> Int32
 
+    /// `bootout` waits for the agent to quit, so this can take seconds: call it off the main thread.
     static let launchctl: Launchctl = { arguments in
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return -1 }
-        process.waitUntilExit()
-        return process.terminationStatus
+        ProcessRunner.run("/bin/launchctl", arguments, timeout: 30)?.status ?? -1
     }
 
     /// Stops the agent and moves its file aside, so it doesn't start at the next login. Only your own agents.

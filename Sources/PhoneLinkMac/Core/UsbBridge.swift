@@ -152,12 +152,11 @@ final class UsbBridge {
                 let folder = Self.downloadedAdb.deletingLastPathComponent().deletingLastPathComponent()
                 try? FileManager.default.removeItem(at: folder.appendingPathComponent("platform-tools"))
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                let unzip = Process()
-                unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-                unzip.arguments = ["-x", "-k", file.path, folder.path]
-                try unzip.run()
-                unzip.waitUntilExit()
-                guard unzip.terminationStatus == 0, FileManager.default.isExecutableFile(atPath: Self.downloadedAdb.path) else {
+                // This task is on the main actor, and unpacking takes seconds, so ditto runs on a background thread.
+                let unpacked = await Task.detached(priority: .userInitiated) {
+                    ProcessRunner.run("/usr/bin/ditto", ["-x", "-k", file.path, folder.path], timeout: nil)
+                }.value
+                guard unpacked?.status == 0, FileManager.default.isExecutableFile(atPath: Self.downloadedAdb.path) else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 adbPath = Self.downloadedAdb.path
@@ -171,15 +170,8 @@ final class UsbBridge {
 
     /// Output, or nil when adb failed.
     nonisolated static func run(_ path: String, _ arguments: [String]) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
+        // Errors are read too, so a chatty adb can't fill that pipe and stall. Starting adb's server can take a while.
+        guard let result = ProcessRunner.run(path, arguments, timeout: 30, errorOutput: .capture) else { return nil }
+        return result.succeeded ? result.text : nil
     }
 }

@@ -87,16 +87,9 @@ enum BatteryHealth {
 
     /// "Maximum Capacity" and the condition from System Information. Slow, so it runs off the main thread.
     static func appleHealth() -> (maxCapacity: Int?, condition: String?) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        process.arguments = ["SPPowerDataType", "-json"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return (nil, nil) }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return parseAppleHealth(data)
+        guard let result = ProcessRunner.run("/usr/sbin/system_profiler", ["SPPowerDataType", "-json"], timeout: 60)
+        else { return (nil, nil) }
+        return parseAppleHealth(result.output)
     }
 
     static func parseAppleHealth(_ data: Data) -> (maxCapacity: Int?, condition: String?) {

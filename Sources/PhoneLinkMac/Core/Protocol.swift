@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 
 enum PhoneLinkProtocol {
-    /// 2: the code is random and typed on the device that asked to pair.
-    static let version = 2
+    /// 3: pairing by CPace on the typed code. 2: the code is random and typed on the device that asked to pair.
+    static let version = 3
     static let serviceType = "_phonelink._tcp"
     static let port: UInt16 = 47821
     /// On the phone, `adb reverse` forwards this port to the Mac, so the phone reaches it over USB at 127.0.0.1.
@@ -11,7 +11,7 @@ enum PhoneLinkProtocol {
     /// At most this many copies in one `clipboard.history`.
     static let maxSyncedClips = 500
     static let maxFrameBytes = 1024 * 1024
-    /// Raw video above this is dropped, so it still fits in one frame after base64.
+    /// Raw video above this is dropped, so it still fits in one frame after base64 (to peers without binary frames).
     static let maxScreenFrameBytes = 760 * 1024
     static let pairingTimeout: TimeInterval = 60
     static let maxClipboardChars = 256 * 1024
@@ -30,6 +30,9 @@ struct Hello: Codable, Equatable {
     var paired: Bool
     /// The app version, such as "0.2.0". Missing from apps older than 0.2.0.
     var appVersion: String? = nil
+    /// Optional protocol features the sender understands, such as `bin1` (binary frames, see `BinaryFrame`).
+    /// Missing from apps before 1.2; older apps ignore it.
+    var caps: [String]? = nil
 }
 
 struct DeviceInfo: Codable, Equatable {
@@ -330,6 +333,8 @@ struct Envelope: Codable {
     var terminal: TerminalMessage?
     /// On the `remote.*` messages between Macs.
     var remote: RemoteEvent?
+    /// On `pair.request`, `pair.pake`, and `pair.accept` (pairing version 3).
+    var pake: PakeMessage?
 
     init(type: String, hello: Hello? = nil, info: DeviceInfo? = nil, text: String? = nil,
          file: FileMessage? = nil, media: String? = nil, input: InputEvent? = nil,
@@ -360,6 +365,8 @@ enum MessageType {
     static let pairRequest = "pair.request"
     static let pairAccept = "pair.accept"
     static let pairReject = "pair.reject"
+    /// The showing side's CPace share, sent once the code shows.
+    static let pairPake = "pair.pake"
     static let unpair = "unpair"
     static let info = "info"
     static let ping = "ping"
@@ -447,22 +454,21 @@ enum MessageType {
 enum Pairing {
     /// Sent in `pair.reject` when the typed code was wrong, so the other side can try again.
     static let wrongCode = "wrong-code"
+    /// Sent in `pair.reject` to a device that can only pair the old way (version 1 or 2).
+    static let updateRequired = "update-required"
     static let maxAttempts = 5
-    /// The first protocol version that types the code.
-    static let typedSince = 2
+    /// The first protocol version that pairs with CPace. Older devices must update before they can pair.
+    static let pakeSince = 3
 
     /// A random code, shown on the device that was asked to pair.
     static func newCode() -> String {
         String(format: "%06u", UInt32.random(in: 0..<1_000_000))
     }
 
-    /// What the typing side sends: the code tied to both certificates, so a device in the middle can't reuse it.
-    static func proof(_ code: String, _ idA: String, _ idB: String) -> String {
-        let ids = [idA, idB].sorted()
-        return Hex.sha256(Data("dysklink-pair-v2:\(code):\(ids[0]):\(ids[1])".utf8))
-    }
+    /// What the user sees when the other device has an older DyskLink.
+    static func updateMessage(_ name: String) -> String { "Update DyskLink on \(name) to pair." }
 
-    /// Version 1 code, from both IDs. Kept for the record; pairing now uses [newCode].
+    /// Version 1 code, from both IDs. Kept for the record; new pairings only use CPace ([Pake]).
     static func code(_ idA: String, _ idB: String) -> String {
         let ids = [idA, idB].sorted()
         let input = "phonelink-pair-v1:\(ids[0]):\(ids[1])"

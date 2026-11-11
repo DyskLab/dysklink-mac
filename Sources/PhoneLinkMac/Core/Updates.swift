@@ -336,16 +336,9 @@ final class UpdateChecker {
     }
 
     nonisolated private static func run(_ path: String, _ arguments: [String]) -> (status: Int32, output: String) {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        process.standardOutput = pipe
-        process.standardError = pipe
-        guard (try? process.run()) != nil else { return (-1, "") }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+        // ditto and a deep codesign check can be slow on a big app, so there's no timeout.
+        guard let result = ProcessRunner.run(path, arguments, timeout: nil, errorOutput: .merge) else { return (-1, "") }
+        return (result.status, result.text)
     }
 
     /// Hides this version until a newer one comes out.

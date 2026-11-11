@@ -18,6 +18,47 @@ struct PowerSample: Equatable {
     var restWatts: Double { max(0, systemWatts - (gpuWatts ?? 0)) }
 }
 
+/// One consistent picture of a sample: what the Mac uses, plus what goes into the battery, and where that comes from.
+/// The battery's own figure comes from its averaged amperage and lags the SMC's system reading, so it isn't shown as is:
+/// the outputs set the total, the adapter reading says how much of it the charger covers, and the battery makes up the rest.
+struct PowerSplit: Equatable {
+    /// What the Mac uses (SMC `PSTR`), or the sources' sum when that reading is missing.
+    var system: Double
+    var gpu: Double?
+    var charging: Double
+    var charger: Double
+    var battery: Double
+
+    var rest: Double { max(0, system - (gpu ?? 0)) }
+    /// Everything that goes out: the Mac plus charging. The sources add up to this.
+    var total: Double { system + charging }
+    var isMixed: Bool { charger > 0 && battery > 0 }
+
+    /// Below these the readings are noise.
+    static let adapterFloor = 0.3, batteryFloor = 0.05
+
+    init(_ sample: PowerSample) {
+        let onCharger = sample.adapterWatts > Self.adapterFloor
+        // The battery can't charge while it supplies, and never charges without a charger.
+        let charging = onCharger && sample.intoBattery > Self.batteryFloor ? sample.intoBattery : 0
+        let system = sample.systemWatts > 0
+            ? sample.systemWatts
+            : max(0, sample.adapterWatts + sample.fromBattery - charging)
+        self.charging = charging
+        self.system = system
+        gpu = sample.gpuWatts.map { min(max(0, $0), system) }
+        let total = system + charging
+        var fromCharger = 0.0
+        if onCharger {
+            // On the charger and the battery: the charger gives what the adapter reads, the battery the rest.
+            fromCharger = charging > 0 || sample.fromBattery <= Self.batteryFloor ? total : min(sample.adapterWatts, total)
+            if total - fromCharger <= Self.batteryFloor { fromCharger = total }
+        }
+        charger = fromCharger
+        battery = total - fromCharger
+    }
+}
+
 struct EnergyApp: Equatable, Identifiable {
     var name: String
     /// macOS's energy impact score, as in Activity Monitor.
@@ -108,7 +149,7 @@ final class PowerMonitor {
     }
 
     /// For snapshots.
-    func preview(battery: BatteryReading? = nil) {
+    func preview(battery: BatteryReading? = nil, sample: PowerSample? = nil) {
         previewing = true
         self.battery = battery
         let now = Date()
@@ -116,7 +157,7 @@ final class PowerMonitor {
             let wave = [7.2, 7.0, 7.4, 8.0, 7.6, 12.5, 8.1, 5.9, 11.8, 6.2, 7.0, 7.9, 8.4, 8.2, 7.6, 9.1, 13.8][i % 17]
             return PowerSample(time: now.addingTimeInterval(-Double(24 - i) * 50), adapterWatts: 0, batteryWatts: -wave, systemWatts: wave, gpuWatts: 1.1)
         }
-        current = PowerSample(time: now, adapterWatts: 0, batteryWatts: -8.68, systemWatts: 8.68, gpuWatts: 1.06)
+        current = sample ?? PowerSample(time: now, adapterWatts: 0, batteryWatts: -8.68, systemWatts: 8.68, gpuWatts: 1.06)
         apps = []
     }
 }

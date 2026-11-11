@@ -79,6 +79,66 @@ enum Snapshots {
         save([phone], nil, "10-off", folder, phone: off, tab: .messages)
         renderTools(to: folder)
         renderTurns(to: folder)
+        renderGameKeys(to: folder)
+    }
+
+    /// The screen window editing game keys: every kind on a landscape picture, with the side panel.
+    private static func renderGameKeys(to folder: String) {
+        let game = GameKeysModel()
+        game.setAspect(2400.0 / 1080)
+        var walk = GameKey(kind: .joystick, label: "WASD", x: 0.14, y: 0.68, radius: 0.08, walk: .fullWithKey)
+        walk.label = "WASD"
+        let camera = GameKey(kind: .joystick, label: "IJKL", x: 0.62, y: 0.62, radius: 0.06, keySet: .ijkl)
+        let skill = GameKey(kind: .skill, keyCode: 12, label: "Q", x: 0.78, y: 0.42, radius: 0.06)
+        let swipe = GameKey(kind: .swipe, keyCode: 3, label: "F", x: 0.9, y: 0.45, toX: 0.9, toY: 0.15)
+        let fire = GameKey(kind: .tap, keyCode: 49, label: "Space", x: 0.88, y: 0.8, mode: .autoFire)
+        let toggle = GameKey(kind: .tap, keyCode: 8, label: "C", x: 0.76, y: 0.85, mode: .toggle)
+        var combo = GameKey(kind: .tap, keyCode: 14, label: "E", x: 0.4, y: 0.85, mode: .combo)
+        combo.steps = [.init(kind: .tap, x: 0.3, y: 0.3), .init(kind: .wait, ms: 80), .init(kind: .tap, x: 0.42, y: 0.25),
+                       .init(kind: .wait, ms: 120), .init(kind: .swipe, x: 0.5, y: 0.4, toX: 0.5, toY: 0.15, ms: 120)]
+        let look = GameKey(kind: .look, label: "Look", x: 0.45, y: 0.5, radius: 0.1)
+        let click = GameKey(kind: .fire, label: "Click", x: 0.68, y: 0.25)
+        game.preview(keys: [walk, camera, skill, swipe, fire, toggle, combo, look, click])
+        game.enabled = true
+        game.editing = true
+        for (selected, name) in [(combo.id, "21-game-keys-edit-combo"), (walk.id, "21b-game-keys-edit-joystick"), (skill.id, "21c-game-keys-edit-skill")] {
+            game.selected = selected
+            let picture = CGSize(width: 800, height: 360)
+            let view = ScreenSurface(frame: CGRect(origin: .zero, size: picture))
+            view.videoSize = CGSize(width: 2400, height: 1080)
+            view.game = game
+            view.layout()
+            let height: CGFloat = 760
+            let host = NSHostingView(rootView: GameKeysPanel(game: game, scrolls: false).frame(height: height).preferredColorScheme(.dark))
+            host.frame = CGRect(x: 0, y: 0, width: GameKeysPanel.width, height: height)
+            host.layoutSubtreeIfNeeded()
+            guard let panel = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
+            host.cacheDisplay(in: host.bounds, to: panel)
+            let size = CGSize(width: picture.width + GameKeysPanel.width, height: height)
+            let top = height - picture.height
+            let image = NSImage(size: size, flipped: false) { _ in
+                NSColor.black.setFill()
+                CGRect(origin: .zero, size: size).fill()
+                // A stand-in for the game picture.
+                NSGradient(starting: NSColor(calibratedRed: 0.18, green: 0.26, blue: 0.2, alpha: 1),
+                           ending: NSColor(calibratedRed: 0.1, green: 0.14, blue: 0.22, alpha: 1))?
+                    .draw(in: CGRect(x: 0, y: top, width: picture.width, height: picture.height), angle: 90)
+                NSGraphicsContext.current?.saveGraphicsState()
+                let shift = NSAffineTransform()
+                shift.translateX(by: 0, yBy: top)
+                shift.concat()
+                view.overlay.draw(view.overlay.bounds)
+                NSGraphicsContext.current?.restoreGraphicsState()
+                panel.draw(in: CGRect(x: picture.width, y: 0, width: GameKeysPanel.width, height: height))
+                let help = "Pick a control in the panel, or: click + key = tap key, drag + key = swipe, ⌥-click joystick, ⇧-click look area…"
+                NSAttributedString(string: help, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.lightGray])
+                    .draw(at: CGPoint(x: 12, y: top - 30))
+                return true
+            }
+            guard let tiff = image.tiffRepresentation, let data = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { continue }
+            try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+        }
+        game.enabled = false
     }
 
     /// The phone picture at each quarter turn. The phone's top left corner is red and its top edge is green.
@@ -396,6 +456,21 @@ enum Snapshots {
         batteryMenu.setShown(.devices, false)
         batteryMenu.setShown(.login, false)
         write(MenuBarView(model: AppModel(), layout: batteryMenu, tools: Shared.tools, scrolls: false).fixedSize(), "53-menubar-battery", folder)
+        // Just the limit and where the power goes, while charging and on the charger and battery together.
+        batteryParts.forEach { batteryMenu.setShown($0, [.batteryLimit, .powerFlow].contains($0)) }
+        var charging = power.battery!
+        charging.percent = 64; charging.amperageMa = 1450; charging.isCharging = true; charging.isPluggedIn = true
+        charging.minutesToFull = 52; charging.minutesToEmpty = nil
+        ChargeControl.shared.preview(temperature: 33.1, lastCalibration: Date(timeIntervalSince1970: 1_775_606_400), reason: .normal, adapterOff: false)
+        PowerMonitor.shared.preview(battery: charging, sample: PowerSample(adapterWatts: 27.4, batteryWatts: 17.9, systemWatts: 9.1, gpuWatts: 1.3))
+        write(MenuBarView(model: AppModel(), layout: batteryMenu, tools: Shared.tools, scrolls: false).fixedSize(), "54-menubar-battery-charging", folder)
+        var mixed = charging
+        mixed.percent = 12; mixed.amperageMa = -250; mixed.isCharging = false; mixed.minutesToFull = nil
+        PowerMonitor.shared.preview(battery: mixed, sample: PowerSample(adapterWatts: 20, batteryWatts: -6.2, systemWatts: 23, gpuWatts: 7.4))
+        write(MenuBarView(model: AppModel(), layout: batteryMenu, tools: Shared.tools, scrolls: false).fixedSize(), "55-menubar-battery-mixed", folder)
+        // Back to the sailing sample for the rest.
+        ChargeControl.shared.preview(temperature: 37.9, lastCalibration: Date(timeIntervalSince1970: 1_775_606_400))
+        PowerMonitor.shared.preview(battery: power.battery)
         let chosen = apps.apps[0]
         apps.chosenApp = chosen
         apps.leftovers = [

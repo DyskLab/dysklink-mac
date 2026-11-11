@@ -20,7 +20,8 @@ enum LocalDevice {
     static func hello(paired: Bool) -> Hello {
         Hello(name: name, platform: "macos", model: model,
               protocolVersion: PhoneLinkProtocol.version, paired: paired,
-              appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+              appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+              caps: BinaryFrame.localCaps)
     }
 
     static func info(network: String?) -> DeviceInfo {
@@ -94,25 +95,44 @@ enum LocalDevice {
         return data.map { String(format: "%02x", $0) }.joined(separator: ":")
     }
 
-    private static var etherCache: [String: (mac: String?, at: Date)] = [:]
-    private static let etherLock = NSLock()
+    /// Runs a short tool and returns its output, giving up after two seconds. See `ProcessRunner` for why
+    /// waitUntilExit() isn't used: on the main thread it let a timer re-enter `etherAddress` while its lock was held,
+    /// which froze the app ("not responding") in 1.1.3.
+    static func runQuietly(_ path: String, _ arguments: [String]) -> String? {
+        ProcessRunner.run(path, arguments, timeout: 2)?.text
+    }
+
+    /// Guards the caches below. Only held to read or write them, never while a tool runs.
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var etherCache: [String: (mac: String?, at: Date)] = [:]
+    nonisolated(unsafe) private static var etherReading: Set<String> = []
+    nonisolated(unsafe) private static var wakeSetting: (value: Bool?, read: Bool, reading: Bool) = (nil, false, false)
+
+    /// Reads what `info` needs ahead of time, off the main thread, so the first message to a phone is complete.
+    static func prewarm() {
+        DispatchQueue.global(qos: .utility).async {
+            _ = wakeForNetwork
+            _ = wake
+        }
+    }
 
     /// The address the router sees, which is the private Wi-Fi address when that's on. Cached for a minute.
+    /// On the main thread it never runs ifconfig: it answers from the cache and refreshes it in the background.
     static func etherAddress(_ interface: String) -> String? {
-        etherLock.lock()
-        defer { etherLock.unlock() }
-        if let cached = etherCache[interface], Date().timeIntervalSince(cached.at) < 60 { return cached.mac }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
-        process.arguments = [interface]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        let mac = parseEther(output)
-        etherCache[interface] = (mac, Date())
+        let cached = cacheLock.withLock { etherCache[interface] }
+        if let cached, Date().timeIntervalSince(cached.at) < 60 { return cached.mac }
+        guard Thread.isMainThread else { return readEther(interface) }
+        let start = cacheLock.withLock { etherReading.insert(interface).inserted }
+        if start { DispatchQueue.global(qos: .utility).async { _ = readEther(interface) } }
+        return cached?.mac
+    }
+
+    private static func readEther(_ interface: String) -> String? {
+        let mac = runQuietly("/sbin/ifconfig", [interface]).flatMap(parseEther)
+        cacheLock.withLock {
+            etherCache[interface] = (mac, Date())
+            etherReading.remove(interface)
+        }
         return mac
     }
 
@@ -125,19 +145,29 @@ enum LocalDevice {
     }
 
     /// "Wake for network access" on power adapter from `pmset -g custom`, read once since it rarely changes.
-    /// Wake-on-LAN only works on power, so the battery setting doesn't matter.
-    static let wakeForNetwork: Bool? = {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        process.arguments = ["-g", "custom"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        return parseWake(output)
-    }()
+    /// Wake-on-LAN only works on power, so the battery setting doesn't matter. Like `etherAddress`, the main
+    /// thread gets nil until a background read has finished.
+    static var wakeForNetwork: Bool? {
+        let (value, read, start) = cacheLock.withLock {
+            let state = wakeSetting
+            let start = !state.read && !state.reading && Thread.isMainThread
+            if start { wakeSetting.reading = true }
+            return (state.value, state.read, start)
+        }
+        if read { return value }
+        if start {
+            DispatchQueue.global(qos: .utility).async { readWake() }
+            return nil
+        }
+        return Thread.isMainThread ? nil : readWake()
+    }
+
+    @discardableResult
+    private static func readWake() -> Bool? {
+        let value = runQuietly("/usr/bin/pmset", ["-g", "custom"]).flatMap(parseWake)
+        cacheLock.withLock { wakeSetting = (value, true, false) }
+        return value
+    }
 
     static func parseWake(_ pmset: String) -> Bool? {
         // With sections, only AC Power counts. Without them (desktop Macs), the single list does.

@@ -177,16 +177,8 @@ final class SystemMonitor {
     }
 
     nonisolated private static func readProcesses() -> [ProcessUsage] {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-Aceo", "pid=,pcpu=,rss=,comm=", "-r"]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return parseProcesses(String(decoding: data, as: UTF8.self), limit: 6)
+        guard let result = ProcessRunner.run("/bin/ps", ["-Aceo", "pid=,pcpu=,rss=,comm=", "-r"], timeout: 5) else { return [] }
+        return parseProcesses(result.text, limit: 6)
     }
 
     nonisolated static func parseProcesses(_ output: String, limit: Int) -> [ProcessUsage] {

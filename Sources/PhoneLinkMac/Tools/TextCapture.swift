@@ -38,11 +38,8 @@ enum TextCapture {
         isCapturing = true
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("dysklink-\(UUID().uuidString).png")
         Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            process.arguments = ["-i", "-x", file.path]
-            let started = (try? process.run()) != nil
-            if started { process.waitUntilExit() }
+            // The user takes as long as they like to drag, so there's no timeout.
+            _ = ProcessRunner.run("/usr/sbin/screencapture", ["-i", "-x", file.path], timeout: nil)
             // Pressing Escape during the capture leaves no file.
             let wasCanceled = !FileManager.default.fileExists(atPath: file.path)
             let text = wasCanceled ? "" : TextRecognizer.recognize(file: file)

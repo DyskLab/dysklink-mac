@@ -50,6 +50,9 @@ check present "CLIPBOARD_IMAGE_SENT"
 check present "CLIPBOARD_SET dari-pc"
 check present "CLIPBOARD_IMAGE_SET 5000"
 check present "RING start"
+# The PC lists bin1 like the real desktop app, so pictures and files went in binary frames both ways.
+check present "BINARY_IN file.chunk"
+check present "BINARY_OUT file.chunk"
 if ls "$WORK/dl" | grep -q "^dari-pc.*\.txt$"; then echo "OK  Mac: the PC's file is in Downloads"; else echo "FAILED the PC's file didn't arrive"; RESULT=1; fi
 cd "$ANDROID_DIR" && ./gradlew --stop -q >/dev/null 2>&1
 exit $RESULT
