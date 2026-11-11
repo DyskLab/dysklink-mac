@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+/// The height the menu's content wants, so the scroll view around it is no taller than that.
+@Observable
+final class MenuMetrics {
+    static let shared = MenuMetrics()
+    var contentHeight: CGFloat = 420
+}
+
 /// The menu under the DyskLink icon. Its parts and their order are set in Advanced › Menu bar.
 struct MenuBarView: View {
     let model: AppModel
@@ -10,6 +17,23 @@ struct MenuBarView: View {
     private typealias Section = MenuBarLayout.Section
 
     var body: some View {
+        // Taller than the screen, the menu scrolls instead of running off the bottom.
+        let room = max(240, (NSScreen.main?.visibleFrame.height ?? 900) - 12)
+        ScrollView(.vertical) {
+            content
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { MenuMetrics.shared.contentHeight = $0 }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollIndicators(.automatic)
+        .frame(width: width, height: min(MenuMetrics.shared.contentHeight, room))
+        .background(Theme.panel)
+        .background(MenuWindowAnchor())
+        .preferredColorScheme(.dark)
+    }
+
+    private var width: CGFloat { layout.visible.filter(isAvailable).contains(.powerFlow) ? 340 : 280 }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 9) {
                 LogoMark(size: 26)
@@ -43,11 +67,8 @@ struct MenuBarView: View {
         }
         .padding(14)
         // The battery part has a power diagram and charts, so the menu is a little wider with it.
-        .frame(width: layout.visible.filter(isAvailable).contains(.powerFlow) ? 340 : 280)
+        .frame(width: width)
         .fixedSize(horizontal: false, vertical: true)
-        .background(Theme.panel)
-        .background(MenuWindowAnchor())
-        .preferredColorScheme(.dark)
     }
 
     private var connectedPhones: [Peer] { model.peers.filter { $0.isPaired && $0.isConnected && !$0.isComputer } }

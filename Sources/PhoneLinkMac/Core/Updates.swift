@@ -19,6 +19,23 @@ final class UpdateChecker {
     static let interval: TimeInterval = 24 * 60 * 60
     static let phoneReleasesURL = URL(string: "https://api.github.com/repos/DyskLab/dysklink-android/releases?per_page=10")!
     static let phonePageURL = URL(string: "https://github.com/DyskLab/dysklink-android/releases/latest")!
+    static let latestPageURL = URL(string: "https://github.com/DyskLab/dysklink-mac/releases/latest")!
+
+    /// The newest full release, read from where its "latest" page redirects (…/releases/tag/v1.2.3).
+    nonisolated static func latestFromPage(_ page: URL, current: String) async throws -> Release? {
+        var request = URLRequest(url: page, timeoutInterval: 20)
+        request.httpMethod = "HEAD"
+        request.setValue("DyskLink-Mac/\(current)", forHTTPHeaderField: "User-Agent")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200, let url = response.url else { throw URLError(.badServerResponse) }
+        return release(fromTagPage: url)
+    }
+
+    nonisolated static func release(fromTagPage url: URL) -> Release? {
+        let parts = url.pathComponents
+        guard let index = parts.firstIndex(of: "tag"), index + 1 < parts.count, version(parts[index + 1]) != nil else { return nil }
+        return Release(version: clean(parts[index + 1]), url: url)
+    }
 
     var checksAutomatically: Bool {
         didSet {
@@ -74,6 +91,21 @@ final class UpdateChecker {
             done.signal()
         }.resume()
         done.wait()
+        // The release page, which is used when the API says no.
+        let pages = [latestPageURL, phonePageURL]
+        for page in pages {
+            let finished = DispatchSemaphore(value: 0)
+            nonisolated(unsafe) var line = "no answer"
+            Task.detached {
+                do {
+                    let release = try await latestFromPage(page, current: version)
+                    line = release.map { "page latest: \($0.version) newer=\(isNewer($0.version, than: version)) \($0.url)" } ?? "page: no tag"
+                } catch { line = "page failed: \(error.localizedDescription)" }
+                finished.signal()
+            }
+            finished.wait()
+            output += "\n" + line
+        }
         return output
     }
     #endif
@@ -113,8 +145,17 @@ final class UpdateChecker {
             let result: Result<Release?, Error>
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-                result = .success(try Self.newest(in: data, newerThan: current))
+                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                    result = .success(try Self.newest(in: data, newerThan: current))
+                } else {
+                    // GitHub allows 60 API reads an hour per network, which a house of devices can use up.
+                    // The release page has no such limit and redirects to the newest release's tag.
+                    let latest = try await Self.latestFromPage(Self.latestPageURL, current: current)
+                    result = .success(latest.flatMap { release in
+                        let zip = URL(string: "https://github.com/DyskLab/dysklink-mac/releases/download/v\(release.version)/DyskLink-mac-arm64.zip")
+                        return Self.isNewer(release.version, than: current) ? Release(version: release.version, url: release.url, zipURL: zip) : nil
+                    })
+                }
             } catch {
                 result = .failure(error)
             }
@@ -127,10 +168,13 @@ final class UpdateChecker {
         var request = URLRequest(url: Self.phoneReleasesURL, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("DyskLink-Mac/\(current)", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let newest = try? Self.newest(in: data, newerThan: "0") else { return }
-        latestPhone = newest
+        if let (data, response) = try? await URLSession.shared.data(for: request),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let newest = try? Self.newest(in: data, newerThan: "0") {
+            latestPhone = newest
+        } else if let latest = try? await Self.latestFromPage(Self.phonePageURL, current: current) {
+            latestPhone = latest
+        }
     }
 
     /// True when the phone's app is older than the newest Android release, or too old to say its version.
