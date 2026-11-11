@@ -60,27 +60,29 @@ private struct GalleryCell: View {
     let peerId: String
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            Color.white.opacity(0.04)
-            if let image = GalleryThumbs.image(item, peerId: peerId) {
-                Image(nsImage: image).resizable().scaledToFill()
-            } else {
-                Image(systemName: item.isVideo ? "video" : "photo").font(.system(size: 22)).foregroundStyle(Theme.textFaint)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if item.isVideo {
-                HStack(spacing: 3) {
-                    Image(systemName: "play.fill").font(.system(size: 8))
-                    if let ms = item.durationMs { Text(Self.duration(ms)).font(.system(size: 10, weight: .semibold).monospacedDigit()) }
+        // A square that never grows: the thumbnail fills it and is cut at the edges, whatever its shape.
+        Color.white.opacity(0.04)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                if let image = GalleryThumbs.image(item, peerId: peerId) {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: item.isVideo ? "video" : "photo").font(.system(size: 22)).foregroundStyle(Theme.textFaint)
                 }
-                .foregroundStyle(.white).padding(.horizontal, 6).padding(.vertical, 3)
-                .background(.black.opacity(0.55), in: Capsule()).padding(6)
             }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .contentShape(Rectangle())
-        .help("\(item.name) · \(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))")
+            .overlay(alignment: .bottomLeading) {
+                if item.isVideo {
+                    HStack(spacing: 3) {
+                        Image(systemName: "play.fill").font(.system(size: 8))
+                        if let ms = item.durationMs { Text(Self.duration(ms)).font(.system(size: 10, weight: .semibold).monospacedDigit()) }
+                    }
+                    .foregroundStyle(.white).padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(.black.opacity(0.55), in: Capsule()).padding(6)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .help("\(item.name) · \(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))")
     }
 
     static func duration(_ ms: Int64) -> String {
