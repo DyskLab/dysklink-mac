@@ -130,6 +130,16 @@ enum ChargePolicy {
     }
 }
 
+extension ChargePolicy {
+    /// Whether the charger goes off before the Mac sleeps. Only plain limit charging does that: a top-up, macOS
+    /// holding the level, a heat pause, calibration and discharge all keep their own state.
+    static func offBeforeSleep(percent: Int, settings: ChargeSettings, calibration: CalibrationPhase,
+                               reason: ChargeReason, topUp: Bool, adapterOff: Bool) -> Bool {
+        guard settings.limiter, calibration == .off, !topUp, !adapterOff, reason == .normal || reason == .limit else { return false }
+        return percent >= settings.limit - settings.gap
+    }
+}
+
 /// The charge limit set in System Settings › Battery, from `pmset -g battlimit`.
 enum NativeChargeLimit {
     static func parse(_ text: String) -> Int? {
@@ -196,7 +206,21 @@ enum ChargeHelper {
         """
         return """
         set -e
+        # The helper runs as root, so every folder above it must be root's alone. Otherwise someone could swap it.
+        for dir in /usr/local /usr/local/libexec; do
+            if [ -L "$dir" ]; then echo "DyskLink can't install the charging helper: $dir is a symbolic link." >&2; exit 3; fi
+            if [ -e "$dir" ]; then
+                owner=$(/usr/bin/stat -f '%u' "$dir")
+                mode=$(/usr/bin/stat -f '%Lp' "$dir")
+                if [ "$owner" != "0" ] || [ $(( 0$mode & 022 )) -ne 0 ]; then
+                    echo "DyskLink can't install the charging helper: $dir must belong to root and be writable only by root (it's owned by user $owner, mode $mode). Fix it with: sudo chown root:wheel $dir && sudo chmod go-w $dir" >&2
+                    exit 3
+                fi
+            fi
+        done
         mkdir -p /usr/local/libexec
+        chown root:wheel /usr/local/libexec
+        chmod 755 /usr/local/libexec
         install -o root -g wheel -m 755 '\(helper)' '\(path)'
         tmp=$(mktemp)
         printf '%s\\n' '\(rule)' > "$tmp"
@@ -257,8 +281,23 @@ final class ChargeControl {
             if topUp != oldValue { onChange?() }
         }
     }
-    /// The battery level over the last day, one point a minute, for the chart.
-    private(set) var levels: [LevelPoint] = ChargeControl.loadLevels()
+    /// The battery level over the last day, as recorded: a point when it changes, and at least one every ten minutes.
+    private var levelPoints: [LevelPoint] = ChargeControl.loadLevels()
+    /// The same on an even three-minute grid, for the chart, which spaces its points evenly.
+    var levels: [LevelPoint] { Self.evenLevels(levelPoints, until: Date()) }
+
+    static func evenLevels(_ points: [LevelPoint], until end: Date, step: TimeInterval = 180) -> [LevelPoint] {
+        guard let first = points.first else { return [] }
+        var result: [LevelPoint] = []
+        var index = 0
+        var time = first.time
+        while time <= end, result.count < 2_000 {
+            while index + 1 < points.count, points[index + 1].time <= time { index += 1 }
+            result.append(LevelPoint(time: time, percent: points[index].percent))
+            time += step
+        }
+        return result
+    }
     /// Kept across launches, so sailing goes on where it was after DyskLink restarts.
     private(set) var reason: ChargeReason = UserDefaults.standard.string(forKey: "charge.reason").flatMap(ChargeReason.init(rawValue:)) ?? .normal {
         didSet {
@@ -279,6 +318,12 @@ final class ChargeControl {
     private var timer: Timer?
     private var lastSwitch = Date.distantPast
     private var started = false
+    /// Battery changes from IOKit: they record the level and wake the checks without a timer.
+    private var powerSource: CFRunLoopSource?
+    private var nativeLimitRead = Date.distantPast
+    private var readingNativeLimit = false
+    /// `pmset` is slow and the System Settings limit rarely changes, so it's read this often at most.
+    static let nativeLimitInterval: TimeInterval = 300
     private static let settingsKey = "charge.settings"
     private static let calibrationKey = "charge.calibration"
     /// macOS takes a minute or two to start charging after the charger comes back, so switches are spaced out.
@@ -306,22 +351,68 @@ final class ChargeControl {
     func start() {
         guard available, !started else { return }
         started = true
-        timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { _ in MainActor.assumeIsolated { ChargeControl.shared.tick() } }
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { ChargeControl.shared.beforeSleep() }
         }
         center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { ChargeControl.shared.tick() }
+            MainActor.assumeIsolated {
+                ChargeControl.shared.refreshNativeLimit(force: true)
+                ChargeControl.shared.tick()
+            }
         }
+        if let source = IOPSNotificationCreateRunLoopSource({ _ in
+            MainActor.assumeIsolated { ChargeControl.shared.powerSourceChanged() }
+        }, nil)?.takeRetainedValue() {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+            powerSource = source
+        }
+        refreshNativeLimit(force: true)
         tick()
+    }
+
+    /// The battery or the charger changed. The level is recorded even with every charge feature off.
+    private func powerSourceChanged() {
+        if timer != nil || anythingOn || adapterOff { tick() } else { record(percent: Battery.now().percent) }
+    }
+
+    /// The checks only run on a timer while a charge feature is on, or while the charger is still off from one.
+    private func updateTimer() {
+        let needed = started && (anythingOn || topUp || adapterOff)
+        if needed, timer == nil {
+            let timer = Timer(timeInterval: 20, repeats: true) { _ in MainActor.assumeIsolated { ChargeControl.shared.tick() } }
+            timer.tolerance = 5
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        } else if !needed, let timer {
+            timer.invalidate()
+            self.timer = nil
+        }
+    }
+
+    /// Reads System Settings' Charge Limit off the main thread, at most every few minutes unless forced.
+    func refreshNativeLimit(force: Bool = false) {
+        guard available, !readingNativeLimit, force || Date().timeIntervalSince(nativeLimitRead) >= Self.nativeLimitInterval else { return }
+        readingNativeLimit = true
+        nativeLimitRead = Date()
+        Task.detached(priority: .utility) {
+            let limit = NativeChargeLimit.read()
+            await MainActor.run {
+                let control = ChargeControl.shared
+                control.readingNativeLimit = false
+                guard limit != control.nativeLimit else { return }
+                control.nativeLimit = limit
+                control.tick()
+            }
+        }
     }
 
     func tick() {
         guard available else { return }
+        defer { updateTimer() }
         installed = ChargeHelper.isInstalled
         adapterOff = Adapter.isOff ?? false
-        nativeLimit = NativeChargeLimit.read()
+        refreshNativeLimit()
         let battery = Battery.now()
         temperature = battery.temperature.map(Double.init)
         let decision = ChargePolicy.decide(percent: battery.percent, charging: battery.charging, temperature: battery.temperature.map(Double.init),
@@ -361,8 +452,9 @@ final class ChargeControl {
 
     /// Asleep, nothing watches the battery. Near the limit, the charger goes off first so the Mac doesn't fill up overnight.
     private func beforeSleep() {
-        guard installed, settings.limiter, calibration == .off, reason != .discharge else { return }
-        if Battery.now().percent >= settings.limit - settings.gap, !adapterOff {
+        guard installed else { return }
+        if ChargePolicy.offBeforeSleep(percent: Battery.now().percent, settings: settings, calibration: calibration,
+                                       reason: reason, topUp: topUp, adapterOff: adapterOff) {
             try? ChargeHelper.setAdapter(on: false)
             reason = .limit
         }
@@ -421,14 +513,18 @@ final class ChargeControl {
         return points.filter { $0.time > since }
     }
 
+    /// A point when the level changes, and at least one every ten minutes. Saved only when a point is added.
     private func record(percent: Int) {
         guard !previewing else { return }
         let now = Date()
-        if let last = levels.last, now.timeIntervalSince(last.time) < 60 { return }
-        levels.append(LevelPoint(time: now, percent: percent))
+        if let last = levelPoints.last {
+            let age = now.timeIntervalSince(last.time)
+            if age < 60 || (last.percent == percent && age < 600) { return }
+        }
+        levelPoints.append(LevelPoint(time: now, percent: percent))
         let since = now.addingTimeInterval(-86_400)
-        if let first = levels.first, first.time < since { levels.removeAll { $0.time < since } }
-        UserDefaults.standard.set(try? JSONEncoder().encode(levels), forKey: Self.levelsKey)
+        if let first = levelPoints.first, first.time < since { levelPoints.removeAll { $0.time < since } }
+        UserDefaults.standard.set(try? JSONEncoder().encode(levelPoints), forKey: Self.levelsKey)
     }
 
     func startCalibration() { calibration = .draining }
@@ -445,7 +541,7 @@ final class ChargeControl {
         adapterOff = true
         let now = Date()
         // A day of sailing between 75 and 80%, with a dip in the afternoon.
-        levels = (0..<480).map { i in
+        levelPoints = (0..<480).map { i in
             let t = Double(i)
             let dip = i > 250 && i < 330 ? Int(18 * sin((t - 250) / 80 * .pi)) : 0
             return LevelPoint(time: now.addingTimeInterval(-Double(480 - i) * 180), percent: 80 - (i % 60) / 12 - dip)

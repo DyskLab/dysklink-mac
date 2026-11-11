@@ -90,8 +90,12 @@ final class TodoModel {
     /// New titles typed in Advanced and not saved yet.
     var renameDrafts: [UUID: String] = [:]
 
+    /// Why the last add didn't work, such as a full list. Cleared by the next add that works.
+    private(set) var problem: String?
+
     @ObservationIgnored private let file: URL
     @ObservationIgnored private let persists: Bool
+    @ObservationIgnored private var dayObserver: NSObjectProtocol?
 
     init(directory: URL, persists: Bool = true) {
         file = directory.appendingPathComponent("notch-todos.json")
@@ -101,6 +105,17 @@ final class TodoModel {
             list.items = items
         }
         list.dropOld(now: Date())
+        // A Mac left on for weeks still starts each day with only what's open.
+        dayObserver = NotificationCenter.default.addObserver(forName: .NSCalendarDayChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dropOld() }
+        }
+    }
+
+    /// Drops what was finished on an earlier day, and saves if anything went.
+    func dropOld() {
+        let before = list.items.count
+        list.dropOld(now: Date())
+        if list.items.count != before { save() }
     }
 
     func visible(_ now: Date) -> [TodoItem] { list.visible(now: now) }
@@ -109,8 +124,14 @@ final class TodoModel {
 
     @discardableResult
     func add(_ text: String) -> Bool {
+        dropOld()
         let added = list.add(text, at: Date())
-        if added { save() }
+        if added {
+            problem = nil
+            save()
+        } else if !TodoList.clean(text).isEmpty {
+            problem = "The list is full (\(TodoList.maxItems) tasks). Finish or remove some first."
+        }
         return added
     }
 
@@ -172,6 +193,7 @@ final class TodoModel {
 final class TodoQuickAddState {
     var text = ""
     var isRenaming = false
+    var problem: String?
 }
 
 private final class TodoKeyPanel: NSPanel {
@@ -194,6 +216,7 @@ enum TodoQuickAdd {
         renaming = task?.id
         state.text = task?.title ?? ""
         state.isRenaming = task != nil
+        state.problem = nil
         let size = NSSize(width: 440, height: 74)
         let panel = TodoKeyPanel(contentRect: NSRect(origin: .zero, size: size),
                                  styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -240,7 +263,9 @@ enum TodoQuickAdd {
         case 36, 76:
             if let id = renaming {
                 if todos.rename(id, to: state.text) || state.text.trimmingCharacters(in: .whitespaces).isEmpty { close() }
-            } else if todos.add(state.text) { close() } else if state.text.trimmingCharacters(in: .whitespaces).isEmpty { close() }
+            } else if todos.add(state.text) { close() } else if state.text.trimmingCharacters(in: .whitespaces).isEmpty { close() } else {
+                state.problem = todos.problem
+            }
         case 51:
             if !state.text.isEmpty { state.text.removeLast() }
         default:
@@ -272,7 +297,11 @@ struct TodoQuickAddView: View {
                     .lineLimit(1).truncationMode(.head)
                 Spacer(minLength: 0)
             }
-            Text(state.isRenaming ? "Return to rename · Esc to cancel" : "Return to add · Esc to cancel").font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.45))
+            if let problem = state.problem {
+                Text(problem).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(hex: 0xFF8A7A)).lineLimit(1)
+            } else {
+                Text(state.isRenaming ? "Return to rename · Esc to cancel" : "Return to add · Esc to cancel").font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.45))
+            }
         }
         .padding(.horizontal, 18).padding(.vertical, 12)
         .frame(width: 440, height: 74, alignment: .leading)

@@ -228,7 +228,10 @@ final class NotchModel {
     private(set) var power = PowerStatus()
     private(set) var shelf: [ShelfItem] = []
     private(set) var pomodoro: Pomodoro
+    /// Moved on start, pause, and each step of the timer, not every second: countdowns draw themselves.
     private(set) var now = Date()
+    /// Snapshots freeze the clock at their own time.
+    @ObservationIgnored private(set) var frozenNow: Date?
     let prayer: PrayerModel
     let weather: WeatherModel
     let phoneBattery: PhoneBatteryWatcher
@@ -440,7 +443,12 @@ final class NotchModel {
         if !wanted {
             browserTimer?.invalidate()
             browserTimer = nil
-            if !readsBrowsers { browserTrack = nil }
+            if !readsBrowsers {
+                browserTrack = nil
+            } else if let track = browserTrack, track.isPlaying {
+                // Nothing reads the browser while closed, so it isn't known to still play.
+                browserTrack = track.toggled(at: Date())
+            }
             return
         }
         guard browserTimer == nil else { return }
@@ -660,7 +668,12 @@ final class NotchModel {
         return !hasNotch && hidesBar ? 0 : closedSize.height
     }
 
-    var focusText: String { Self.clock(pomodoro.remaining(at: now)) }
+    var focusText: String { focusText(at: Date()) }
+
+    func focusText(at date: Date) -> String { Self.clock(pomodoro.remaining(at: clockDate(date))) }
+
+    /// The time countdowns show: the live time, or a snapshot's.
+    func clockDate(_ live: Date) -> Date { frozenNow ?? live }
 
     static func clock(_ seconds: TimeInterval) -> String {
         let whole = max(0, Int(seconds.rounded(.up)))
@@ -691,14 +704,18 @@ final class NotchModel {
     }
 
     private func tick() {
-        now = Date()
+        let date = Date()
         var finished: Pomodoro.Phase?
-        // A Mac that slept may have passed more than one step.
-        for _ in 0..<pomodoro.steps.count {
-            guard let phase = pomodoro.advance(at: now) else { break }
+        // A Mac that slept may have passed more than one step. The timer is a copy until something changes, so
+        // a second that passes without a step doesn't redraw anything.
+        var timer = pomodoro
+        for _ in 0..<timer.steps.count {
+            guard let phase = timer.advance(at: date) else { break }
             finished = phase
         }
         guard let finished else { return }
+        pomodoro = timer
+        now = date
         if playsPomodoroSound { NSSound(named: "Glass")?.play() }
         if !pomodoro.isRunning {
             resetPomodoro()
@@ -713,6 +730,7 @@ final class NotchModel {
         appTrack = playing
         self.pomodoro = pomodoro
         self.now = now
+        frozenNow = now
     }
     #endif
 }
@@ -819,7 +837,11 @@ final class NotchController {
     private func pointerEvent(_ kind: NSEvent.EventType) {
         let mouse = NSEvent.mouseLocation
         // The panel lets clicks through, except over a code's banner so its Copy button works.
-        if !model.isOpen { panel?.ignoresMouseEvents = !(model.code != nil && codeRect.contains(mouse)) }
+        // Set only when it changes: this runs on every mouse move anywhere on screen.
+        if !model.isOpen, let panel {
+            let ignores = !(model.code != nil && codeRect.contains(mouse))
+            if panel.ignoresMouseEvents != ignores { panel.ignoresMouseEvents = ignores }
+        }
         if model.isOpen {
             if openRect.contains(mouse) || NSEvent.pressedMouseButtons != 0 {
                 closeWork?.cancel()

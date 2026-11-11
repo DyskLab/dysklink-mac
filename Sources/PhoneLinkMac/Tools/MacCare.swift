@@ -307,34 +307,80 @@ enum Uninstaller {
         var id: String { item.id }
     }
 
+    /// A bundle ID that's safe to put into a Library path: letters, digits, dots and dashes, never `.` or `..`.
+    /// An app saying its ID is `.` or `../..` would otherwise point at whole Library folders.
+    static func isSafeBundleId(_ id: String) -> Bool {
+        guard let first = id.unicodeScalars.first, id.count <= 255, id != ".", !id.contains("..") else { return false }
+        func plain(_ c: Unicode.Scalar) -> Bool { c.isASCII && (CharacterSet.alphanumerics.contains(c)) }
+        return plain(first) && id.unicodeScalars.allSatisfy { plain($0) || $0 == "." || $0 == "-" }
+    }
+
+    /// True when `url` sits directly inside `folder`, after symlinks in its parent are followed.
+    /// The leftover itself may be a symlink: moving it to the Trash moves only the link.
+    static func isDirectlyInside(_ url: URL, folder: URL) -> Bool {
+        let name = url.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { return false }
+        let parent = url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
+        return parent == folder.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// Other installed copies with the same bundle ID: the ones in the list, plus any Launch Services knows of.
+    static func otherCopies(of app: InstalledApp, listed: [URL]) -> [URL] {
+        let own = app.url.standardizedFileURL.resolvingSymlinksInPath().path
+        var seen: Set<String> = [own]
+        var found: [URL] = []
+        let known = isSafeBundleId(app.bundleId) ? NSWorkspace.shared.urlsForApplications(withBundleIdentifier: app.bundleId) : []
+        for url in listed + known {
+            let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+            // Launch Services also remembers apps already in the Trash.
+            if path.contains("/.Trash/") { continue }
+            if seen.insert(path).inserted, MacCare.exists(url) { found.append(url) }
+        }
+        return found
+    }
+
     /// Settings, caches, and support files the app left in Library.
     static func leftovers(for app: InstalledApp, home: URL) -> [Leftover] {
         let library = home.appendingPathComponent("Library")
         let id = app.bundleId
-        var byId: [URL] = [
-            "Application Support/\(id)", "Caches/\(id)", "Preferences/\(id).plist", "Containers/\(id)",
-            "Saved Application State/\(id).savedState", "Logs/\(id)", "HTTPStorages/\(id)",
-            "HTTPStorages/\(id).binarycookies", "WebKit/\(id)", "Cookies/\(id).binarycookies", "Application Scripts/\(id)",
-        ].map { library.appendingPathComponent($0) }
-        byId += MacCare.children(of: library.appendingPathComponent("Preferences/ByHost"))
-            .filter { $0.lastPathComponent.hasPrefix(id + ".") && $0.pathExtension == "plist" }
-        byId += MacCare.children(of: library.appendingPathComponent("LaunchAgents"))
-            .filter { $0.lastPathComponent.hasPrefix(id + ".") || $0.lastPathComponent == id + ".plist" }
-        byId += MacCare.children(of: library.appendingPathComponent("Group Containers"))
-            .filter { $0.lastPathComponent.hasSuffix("." + id) }
+        // Each candidate with the Library folder it must sit directly in.
+        var byId: [(URL, URL)] = []
+        if isSafeBundleId(id) {
+            let named: [(String, String)] = [
+                ("Application Support", id), ("Caches", id), ("Preferences", id + ".plist"), ("Containers", id),
+                ("Saved Application State", id + ".savedState"), ("Logs", id), ("HTTPStorages", id),
+                ("HTTPStorages", id + ".binarycookies"), ("WebKit", id), ("Cookies", id + ".binarycookies"), ("Application Scripts", id),
+            ]
+            byId = named.map { folder, name in
+                let parent = library.appendingPathComponent(folder)
+                return (parent.appendingPathComponent(name), parent)
+            }
+            func scan(_ folder: String, _ keep: (String) -> Bool) {
+                let parent = library.appendingPathComponent(folder)
+                byId += MacCare.children(of: parent).filter { keep($0.lastPathComponent) }.map { ($0, parent) }
+            }
+            scan("Preferences/ByHost") { $0.hasPrefix(id + ".") && $0.hasSuffix(".plist") }
+            scan("LaunchAgents") { $0.hasPrefix(id + ".") || $0 == id + ".plist" }
+            scan("Group Containers") { $0.hasSuffix("." + id) }
+        }
 
-        var byName: [URL] = []
+        var byName: [(URL, URL)] = []
         let name = app.name
-        if name.count >= 3 {
+        if name.count >= 3, name != "..", !name.contains("/") {
             for folder in ["Application Support", "Caches", "Logs"] {
-                byName += MacCare.children(of: library.appendingPathComponent(folder))
-                    .filter { $0.lastPathComponent.caseInsensitiveCompare(name) == .orderedSame }
+                let parent = library.appendingPathComponent(folder)
+                byName += MacCare.children(of: parent)
+                    .filter { $0.lastPathComponent.caseInsensitiveCompare(name) == .orderedSame }.map { ($0, parent) }
             }
         }
         var seen = Set<String>()
-        func make(_ urls: [URL], _ isId: Bool) -> [Leftover] {
-            urls.filter { MacCare.exists($0) && seen.insert($0.standardizedFileURL.path).inserted }
-                .map { Leftover(item: CareItem(url: $0, size: MacCare.size(of: $0), detail: MacCare.shortPath($0.deletingLastPathComponent(), home: home)), byId: isId) }
+        func make(_ urls: [(URL, URL)], _ isId: Bool) -> [Leftover] {
+            urls.filter { url, parent in
+                isDirectlyInside(url, folder: parent) && MacCare.exists(url) && seen.insert(url.standardizedFileURL.path).inserted
+            }
+            .map { url, _ in
+                Leftover(item: CareItem(url: url, size: MacCare.size(of: url), detail: MacCare.shortPath(url.deletingLastPathComponent(), home: home)), byId: isId)
+            }
         }
         return make(byId, true) + make(byName, false)
     }

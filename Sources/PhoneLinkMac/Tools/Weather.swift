@@ -122,7 +122,13 @@ final class WeatherModel {
             } else {
                 defaults.removeObject(forKey: "weather.place")
             }
-            if place != oldValue { report = nil; refresh(force: true) }
+            if place != oldValue {
+                report = nil
+                fetch?.cancel()
+                fetch = nil
+                isLoading = false
+                refresh(force: true)
+            }
         }
     }
     var usesFahrenheit: Bool {
@@ -138,6 +144,8 @@ final class WeatherModel {
 
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private var isInert = false
+    /// The fetch running now. Choosing another city cancels it and starts one for the new city.
+    @ObservationIgnored private var fetch: Task<Void, Never>?
 
     init(isInert: Bool = false) {
         self.isInert = isInert
@@ -160,19 +168,21 @@ final class WeatherModel {
             .init(name: "forecast_days", value: "3"),
         ]
         let request = URLRequest(url: parts.url!, timeoutInterval: 20)
-        Task {
-            defer { isLoading = false }
+        fetch = Task {
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
                 let loaded = try WeatherAPI.report(from: data)
-                // The place may have been changed while this was loading.
-                guard self.place == place else { return }
+                // The place may have been changed while this was loading; that change started its own fetch.
+                guard !Task.isCancelled, self.place == place else { return }
                 report = loaded
                 problem = nil
             } catch {
+                guard !Task.isCancelled, self.place == place else { return }
                 problem = "Couldn't load the weather."
             }
+            isLoading = false
+            fetch = nil
         }
     }
 

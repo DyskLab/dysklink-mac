@@ -13,7 +13,11 @@ struct TerminalMessage: Codable, Equatable {
 }
 
 /// A login shell on a pseudo terminal, so colors, Ctrl-C, and full-screen programs like vim and top work.
-final class PtyShell {
+///
+/// Output is gathered for up to `batchDelay` and handed out in one piece. While `maxInFlight` pieces wait for the
+/// network (the receiver calls `sent()` for each), reading stops, so the shell itself waits instead of output
+/// piling up in memory and holding up the connection.
+final class PtyShell: @unchecked Sendable {
     let id: String
     private(set) var pid: pid_t = 0
     private var master: Int32 = -1
@@ -21,6 +25,15 @@ final class PtyShell {
     private var exitWatch: DispatchSourceProcess?
     private let queue: DispatchQueue
     private var finished = false
+    private var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    private var pendingOutput = Data()
+    private var flushScheduled = false
+    private var inFlight = 0
+    private var readerPaused = false
+    static let batchDelay: DispatchTimeInterval = .milliseconds(16)
+    static let batchBytes = 32 * 1024
+    static let maxInFlight = 4
+    /// Called on the shell's queue with each piece of output. Call `sent()` once it went out.
     var onOutput: (Data) -> Void = { _ in }
     var onExit: (Int32) -> Void = { _ in }
 
@@ -29,6 +42,13 @@ final class PtyShell {
     init(id: String) {
         self.id = id
         queue = DispatchQueue(label: "terminal.\(id)")
+    }
+
+    deinit {
+        // Releasing a suspended dispatch source crashes, so a paused reader is resumed first.
+        if readerPaused { reader?.resume() }
+        reader?.cancel()
+        exitWatch?.cancel()
     }
 
     /// The user's own shell as a login shell, starting in the home folder.
@@ -87,19 +107,60 @@ final class PtyShell {
         exitWatch = watch
     }
 
-    private func readAvailable() {
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    /// Returns false when nothing more could be read now.
+    @discardableResult
+    private func readAvailable() -> Bool {
+        guard master >= 0 else { return false }
         let count = read(master, &buffer, buffer.count)
-        if count > 0 { onOutput(Data(buffer[0..<count])) }
+        guard count > 0 else { return false }
+        pendingOutput.append(buffer, count: count)
+        if pendingOutput.count >= Self.batchBytes {
+            flush()
+        } else if !flushScheduled {
+            flushScheduled = true
+            queue.asyncAfter(deadline: .now() + Self.batchDelay) { [weak self] in
+                guard let self else { return }
+                self.flushScheduled = false
+                self.flush()
+            }
+        }
+        return true
+    }
+
+    private func flush() {
+        guard !pendingOutput.isEmpty else { return }
+        let piece = pendingOutput
+        pendingOutput = Data()
+        inFlight += 1
+        onOutput(piece)
+        if inFlight >= Self.maxInFlight, !readerPaused, !finished, let reader {
+            readerPaused = true
+            reader.suspend()
+        }
+    }
+
+    /// One piece of output went out (or was dropped); reading goes on when few are left on the way.
+    func sent() {
+        queue.async { [self] in
+            inFlight = max(0, inFlight - 1)
+            if readerPaused, inFlight < Self.maxInFlight {
+                readerPaused = false
+                reader?.resume()
+            }
+        }
     }
 
     private func reap() {
         guard !finished else { return }
         // Whatever the shell printed last comes before the exit.
-        readAvailable()
+        var reads = 0
+        while reads < 64, readAvailable() { reads += 1 }
+        flush()
         var status: Int32 = 0
         waitpid(pid, &status, 0)
         finished = true
+        // A suspended source must be resumed before it can be canceled.
+        if readerPaused { readerPaused = false; reader?.resume() }
         reader?.cancel()
         exitWatch?.cancel()
         if master >= 0 { close(master) }
@@ -145,3 +206,4 @@ final class PtyShell {
         }
     }
 }
+extension TerminalMessage: Sendable {}

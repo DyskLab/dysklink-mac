@@ -212,7 +212,12 @@ struct MacCareView: View {
                 let wasted = care.dupGroups.reduce(0) { $0 + $1.wasted }
                 SectionLabel("\(care.dupGroups.count) files with copies · \(Format.bytes(wasted)) in extra copies")
             }
-            ForEach(care.dupGroups.prefix(150)) { group in DuplicateCard(group: group, care: care) }
+            LazyVStack(alignment: .leading, spacing: 12) {
+                ForEach(care.dupGroups.prefix(150)) { group in
+                    // Each card gets only its own ticks, so ticking one file doesn't redraw every card.
+                    DuplicateCard(group: group, selected: care.dupSelected.intersection(group.files.map(\.id)), care: care)
+                }
+            }
         }
     }
 
@@ -230,13 +235,15 @@ struct MacCareView: View {
                     chip("Size", on: care.sortBySize) { care.sortBySize = true }
                 }
                 Text("Apps from Apple and DyskLink itself aren't listed.").font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
+                let shown = care.shownApps
+                let lastId = shown.last?.id
                 Card(padding: 6) {
-                    VStack(spacing: 0) {
-                        ForEach(care.shownApps) { app in
+                    LazyVStack(spacing: 0) {
+                        ForEach(shown) { app in
                             AppRow(app: app) { care.choose(app) }
-                            if app.id != care.shownApps.last?.id { Divider().overlay(Theme.stroke).padding(.leading, 52) }
+                            if app.id != lastId { Divider().overlay(Theme.stroke).padding(.leading, 52) }
                         }
-                        if care.shownApps.isEmpty {
+                        if shown.isEmpty {
                             Text(care.isLoadingApps ? "Loading apps…" : "No apps match.")
                                 .font(.system(size: 13)).foregroundStyle(Theme.textSecondary).padding(14)
                         }
@@ -405,6 +412,23 @@ struct AnyButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
+/// File icons for the Mac care lists, read once per path instead of on every redraw.
+@MainActor
+enum CareIcons {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 600
+        return cache
+    }()
+
+    static func icon(_ path: String) -> NSImage {
+        if let image = cache.object(forKey: path as NSString) { return image }
+        let image = NSWorkspace.shared.icon(forFile: path)
+        cache.setObject(image, forKey: path as NSString)
+        return image
+    }
+}
+
 private struct Tick: View {
     let on: Bool
     var enabled = true
@@ -472,7 +496,7 @@ private struct CareRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Button(action: toggle) { Tick(on: on, enabled: enabled) }.buttonStyle(.plain)
-            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path)).resizable().frame(width: 20, height: 20)
+            Image(nsImage: CareIcons.icon(item.url.path)).resizable().frame(width: 20, height: 20)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(item.name).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1).truncationMode(.middle)
@@ -497,7 +521,8 @@ private struct CareRow: View {
 
 private struct DuplicateCard: View {
     let group: DuplicateGroup
-    @Bindable var care: MacCareModel
+    let selected: Set<String>
+    let care: MacCareModel
 
     var body: some View {
         Card(padding: 14) {
@@ -509,8 +534,8 @@ private struct DuplicateCard: View {
                         .font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.textSecondary)
                 }
                 ForEach(group.files) { file in
-                    let on = care.dupSelected.contains(file.id)
-                    let othersKept = group.files.contains { $0.id != file.id && !care.dupSelected.contains($0.id) }
+                    let on = selected.contains(file.id)
+                    let othersKept = group.files.contains { $0.id != file.id && !selected.contains($0.id) }
                     CareRow(item: CareItem(url: file.url, size: file.size,
                                            detail: MacCare.shortPath(file.url.deletingLastPathComponent(), home: care.home)
                                                + (file.date.map { " · created " + MacCare.ago($0) } ?? ""), date: file.date),
@@ -529,7 +554,7 @@ private struct AppRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path)).resizable().frame(width: 32, height: 32)
+            Image(nsImage: CareIcons.icon(app.url.path)).resizable().frame(width: 32, height: 32)
             VStack(alignment: .leading, spacing: 1) {
                 Text(app.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Text(app.version.isEmpty ? app.bundleId : "Version \(app.version)").font(.system(size: 11)).foregroundStyle(Theme.textFaint).lineLimit(1)
@@ -558,7 +583,7 @@ private struct AppUninstallCard: View {
             Card {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 14) {
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path)).resizable().frame(width: 52, height: 52)
+                        Image(nsImage: CareIcons.icon(app.url.path)).resizable().frame(width: 52, height: 52)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(app.name).font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.textPrimary)
                             Text([app.version.isEmpty ? nil : "Version \(app.version)", app.bundleId].compactMap { $0 }.joined(separator: " · "))
@@ -594,6 +619,15 @@ private struct AppUninstallCard: View {
             SectionLabel("Files it left in your Library")
             Text("Settings, caches, and saved data. The ticked ones carry the app's ID, so they surely belong to it. Ones that only share its name are left for you to check.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
+            if let warning = care.leftoverWarning {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amber)
+                    Text(warning).font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(10)
+                .background(Theme.amber.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
             Card(padding: 10) {
                 VStack(spacing: 0) {
                     ForEach(care.leftovers) { leftover in
@@ -622,7 +656,7 @@ private struct StartupRow: View {
         HStack(spacing: 12) {
             Group {
                 if let app = item.appName, let path = item.program.range(of: app + ".app").map({ String(item.program[..<$0.upperBound]) }) {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: path)).resizable()
+                    Image(nsImage: CareIcons.icon(path)).resizable()
                 } else {
                     Image(systemName: item.scope == .daemon ? "gearshape.2" : "gearshape").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
                 }

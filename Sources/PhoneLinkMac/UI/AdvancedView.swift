@@ -27,8 +27,8 @@ struct AdvancedView: View {
                   detail: "One shortcut opens a search box for apps, files, windows, copies, sums, units, and DyskLink actions.", category: .productivity, isOn: $tools.isLauncherOn),
             Entry(id: "awake", icon: "cup.and.saucer.fill", title: "Keep Awake",
                   detail: "Stops this Mac or its screen from sleeping for as long as you choose.", category: .productivity, isOn: $tools.isAwakeOn),
-            Entry(id: "macs", icon: "laptopcomputer.and.arrow.down", title: "Other Macs",
-                  detail: "Pair with other Macs on this network to share copies, Clipboard History, and files.", category: .productivity, isOn: Bindable(Shared.model).macSyncEnabled),
+            Entry(id: "macs", icon: "laptopcomputer.and.arrow.down", title: "Other computers",
+                  detail: "Pair with other Macs and Windows or Linux PCs on this network to share copies, pictures, and files.", category: .productivity, isOn: Bindable(Shared.model).macSyncEnabled),
             Entry(id: "layout", icon: "rectangle.split.3x1", title: "Window Layout",
                   detail: "Snap the front window to halves, thirds, or quarters with shortcuts, and save whole layouts.", category: .windows, isOn: $tools.isLayoutOn),
             Entry(id: "previews", icon: "macwindow.on.rectangle", title: "Window Previews",
@@ -528,29 +528,75 @@ struct AdvancedView: View {
 
     private var otherMacsContent: some View {
         let model = Shared.model
-        let paired = model.peers.filter { $0.isMac && $0.isPaired }
+        let paired = model.peers.filter { $0.isComputer && $0.isPaired }
         let waiting = model.nearbyMacs.subtracting(model.peers.map(\.id)).count
         return VStack(alignment: .leading, spacing: 10) {
-            Text("Turn this on in DyskLink on each Mac. They find each other on the same Wi-Fi or Ethernet, then appear in the sidebar. Pair once with the 6-digit code, the same way as a phone.")
+            Text("Turn this on in DyskLink on each Mac, and on Windows or Linux PCs with DyskLink. They find each other on the same Wi-Fi or Ethernet, then appear in the sidebar. Pair once with the 6-digit code, the same way as a phone.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             if paired.isEmpty {
-                Text(waiting > 0 ? "Found \(waiting) Mac\(waiting == 1 ? "" : "s"). Connecting…" : "No other Macs paired yet.")
+                Text(waiting > 0 ? "Found \(waiting) computer\(waiting == 1 ? "" : "s"). Connecting…" : "No other computers paired yet.")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.textFaint)
             }
             ForEach(paired) { mac in
                 HStack(spacing: 9) {
-                    Image(systemName: "laptopcomputer").foregroundStyle(mac.isConnected ? Theme.mint : Theme.textFaint)
+                    Image(systemName: mac.isMac ? "laptopcomputer" : "pc").foregroundStyle(mac.isConnected ? Theme.mint : Theme.textFaint)
                     Text(mac.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
                     Text(mac.isConnected ? "Connected" : "Not connected").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
                 }
             }
+            sharedInputContent(paired.filter(\.isMac))
             Toggle("Merge Clipboard History when the Macs connect", isOn: Bindable(model).sharesClipboardHistory)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
-            Text("Copies go straight between the Macs, encrypted, and never through the internet. A paired Mac can share copies and files and ring this Mac, but it can't control the mouse, keyboard, or commands.")
+            Text("Copies, including pictures, go straight between the computers, encrypted, and never through the internet. A paired computer can share copies and files and ring this Mac. It can only use the mouse and keyboard here while that's allowed below, and never run commands.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// One mouse and keyboard for two Macs.
+    @ViewBuilder
+    private func sharedInputContent(_ macs: [Peer]) -> some View {
+        let model = Shared.model
+        Divider().overlay(Theme.stroke)
+        Text("Mouse and keyboard").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+        if macs.isEmpty {
+            Text("Pair another Mac to use this Mac's mouse and keyboard on it.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+        }
+        ForEach(macs) { mac in
+            HStack(spacing: 10) {
+                Text(mac.name).font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { model.remoteArrangement[mac.id] },
+                    set: { model.remoteArrangement[mac.id] = $0 }
+                )) {
+                    Text("Off").tag(ScreenEdge?.none)
+                    ForEach(ScreenEdge.allCases, id: \.self) { edge in Text(edge.label).tag(ScreenEdge?.some(edge)) }
+                }
+                .labelsHidden().frame(width: 170)
+            }
+            if model.remoteArrangement[mac.id] != nil, mac.info?.remoteControl != true {
+                Text("Turn on \"Let paired Macs use their mouse and keyboard here\" on \(mac.name) too.")
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.amber)
+            }
+        }
+        if !model.remoteArrangement.isEmpty {
+            Text(model.sharedInput.isWatching
+                 ? "Move the pointer past that edge to use the other Mac, and back to come home. Control-Option-Command brings it home at once. Copy and paste works across, through the shared clipboard."
+                 : "Needs Accessibility for DyskLink in System Settings > Privacy & Security, to follow the pointer to the edge.")
+                .font(.system(size: 12)).foregroundStyle(model.sharedInput.isWatching ? Theme.textSecondary : Theme.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        Toggle("Let paired Macs use their mouse and keyboard here", isOn: Bindable(model).acceptsRemoteInput)
+            .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+        Text(model.acceptsRemoteInput && !DeviceInput.isTrusted
+             ? "Needs Accessibility for DyskLink in System Settings > Privacy & Security."
+             : "Off by default. While it's on, a paired Mac can move the pointer and type here, as if its mouse and keyboard were plugged in.")
+            .font(.system(size: 12)).foregroundStyle(model.acceptsRemoteInput && !DeviceInput.isTrusted ? Theme.amber : Theme.textFaint)
+            .fixedSize(horizontal: false, vertical: true)
+        Divider().overlay(Theme.stroke)
     }
 
     // MARK: Launcher
@@ -1295,6 +1341,10 @@ struct DisplaySliders: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
+            if let problem = control.matchProblem {
+                Text(problem).font(.system(size: 11)).foregroundStyle(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if control.isReading && control.displays.isEmpty {
                 Text("Checking screens…").font(.system(size: 12)).foregroundStyle(Theme.textSecondary)

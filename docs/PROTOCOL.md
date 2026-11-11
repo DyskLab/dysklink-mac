@@ -10,9 +10,20 @@ Android looks for that service in three ways:
 3. A manually entered IP address.
 
 Since 0.2.0 the Mac's Bonjour TXT record carries `id` (its device ID) and `platform=macos`.
+DyskLink for Windows and Linux advertises the same service on the same port, with `platform=windows` or
+`platform=linux`, and plays the Mac's part: phones dial it, it shows the pairing code, and it accepts the clipboard,
+files, notifications, calls, ringing, and status. Phones treat `macos`, `windows`, and `linux` as computers and any
+other platform as a phone. With **Sync with other computers** on, it also browses for other computers and
+connects to Macs and PCs the same way Macs connect to each other, with the same allow-list. Mac-only messages (screen, notch, charging, and so on) are only sent to `macos`.
 
 Android closes duplicate connections to the same device before sending `hello`.
 The Mac only registers a connection after receiving `hello`, and that connection then replaces the old one.
+Only the first `hello` on a connection counts; later ones are ignored.
+
+Once a device is paired, whether it's a phone or a computer, and which computer platform, comes from the platform
+saved at pairing, not from later `hello` messages. A paired device whose `hello` (with `paired: true`) claims another
+kind (phone ↔ computer, or another computer platform such as `windows` → `macos`) has its connection closed. A phone
+may report another phone platform.
 
 ## Heartbeat
 Android sends `ping` every 25 seconds. With no data for 75 seconds, the connection counts as dead and Android
@@ -27,7 +38,8 @@ The ID always comes from the TLS certificate, never from message content.
 
 ## Message frame
 `[length: UInt32 big-endian][UTF-8 JSON]`, at most 1 MiB per frame.
-Receivers ignore unknown fields and message types.
+Receivers ignore unknown fields and message types. A receiver closes the connection on a larger frame, so senders
+drop such a message instead of sending it (the Mac logs and drops it, and the connection stays up).
 
 ```json
 { "type": "info", "info": { "batteryPercent": 80 } }
@@ -44,7 +56,7 @@ Receivers ignore unknown fields and message types.
 | `unpair` | - | Any time |
 | `info` | `info`: see `DeviceInfo` | Paired only |
 | `ping`, `pong` | - | Any time |
-| `clipboard` | `text`, at most 256 KiB; `key` asks for a receipt | Paired only |
+| `clipboard` | `text`, at most 262,144 UTF-16 code units; `key` asks for a receipt | Paired only |
 | `clipboard.ack` | `key`, `error` if the text wasn't applied | Mac to phone, paired only |
 | `media` | `media`: `play_pause`, `next`, `previous`, and phone to Mac only: `volume_up`, `volume_down`, `mute` | Paired only |
 | `input` | `input`: `kind` (`move`, `click`, `scroll`, `text`, `key`, `shortcut`), `dx`, `dy`, `button`, `text`, `key` | Phone to Mac, paired only |
@@ -78,6 +90,12 @@ Messages other than `hello`, `pair.*`, `unpair`, `ping`, and `pong` are dropped 
 If the other side sends `paired: false`, this side removes its pairing too.
 
 ## Pairing
+Since protocol version 2 the code is random: the device that receives `pair.request` shows a 6-digit code, the
+user types it on the device that asked, and that device sends `pair.accept` with `key` =
+SHA-256 hex of `"dysklink-pair-v2:" + code + ":" + min(idA, idB) + ":" + max(idA, idB)`. The device showing the
+code checks it and answers `pair.accept`, or `pair.reject` with `error: "wrong-code"` (5 tries). The steps below
+describe version 1, kept for older apps.
+
 1. One side sends `pair.request`. Android does this automatically for a new Mac while its app is open, unless
    the user has declined or unpaired that Mac before.
 2. Both sides show the same 6-digit code.
@@ -98,6 +116,11 @@ An attacker in the middle uses a different certificate, so the codes on the two 
 ## File transfer
 Files are sent in chunks over the same connection. The receiver writes to a temporary file and only keeps it
 if the size and SHA-256 match. File names are sanitized so they can't escape the destination folder.
+
+Receivers take chunks of any size; the Mac sends 64 KiB of file data per chunk (192 KiB before 1.0.x). So that
+input, sound, and video don't wait behind a file on the same connection, the Mac sends live messages ahead of queued
+chunks, sends a `ping` after about every 128 KiB of file messages, and keeps at most 512 KiB of them unanswered by
+`pong`. A device that doesn't answer within 3 seconds gets the rest without that limit.
 
 ## Screen and control
 | Type | Content | Condition |
@@ -172,8 +195,33 @@ than its own, so two Macs only ever hold one connection. The connecting Mac uses
 `hello` with `platform: "macos"`, and pairs with the same 6-digit code. A Mac with Other Macs turned off closes
 connections whose `hello.platform` is `macos`.
 
-A paired Mac may only send `hello`, `pair.*`, `unpair`, `info`, `ping`, `pong`, `clipboard`, `clipboard.history`,
-`ring`, and `file.*`. Anything else from a Mac is dropped, so another Mac can't send input or run commands.
+A paired computer may only send `hello`, `pair.*`, `unpair`, `info`, `ping`, `pong`, `clipboard`, `clipboard.history`,
+`ring`, `file.*`, and between Macs `remote.*`. Anything else from a computer is dropped, so it can't run commands.
+
+A copied picture goes to paired computers as a file with `kind: "clipboard"` (PNG, up to 24 MB). The receiver puts it
+on its clipboard instead of saving it, and doesn't list it as a transfer.
+
+### One mouse and keyboard
+Each Mac chooses which side of it a paired Mac sits on. A Mac accepts input only while **Let paired Macs use their
+mouse and keyboard here** is on, which its `info.remoteControl` reports. When the pointer is pushed past the chosen
+outer edge twice in a row, the Mac in use sends `remote.enter`, hides and holds its pointer, and forwards input as
+`remote.input` until the pointer comes home. The other Mac posts the input as if its own mouse and keyboard were used.
+
+| Type | `remote` | Direction |
+|---|---|---|
+| `remote.enter` | `edge` where the pointer appears, `at` 0–1 along it | Mac in use → other Mac |
+| `remote.input` | `kind`: `move` (`dx`, `dy`), `down`/`up` (`button` 0 left, 1 right, 2+ other), `scroll` (`dx`, `dy` in pixels), `key` (`keyCode`, `keyDown`, `flags`), `flags` (`keyCode`, `flags`) | Mac in use → other Mac |
+| `remote.leave` | `edge`, `at`: the pointer was pushed back past the edge facing the Mac in use | other Mac → Mac in use |
+| `remote.exit` | none: control ended (Control-Option-Command, the setting turned off, or refused) | either way |
+
+The other Mac lets go of held keys and buttons on `remote.exit`, `remote.leave`, when the connection drops, and when
+either side unpairs. `remote.exit` is accepted even from a device that is no longer paired, since it only ends
+control. Only a device paired as `macos` may send `remote.enter`, `remote.input`, and `remote.leave`.
+
+The receiving Mac checks every number: key codes outside 0–127 and buttons outside 0–31 are dropped, `dx`/`dy`
+are clamped to ±4000, and non-finite numbers drop the event. A Mac whose pointer is on another Mac refuses
+`remote.enter` with `remote.exit`, and pointer events that DyskLink posted itself never cross an edge, so control
+can't loop between two Macs.
 
 | Type | Content | Condition |
 |---|---|---|
@@ -224,7 +272,15 @@ From protocol version 2 the code is typed, not compared.
    fingerprints each side sees, so a device in the middle can't reuse the code.
 4. When the key matches, the showing device saves the pairing and answers `pair.accept`. The typing device saves it then.
    A wrong key gets `pair.reject` with `error = "wrong-code"`, and the code can be typed again. After 5 wrong tries the
-   showing device sends a plain `pair.reject`.
+   showing device sends `pair.reject` with a readable `error` (older apps treat any other error as a plain reject).
+
+Guessing is limited on the showing device (the Mac since 1.0.x):
+- Wrong codes count per device across prompts, so a new `pair.request` doesn't give five fresh tries.
+- After 5 wrong codes that device waits 60 seconds, then twice as long after each further 5, up to 1 hour. During
+  the wait its `pair.request` gets `pair.reject` with `error` saying how long to wait. A right code clears its count.
+- 15 wrong codes from any devices within 10 minutes close pairing for everyone for 10 minutes.
+- While a code is showing, another `pair.request` from the same device is ignored (no new code), and requests from
+  one device closer than 2 seconds apart are dropped without an answer.
 
 When both ask at once, the device with the smaller ID shows the code. A device whose `hello.protocolVersion` is below 2
 can't pair this way and is asked to update. Paired devices reconnect without a code, as before.

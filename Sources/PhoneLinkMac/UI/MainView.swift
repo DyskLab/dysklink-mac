@@ -150,7 +150,7 @@ struct MainView: View {
         } else if case .failed(let message) = model.serverState {
             ErrorState(message: message)
         } else if let peer = selected {
-            if peer.isPaired, peer.isMac {
+            if peer.isPaired, peer.isComputer {
                 MacPeerDetail(model: model, peer: peer, scrolls: animated, onUnpair: { model.unpair(peer.id) })
             } else if peer.isPaired {
                 PeerDetail(model: model, peer: peer, scrolls: animated, onUnpair: { model.unpair(peer.id) })
@@ -180,7 +180,7 @@ private struct PeerRow: View {
 
     var body: some View {
         HStack(spacing: 11) {
-            Image(systemName: peer.isMac ? "laptopcomputer" : "iphone.gen3")
+            Image(systemName: peer.isMac ? "laptopcomputer" : peer.isComputer ? "pc" : "iphone.gen3")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(peer.isConnected ? Theme.mint : Theme.textFaint)
                 .frame(width: 34, height: 34)
@@ -438,7 +438,7 @@ private struct NewPeerState: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: peer.isMac ? "laptopcomputer.and.arrow.down" : "iphone.gen3.radiowaves.left.and.right")
+            Image(systemName: peer.isComputer ? "laptopcomputer.and.arrow.down" : "iphone.gen3.radiowaves.left.and.right")
                 .font(.system(size: 42, weight: .semibold)).foregroundStyle(Theme.accentGradient)
             Text(peer.name).font(.system(size: 24, weight: .bold)).foregroundStyle(Theme.textPrimary)
             Text("This device is connected but not trusted yet.\nPair them so the two devices can exchange data.")

@@ -42,6 +42,14 @@ final class QuickNoteModel {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
+    /// Writes a save that's still waiting, for quitting.
+    func flush() {
+        guard let work = saveWork else { return }
+        work.cancel()
+        saveWork = nil
+        save()
+    }
+
     func save() {
         guard persists, let data = try? JSONEncoder().encode(Stored(text: text, updated: updated)) else { return }
         try? data.write(to: file, options: .atomic)

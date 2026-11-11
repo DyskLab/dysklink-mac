@@ -38,6 +38,7 @@ enum ToolsSelfTest {
         testLauncherWeb()
         testPhoneSearch()
         testNotificationImages()
+        testFastFrames()
         testTerminal()
         testNotch(folder)
         testMacCare(folder)
@@ -58,6 +59,8 @@ enum ToolsSelfTest {
         testMenuAnchor()
         testGallerySnapshot()
         testAudioPCM()
+        testSharedInputEdges()
+        testCoreSafety()
         // A laptop with a monitor above it, offset to the left, like a common desk.
         let laptop = CGRect(x: 0, y: 0, width: 1470, height: 956)
         let monitor = CGRect(x: -204, y: -1080, width: 1920, height: 1080)
@@ -154,6 +157,86 @@ enum ToolsSelfTest {
         check("a listening phone shows under the notch", notch.isWatched && notch.watchText == "Pixel is listening")
         notch.screenWatchers = ["Pixel"]
         check("viewing is shown before listening", notch.watchText == "Pixel is viewing")
+    }
+
+    /// Pairing limits, numbers from another Mac, and what decides a device's kind.
+    private static func testCoreSafety() {
+        check("key codes 0...127 pass", RemoteLimits.keyCode(0) == 0 && RemoteLimits.keyCode(127) == 127)
+        check("key codes outside 0...127 are refused", RemoteLimits.keyCode(70000) == nil && RemoteLimits.keyCode(-1) == nil && RemoteLimits.keyCode(128) == nil)
+        check("buttons 0...31 pass, others don't", RemoteLimits.button(31) == 31 && RemoteLimits.button(32) == nil && RemoteLimits.button(-1) == nil)
+        check("huge movement is clamped", RemoteLimits.delta(1e12, limit: 4000) == 4000 && RemoteLimits.delta(-1e12, limit: 4000) == -4000)
+        check("NaN and infinity are refused", RemoteLimits.delta(.nan, limit: 10) == nil && RemoteLimits.delta(.infinity, limit: 10) == nil)
+        check("a missing delta is zero", RemoteLimits.delta(nil, limit: 10) == 0)
+        check("edge fraction is kept in 0...1", RemoteLimits.fraction(7) == 1 && RemoteLimits.fraction(-3) == 0 && RemoteLimits.fraction(.nan) == 0.5)
+        check("a bad key event is dropped", RemoteLimits.sanitize(RemoteEvent(kind: "key", keyCode: 70000, keyDown: true)) == nil)
+        check("a bad button event is dropped", RemoteLimits.sanitize(RemoteEvent(kind: "down", button: -1)) == nil)
+        check("a huge scroll is clamped", RemoteLimits.sanitize(RemoteEvent(kind: "scroll", dx: 1e12, dy: -5))?.dx == RemoteLimits.maxScroll)
+        check("an unknown event kind is dropped", RemoteLimits.sanitize(RemoteEvent(kind: "teleport")) == nil)
+
+        check("pairing cooldown doubles", PairingGuard.cooldown(lockouts: 1) == 60 && PairingGuard.cooldown(lockouts: 2) == 120
+            && PairingGuard.cooldown(lockouts: 3) == 240)
+        check("pairing cooldown stops at an hour", PairingGuard.cooldown(lockouts: 7) == 3600 && PairingGuard.cooldown(lockouts: 500) == 3600)
+        var guardian = PairingGuard()
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        check("a first request is allowed", guardian.admit("a", now: start) == .allowed)
+        check("a quick repeat is ignored", guardian.admit("a", now: start.addingTimeInterval(1)) == .ignored)
+        let locked = (1...5).map { guardian.wrongCode("a", now: start.addingTimeInterval(Double($0))) }
+        check("the fifth wrong code locks out", locked == [false, false, false, false, true])
+        if case .refused = guardian.admit("a", now: start.addingTimeInterval(30)) { check("locked out device is refused", true) }
+        else { check("locked out device is refused", false) }
+        check("another device can still ask", guardian.admit("b", now: start.addingTimeInterval(30)) == .allowed)
+        check("allowed again after 60 s", guardian.admit("a", now: start.addingTimeInterval(66)) == .allowed)
+        _ = (1...5).map { guardian.wrongCode("a", now: start.addingTimeInterval(70 + Double($0))) }
+        check("the second lockout is 120 s", guardian.admit("a", now: start.addingTimeInterval(75 + 100)) != .allowed
+            && guardian.admit("a", now: start.addingTimeInterval(75 + 121)) == .allowed)
+        guardian.succeeded("a")
+        check("the right code clears the count", guardian.waiting("a", now: start.addingTimeInterval(200)) == nil)
+        var everyone = PairingGuard()
+        var globalLock = false
+        for index in 0..<PairingGuard.globalLimit { globalLock = everyone.wrongCode("peer\(index)", now: start) }
+        check("many wrong codes from many devices close pairing", globalLock
+            && everyone.admit("new", now: start.addingTimeInterval(60)) != .allowed
+            && everyone.admit("new", now: start.addingTimeInterval(PairingGuard.globalCooldown + 1)) == .allowed)
+
+        check("a paired PC can't say it's a phone", !PeerClass.helloMatches(record: "windows", hello: "android"))
+        check("a paired phone can't say it's a Mac", !PeerClass.helloMatches(record: "android", hello: "macos"))
+        check("a paired PC can't say it's a Mac", !PeerClass.helloMatches(record: "linux", hello: "macos"))
+        check("the same platform matches", PeerClass.helloMatches(record: "macos", hello: "macos") && PeerClass.helloMatches(record: "android", hello: "android"))
+        check("the record decides the platform", PeerClass.platform(record: "windows", hello: "macos") == "windows"
+            && PeerClass.platform(record: nil, hello: "android") == "android")
+        check("usb polls slowly without phones", UsbBridge.interval(sinceDevice: 3600) == 30 && UsbBridge.interval(sinceDevice: 10) == 4)
+        var phone = PhoneSnapshot()
+        phone.apply(features: ["sms", "contacts"])
+        phone.setContacts([ContactItem(id: "1", name: "Budi", phones: ["0812"]), ContactItem(id: "2", name: "Ani", phones: [])])
+        check("contacts are sorted and grouped once", phone.sortedContacts.map(\.name) == ["Ani", "Budi"] && phone.contactSections.map(\.letter) == ["A", "B"])
+        phone.merge([SmsItem(id: 1, threadId: 9, address: "0812", body: "a", time: 1, outgoing: false),
+                     SmsItem(id: 2, threadId: 9, address: "0812", body: "b", time: 2, outgoing: false)])
+        check("threads are kept with the messages", phone.threads.count == 1 && phone.threads[0].latest.id == 2 && phone.threads[0].name == "Budi")
+    }
+
+    private static func testSharedInputEdges() {
+        // A laptop at 0,0 1440×900 with an external display to its right, a little higher.
+        let laptop = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let external = CGRect(x: 1440, y: -200, width: 1920, height: 1080)
+        let displays = [laptop, external]
+        check("the right edge of the laptop isn't outer, the external display is there",
+              EdgeMath.hit(CGPoint(x: 1439, y: 450), edge: .right, displays: displays) == nil)
+        let hit = EdgeMath.hit(CGPoint(x: 3359, y: 340), edge: .right, displays: displays)
+        check("the external display's right edge is outer", hit?.display == external && abs((hit?.at ?? 0) - 0.5) < 0.01)
+        check("the laptop's left edge is outer", EdgeMath.hit(CGPoint(x: 0, y: 225), edge: .left, displays: displays).map { abs($0.at - 0.25) < 0.01 } == true)
+        check("the middle of a screen isn't an edge", EdgeMath.hit(CGPoint(x: 700, y: 450), edge: .left, displays: displays) == nil)
+        check("the outermost display on the right", EdgeMath.outermost(.right, displays: displays) == external)
+        check("the outermost display on the left", EdgeMath.outermost(.left, displays: displays) == laptop)
+        let entry = EdgeMath.point(on: .left, of: laptop, at: 0.5)
+        check("the pointer appears just inside the left edge, halfway down", entry.x == 2 && abs(entry.y - 449.5) < 0.01)
+        check("the opposite of right is left", ScreenEdge.right.opposite == .left && ScreenEdge.top.opposite == .bottom)
+        check("pushing right is toward the right edge", ScreenEdge.right.pushes(dx: 3, dy: 0) && !ScreenEdge.right.pushes(dx: -3, dy: 0))
+        check("Control-Option-Command brings the pointer home", EdgeMath.isHomeChord([.maskControl, .maskAlternate, .maskCommand]))
+        check("Shift too isn't the home chord", !EdgeMath.isHomeChord([.maskControl, .maskAlternate, .maskCommand, .maskShift]))
+        check("Command alone isn't the home chord", !EdgeMath.isHomeChord([.maskCommand]))
+        let event = RemoteEvent(kind: "key", keyCode: 0, keyDown: true, flags: CGEventFlags.maskCommand.rawValue)
+        let back = try? JSONDecoder().decode(RemoteEvent.self, from: JSONEncoder().encode(event))
+        check("a key survives the trip as JSON", back == event)
     }
 
     private static func testGallerySnapshot() {
@@ -351,6 +434,23 @@ enum ToolsSelfTest {
             ChargePolicy.decide(percent: percent, charging: charging, temperature: temp, settings: settings, calibration: calibration, previous: previous, now: now)
         }
         check("charging is normal with nothing on", decide(50).reason == .normal)
+        var sleepy = ChargeSettings()
+        sleepy.limiter = true
+        sleepy.limit = 80
+        func offBeforeSleep(_ percent: Int, reason: ChargeReason, topUp: Bool = false, calibration: CalibrationPhase = .off) -> Bool {
+            ChargePolicy.offBeforeSleep(percent: percent, settings: sleepy, calibration: calibration, reason: reason, topUp: topUp, adapterOff: false)
+        }
+        check("near the limit the charger goes off before sleep", offBeforeSleep(78, reason: .normal) && offBeforeSleep(80, reason: .limit))
+        check("far below the limit it stays on before sleep", !offBeforeSleep(60, reason: .normal))
+        check("a top-up keeps charging through sleep", !offBeforeSleep(90, reason: .topUp, topUp: true) && !offBeforeSleep(90, reason: .normal, topUp: true))
+        check("macOS holding the level keeps the charger on in sleep", !offBeforeSleep(80, reason: .held))
+        check("a heat pause or calibration isn't changed by sleep",
+              !offBeforeSleep(80, reason: .heat) && !offBeforeSleep(80, reason: .calibrationCharge, calibration: .charging)
+              && !offBeforeSleep(80, reason: .lowBattery) && !offBeforeSleep(85, reason: .discharge))
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let even = ChargeControl.evenLevels([.init(time: start, percent: 50), .init(time: start.addingTimeInterval(600), percent: 55)],
+                                            until: start.addingTimeInterval(900))
+        check("level history is spread evenly for the chart", even.count == 6 && even.first?.percent == 50 && even.last?.percent == 55)
         settings.limiter = true
         settings.limit = 80
         settings.sail = 5
@@ -569,6 +669,30 @@ enum ToolsSelfTest {
               ["com.foo.app.plist", "com.foo.app", "TEAM123.com.foo.app", "com.foo.app.helper.plist"])
         check("a folder with the same name is only suggested", leftovers.filter { !$0.byId }.map(\.item.name) == ["Foo"])
         check("a similar ID isn't a leftover", !leftovers.contains { $0.item.name == "com.foobar" })
+        check("plain bundle IDs are safe", Uninstaller.isSafeBundleId("com.foo.app") && Uninstaller.isSafeBundleId("A1-b.c"))
+        check("dangerous bundle IDs are refused", [".", "..", "../..", "com/../x", "a..b", ".hidden", "-x", "", "a b", "a/b", "ü.x"]
+              .allSatisfy { !Uninstaller.isSafeBundleId($0) })
+        let evil = InstalledApp(url: home.appendingPathComponent("Applications/Evil.app"), name: "Ev", bundleId: "..", version: "")
+        check("an app with the ID .. leaves no leftovers", Uninstaller.leftovers(for: evil, home: home).isEmpty)
+        let dot = InstalledApp(url: home.appendingPathComponent("Applications/Dot.app"), name: "Do", bundleId: ".", version: "")
+        check("an app with the ID . leaves no leftovers", Uninstaller.leftovers(for: dot, home: home).isEmpty)
+        let caches = home.appendingPathComponent("Library/Caches")
+        check("a leftover must sit right inside its folder",
+              Uninstaller.isDirectlyInside(caches.appendingPathComponent("com.foo.app"), folder: caches)
+              && !Uninstaller.isDirectlyInside(caches.appendingPathComponent("a/b"), folder: caches)
+              && !Uninstaller.isDirectlyInside(caches.appendingPathComponent(".."), folder: caches)
+              && !Uninstaller.isDirectlyInside(caches, folder: caches))
+        // A linked folder in the way of the path doesn't count as the folder itself.
+        try? fm.createDirectory(at: home.appendingPathComponent("Library/Elsewhere"), withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: caches.appendingPathComponent("linked"), withDestinationURL: home.appendingPathComponent("Library/Elsewhere"))
+        check("a path through a linked folder is refused", !Uninstaller.isDirectlyInside(caches.appendingPathComponent("linked/x"), folder: caches))
+        if let foo = apps.first(where: { $0.name == "Foo" }) {
+            app("Applications/Copy/Foo.app", "com.foo.app")
+            let copy = home.appendingPathComponent("Applications/Copy/Foo.app")
+            check("another copy with the same ID is found", Uninstaller.otherCopies(of: foo, listed: [copy, foo.url]).map(\.lastPathComponent) == ["Foo.app"])
+            check("the app itself isn't another copy",
+                  !Uninstaller.otherCopies(of: foo, listed: [foo.url]).contains { $0.standardizedFileURL == foo.url.standardizedFileURL })
+        }
 
         // Startup
         let agent: [String: Any] = ["Label": "com.foo.agent", "ProgramArguments": ["/Applications/Foo.app/Contents/MacOS/helper", "--quiet"], "RunAtLoad": true]
@@ -795,6 +919,20 @@ enum ToolsSelfTest {
         failed[3] = 0x01
         check("a failed DDC reply is refused", DDC.parseReply(failed, code: 0x10) == nil)
         check("an empty reply is refused", DDC.parseReply([UInt8](repeating: 0, count: 12), code: 0x10) == nil)
+        check("EDID vendor letters become CoreGraphics' number", MonitorIdentity.eisaVendor("GSM") == 0x1E6D && MonitorIdentity.eisaVendor("g1m") == nil)
+        let lg = MonitorIdentity(vendor: 0x1E6D, product: 23305, serial: 111)
+        let dell = MonitorIdentity(vendor: 0x10AC, product: 41200, serial: 7)
+        check("one monitor and one service go together", MonitorMatch.assign(screens: [(5, MonitorIdentity())], services: [MonitorIdentity()]) == [5: 0])
+        check("two monitors are matched by their EDID, not by order",
+              MonitorMatch.assign(screens: [(5, dell), (6, lg)], services: [lg, dell]) == [5: 1, 6: 0])
+        let twinA = MonitorIdentity(vendor: 0x1E6D, product: 23305, serial: 0)
+        check("two identical monitors without serials aren't guessed",
+              MonitorMatch.assign(screens: [(5, twinA), (6, twinA)], services: [twinA, twinA]).isEmpty)
+        check("serials tell identical models apart",
+              MonitorMatch.assign(screens: [(5, lg), (6, MonitorIdentity(vendor: 0x1E6D, product: 23305, serial: 222))],
+                                  services: [MonitorIdentity(vendor: 0x1E6D, product: 23305, serial: 222), lg]) == [5: 1, 6: 0])
+        check("services that say nothing aren't guessed with two monitors",
+              MonitorMatch.assign(screens: [(5, lg), (6, dell)], services: [MonitorIdentity(), MonitorIdentity()]).isEmpty)
     }
 
     private static func testWheel() {
@@ -863,6 +1001,9 @@ enum ToolsSelfTest {
             == .init(command: nil, swallows: true))
         check("Escape cancels the switcher", SwitcherKeys.result(keyCode: 53, flags: .maskAlternate, isOpen: true).command == .cancel)
         check("Return chooses in the switcher", SwitcherKeys.result(keyCode: 36, flags: .maskAlternate, isOpen: true).command == .commit)
+        check("letting go of Option chooses while open", SwitcherKeys.releaseCommits(flags: [], isOpen: true))
+        check("Option still held or the switcher closed doesn't choose",
+              !SwitcherKeys.releaseCommits(flags: .maskAlternate, isOpen: true) && !SwitcherKeys.releaseCommits(flags: [], isOpen: false))
         check("Escape stays with the app while closed", SwitcherKeys.result(keyCode: 53, flags: [], isOpen: false) == .pass)
         let icon = CGRect(x: 700, y: 4, width: 60, height: 60)
         let box = CGRect(x: 580, y: 74, width: 300, height: 200)
@@ -1127,6 +1268,13 @@ extension ToolsSelfTest {
         check("before Subuh the next is today's Subuh", dawn?.prayer == .subuh && dawn?.previous == nil)
         check("a day that isn't loaded gives nothing", schedule.upcoming(after: moment("2026-11-20T10:00:00+07:00")) == nil)
         check("the last day needs tomorrow loaded", schedule.upcoming(after: moment("2026-11-10T20:00:00+07:00")) == nil)
+        let onTime = schedule.due(at: moment("2026-11-09T11:40:30+07:00"), early: false)
+        check("the on-time alert is the prayer that just came", onTime?.prayer == .dzuhur && onTime?.time == moment("2026-11-09T11:40:00+07:00"))
+        check("no on-time alert long after", schedule.due(at: moment("2026-11-09T11:45:00+07:00"), early: false) == nil)
+        check("no on-time alert before the time", schedule.due(at: moment("2026-11-09T11:39:30+07:00"), early: false) == nil)
+        check("the early alert comes ten minutes before",
+              schedule.due(at: moment("2026-11-09T11:30:20+07:00"), early: true)?.prayer == .dzuhur
+              && schedule.due(at: moment("2026-11-09T11:40:10+07:00"), early: true) == nil)
         check("the schedule ignores other cities", PrayerSchedule(location: PrayerLocation(province: "Bali", city: "Kota Denpasar"), months: [month]).days.isEmpty)
         check("time zones follow the province",
               PrayerLocation(province: "Bali", city: "x").timeZone.identifier == "Asia/Makassar"
@@ -1182,6 +1330,11 @@ extension ToolsSelfTest {
         check("only the first line is kept", list.add("Call Dina\nsecond line", at: noon) && list.items.last?.title == "Call Dina")
         check("long titles are cut", { var l = TodoList(); l.add(String(repeating: "a", count: 200), at: noon); return l.items[0].title.count == TodoList.maxTitle }())
         check("the list has a limit", { var l = TodoList(); for i in 0..<60 { l.add("task \(i)", at: noon) }; return l.items.count == TodoList.maxItems }())
+        let fullModel = TodoModel(directory: FileManager.default.temporaryDirectory, persists: false)
+        for i in 0..<TodoList.maxItems { fullModel.add("task \(i)") }
+        check("a full list says why a task wasn't added", !fullModel.add("one more") && fullModel.problem != nil)
+        fullModel.delete(fullModel.list.items[0].id)
+        check("adding works again once there's room", fullModel.add("one more") && fullModel.problem == nil)
         let first = list.items[0].id
         list.toggle(first, at: noon)
         check("finishing counts for today", list.doneToday(now: noon, calendar: calendar) == 1 && list.totalToday(now: noon, calendar: calendar) == 2)
@@ -1400,6 +1553,63 @@ extension ToolsSelfTest {
         try? stuck.start(cols: 80, rows: 24, shell: "/bin/sh", arguments: ["-c", "sleep 30"])
         stuck.hangUp()
         check("terminal: hang up ends it", ended.wait(timeout: .now() + 4) == .success)
+    }
+
+    /// The frames the session builds by hand must read back as the same messages, and the NAL splitter that works
+    /// in place must find the same units as the old copying one.
+    static func testFastFrames() {
+        func envelope(_ frame: Data?) -> Envelope? {
+            guard let frame, frame.count > 4 else { return nil }
+            let length = frame.prefix(4).reduce(0) { ($0 << 8) | Int($1) }
+            guard length == frame.count - 4 else { return nil }
+            return try? JSONDecoder().decode(Envelope.self, from: frame.dropFirst(4))
+        }
+        let bytes = Data((0..<70_001).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
+        let chunk = envelope(PeerSession.base64Frame(type: MessageType.fileChunk,
+                                                     fields: #""file":{"id":\#(PeerSession.jsonString("a\"b\\c/é")),"data":"#,
+                                                     data: bytes, after: "}"))
+        check("chunk frame reads back", chunk?.type == MessageType.fileChunk && chunk?.file?.id == "a\"b\\c/é"
+              && chunk?.file?.data.flatMap { Data(base64Encoded: $0) } == bytes)
+        let video = envelope(PeerSession.base64Frame(type: MessageType.macScreenFrame, fields: #""video":"#,
+                                                     data: bytes.prefix(5), after: #","keyFrame":true"#))
+        check("video frame reads back", video?.keyFrame == true && video?.video.flatMap { Data(base64Encoded: $0) } == bytes.prefix(5))
+        let empty = envelope(PeerSession.base64Frame(type: MessageType.audioFrame, fields: #""audio":"#, data: Data()))
+        check("empty payload reads back", empty?.type == MessageType.audioFrame && empty?.audio == "")
+        check("oversized frame dropped", PeerSession.base64Frame(type: MessageType.fileChunk, fields: #""video":"#,
+                                                                 data: Data(count: 800 * 1024)) == nil)
+
+        // The old splitter, kept here as the reference.
+        func reference(_ data: Data) -> [Data] {
+            let bytes = [UInt8](data)
+            var units: [Data] = []
+            var start: Int?
+            var index = 0
+            while index + 2 < bytes.count {
+                if bytes[index] == 0, bytes[index + 1] == 0, bytes[index + 2] == 1 {
+                    if let start {
+                        var end = index
+                        while end > start, bytes[end - 1] == 0 { end -= 1 }
+                        units.append(Data(bytes[start..<end]))
+                    }
+                    start = index + 3
+                    index += 3
+                } else {
+                    index += 1
+                }
+            }
+            if let start, start < bytes.count { units.append(Data(bytes[start...])) }
+            return units.filter { !$0.isEmpty }
+        }
+        var generator = SystemRandomNumberGenerator()
+        var same = true
+        for round in 0..<400 {
+            // Mostly zeros and ones, so start codes and trailing zeros come up often.
+            let count = Int.random(in: 0..<200, using: &generator)
+            var sample = Data((0..<count).map { _ in [0, 0, 0, 1, 1, 2, 0x41, 0x67, 0xFF].randomElement(using: &generator)! })
+            if round % 3 == 0 { sample = Data([9, 9]) + sample; sample = sample.dropFirst(2) }
+            if VideoDecoder.nalUnits(sample) != reference(sample) { same = false }
+        }
+        check("NAL units found in place match", same)
     }
 
     static func testNotificationImages() {

@@ -284,7 +284,8 @@ struct MessagesTab: View {
                 HStack(alignment: .bottom, spacing: 8) {
                     DyskField(placeholder: canSend ? "Write an SMS" : "Choose who it's for first", text: $model.smsDraft,
                               multiline: true, clearable: false) {
-                        if canSend, !draft.isEmpty { model.sendSms(to: address, on: peer.id) }
+                        // Return again while sending does nothing, so an SMS isn't sent twice.
+                        if canSend, !draft.isEmpty, data.pendingSms == nil { model.sendSms(to: address, on: peer.id) }
                     }
                     Button { model.sendSms(to: address, on: peer.id) } label: {
                         Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.ink)
@@ -439,7 +440,8 @@ struct ContactsTab: View {
             FeatureOffCard(title: "Contacts")
         } else {
             let query = model.contactQuery.trimmingCharacters(in: .whitespaces)
-            let shown = PhoneSearch.contacts(data.contacts, query: query)
+            // The full list is sorted once when it arrives; only a search sorts here.
+            let shown = query.isEmpty ? data.sortedContacts : PhoneSearch.contacts(data.contacts, query: query)
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     DyskField(icon: "magnifyingglass", placeholder: "Search a name or a number, like 0812 or +62 812", text: $model.contactQuery)
@@ -454,12 +456,10 @@ struct ContactsTab: View {
                     EmptyCard(text: data.contacts.isEmpty ? "No contacts received from the phone yet." : "No contact matches “\(query)”.")
                 } else if query.isEmpty {
                     // Alphabetical, under a letter, when not searching.
-                    let groups = Dictionary(grouping: shown, by: { PhoneSearch.section($0.name) })
-                    let letters = groups.keys.sorted { $0 == "#" ? false : $1 == "#" ? true : $0 < $1 }
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(letters, id: \.self) { letter in
-                            SectionLabel(letter)
-                            list(groups[letter] ?? [])
+                        ForEach(data.contactSections) { section in
+                            SectionLabel(section.letter)
+                            list(section.contacts)
                         }
                     }
                 } else {
@@ -680,6 +680,9 @@ struct ScreenTab: View {
                         Button("Cancel") { model.cancelCameraRequest(for: peer.id) }.buttonStyle(SecondaryButtonStyle())
                     } else if peer.isConnected {
                         Button("Use camera") { model.requestCamera(from: peer.id) }.buttonStyle(PrimaryButtonStyle())
+                            // One phone camera is shown at a time.
+                            .disabled(model.camera != nil)
+                            .help(model.camera.map { "\($0.peerName)'s camera is open. Close it first." } ?? "")
                     }
                 }
                 if let error = model.cameraError[peer.id] {
@@ -712,6 +715,9 @@ struct ScreenTab: View {
             Button("Cancel") { model.cancelScreenRequest(for: peer.id) }.buttonStyle(SecondaryButtonStyle())
         } else if data.features.contains("screen") && peer.isConnected {
             Button("Request screen") { model.requestScreen(from: peer.id) }.buttonStyle(PrimaryButtonStyle())
+                // One phone screen is shown at a time.
+                .disabled(model.screen != nil)
+                .help(model.screen.map { "\($0.peerName)'s screen is open. Close it first." } ?? "")
         }
     }
 }

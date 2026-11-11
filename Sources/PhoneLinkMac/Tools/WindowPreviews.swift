@@ -20,6 +20,8 @@ final class WindowListState {
     var images: [CGWindowID: NSImage] = [:]
     var selection = 0
     var appName = ""
+    /// Set when the panel opens, so the view doesn't ask macOS about Screen Recording on every redraw.
+    var showsHint = false
 }
 
 /// Follows the Dock's own Accessibility events, so nothing runs while the pointer is elsewhere.
@@ -169,6 +171,15 @@ final class WindowPreviews {
     @ObservationIgnored private var switcherPanel: NSPanel?
     @ObservationIgnored private var dockTimer: Timer?
     @ObservationIgnored private var switcherTimer: Timer?
+    @ObservationIgnored private var hoverTask: Task<Void, Never>?
+    @ObservationIgnored private var imageTask: Task<Void, Never>?
+    @ObservationIgnored private var switcherTask: Task<Void, Never>?
+    @ObservationIgnored private var switcherImageTask: Task<Void, Never>?
+    /// Option + Tab was pressed and the window list is still being gathered.
+    @ObservationIgnored private var isGatheringSwitcher = false
+    /// What was pressed while gathering: more Tabs, and whether Option was let go or Escape pressed.
+    @ObservationIgnored private var gatheringSteps = 0
+    @ObservationIgnored private var gatheringEnd: Bool?
     @ObservationIgnored private var tapRetryTimer: Timer?
     @ObservationIgnored private var iconFrame = CGRect.zero
     @ObservationIgnored private var shownPid: pid_t = 0
@@ -199,6 +210,9 @@ final class WindowPreviews {
     func stop() {
         guard isOn else { return }
         isOn = false
+        hoverTask?.cancel()
+        switcherTask?.cancel()
+        isGatheringSwitcher = false
         watcher.stop()
         closeDock()
         dockPanel = nil
@@ -257,6 +271,7 @@ final class WindowPreviews {
         // An empty selection is left to the pointer check, which follows the pointer itself.
         guard icon != .zero else { return }
         guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            hoverTask?.cancel()
             closeDock()
             return
         }
@@ -264,12 +279,15 @@ final class WindowPreviews {
             iconFrame = icon
             return
         }
-        let windows = WindowCatalog.windows(of: app)
-        guard !windows.isEmpty else {
-            closeDock()
-            return
+        // Only the icon under the pointer now counts; an app slow to answer doesn't hold up the Dock.
+        hoverTask?.cancel()
+        let ref = WindowCatalog.AppRef(app)
+        hoverTask = Task { [weak self] in
+            let windows = await Task.detached(priority: .userInitiated) { WindowCatalog.windows(of: ref) }.value
+            guard let self, !Task.isCancelled else { return }
+            guard !windows.isEmpty else { return self.closeDock() }
+            self.showDock(windows, app: app, icon: icon)
         }
-        showDock(windows, app: app, icon: icon)
     }
 
     private func showDock(_ windows: [WindowItem], app: NSRunningApplication, icon: CGRect) {
@@ -290,8 +308,9 @@ final class WindowPreviews {
     private func placeDock(windowCount: Int) {
         let panel = dockPanel ?? makeDockPanel()
         dockPanel = panel
+        dockState.showsHint = !CGPreflightScreenCaptureAccess()
         let size = WindowStrip.size(count: windowCount, cardWidth: Self.dockWidth, isSwitcher: false,
-                                    showsHint: !CGPreflightScreenCaptureAccess())
+                                    showsHint: dockState.showsHint)
         let screen = NSScreen.screens.first { $0.frame.intersects(iconFrame) } ?? NSScreen.main
         let origin = WindowCatalog.placement(panel: size, icon: iconFrame, screen: screen?.frame ?? .zero)
         panel.setFrame(CGRect(origin: origin, size: size), display: false)
@@ -317,8 +336,10 @@ final class WindowPreviews {
     private func requestImages(for windows: [WindowItem]) {
         let ids = windows.filter { !$0.isMinimized }.map(\.id)
         let pid = shownPid
-        Task {
+        imageTask?.cancel()
+        imageTask = Task {
             let images = await WindowCatalog.thumbnails(for: ids, width: Int(Self.dockWidth * 2))
+            guard !Task.isCancelled else { return }
             imageCache.merge(images) { _, new in new }
             if imageCache.count > Self.maxCachedImages { imageCache = images }
             if isDockVisible, shownPid == pid { dockState.images.merge(images) { _, new in new } }
@@ -360,6 +381,8 @@ final class WindowPreviews {
     }
 
     private func closeDock() {
+        imageTask?.cancel()
+        imageTask = nil
         dockTimer?.invalidate()
         dockTimer = nil
         dockPanel?.orderOut(nil)
@@ -371,8 +394,12 @@ final class WindowPreviews {
     // MARK: Switcher
 
     private func advanceSwitcher(by step: Int) {
+        if isGatheringSwitcher {
+            gatheringSteps += step
+            return
+        }
         guard switcherPanel != nil else {
-            if step > 0 { showSwitcher() }
+            if step > 0 { gatherSwitcher() }
             return
         }
         let count = switcherState.windows.count
@@ -380,13 +407,41 @@ final class WindowPreviews {
         switcherState.selection = (switcherState.selection + step + count) % count
     }
 
-    private func showSwitcher() {
-        let windows = WindowCatalog.allWindows(limit: 24)
-        guard !windows.isEmpty else { return }
+    /// Asks every app for its windows at once, off the main thread, then shows the list. Keys pressed meanwhile
+    /// are kept: more Tabs move the selection, and letting go of Option switches as soon as the list is there.
+    private func gatherSwitcher() {
+        isGatheringSwitcher = true
+        gatheringSteps = 0
+        gatheringEnd = nil
+        // The tap treats the switcher as open, so letting go of Option is reported.
+        SwitcherTap.shared.setOpen(true)
+        switcherTask?.cancel()
+        switcherTask = Task { [weak self] in
+            let windows = await WindowCatalog.allWindowsInBackground(limit: 24)
+            guard let self, !Task.isCancelled, self.isGatheringSwitcher else { return }
+            self.isGatheringSwitcher = false
+            let end = self.gatheringEnd
+            let steps = self.gatheringSteps
+            if end == false || windows.isEmpty {
+                SwitcherTap.shared.setOpen(false)
+                return
+            }
+            // The first press goes to the window behind the current one, as Command + Tab does for apps.
+            let first = windows.count > 1 ? 1 : 0
+            let selection = ((first + steps) % windows.count + windows.count) % windows.count
+            if end == true || !CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate) {
+                SwitcherTap.shared.setOpen(false)
+                WindowCatalog.focus(windows[selection])
+                return
+            }
+            self.showSwitcher(windows, selection: selection)
+        }
+    }
+
+    private func showSwitcher(_ windows: [WindowItem], selection: Int) {
         switcherState.windows = windows
         switcherState.images = [:]
-        // The first press goes to the window behind the current one, as Command + Tab does for apps.
-        switcherState.selection = windows.count > 1 ? 1 : 0
+        switcherState.selection = selection
         let iconsOnly = switcherLayout == .icons
         let cardWidth = iconsOnly ? WindowStrip.iconCardWidth : Self.switcherWidth
         let view = WindowStrip(state: switcherState, cardWidth: cardWidth, isSwitcher: true,
@@ -397,8 +452,9 @@ final class WindowPreviews {
         let hosting = ClickThroughHostingView(rootView: AnyView(view))
         let panel = Self.makePanel()
         panel.contentView = hosting
+        switcherState.showsHint = !iconsOnly && !CGPreflightScreenCaptureAccess()
         let size = WindowStrip.size(count: windows.count, cardWidth: cardWidth, isSwitcher: true,
-                                    showsHint: !iconsOnly && !CGPreflightScreenCaptureAccess(), iconsOnly: iconsOnly)
+                                    showsHint: switcherState.showsHint, iconsOnly: iconsOnly)
         let mouse = NSEvent.mouseLocation
         let area = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         panel.setFrame(CGRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
@@ -406,24 +462,33 @@ final class WindowPreviews {
         // The app in front keeps its keyboard focus, and the tap handles keys while this is open.
         panel.orderFrontRegardless()
         switcherPanel = panel
+        // Letting go of Option now comes from the key tap, as a modifier change. A slow check stays as a backstop
+        // in case macOS paused the tap.
         SwitcherTap.shared.setOpen(true)
-        let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 if !CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate) { self?.closeSwitcher(commit: true) }
             }
         }
+        timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
         switcherTimer = timer
         guard !iconsOnly else { return }
         let state = switcherState
         let ids = windows.filter { !$0.isMinimized }.map(\.id)
-        Task {
+        switcherImageTask?.cancel()
+        switcherImageTask = Task {
             let images = await WindowCatalog.thumbnails(for: ids, width: Int(Self.switcherWidth * 2))
-            if self.switcherPanel != nil { state.images = images }
+            if !Task.isCancelled, self.switcherPanel != nil { state.images = images }
         }
     }
 
     private func closeSwitcher(commit: Bool) {
+        if isGatheringSwitcher {
+            // The list isn't there yet; what to do is decided when it is.
+            if gatheringEnd == nil { gatheringEnd = commit }
+            return
+        }
         switcherTimer?.invalidate()
         switcherTimer = nil
         SwitcherTap.shared.setOpen(false)
@@ -500,7 +565,7 @@ struct WindowStrip: View {
                     }
                 }
             }
-            if !iconsOnly, !CGPreflightScreenCaptureAccess() {
+            if !iconsOnly, state.showsHint {
                 Text("Allow Screen Recording in Advanced to see pictures of windows.")
                     .font(.system(size: 11)).foregroundStyle(Theme.textFaint).lineLimit(1)
                     .padding(.horizontal, 4).frame(height: Self.hintHeight)

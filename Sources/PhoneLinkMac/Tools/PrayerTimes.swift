@@ -119,6 +119,18 @@ struct PrayerSchedule {
         else { return nil }
         return Upcoming(prayer: tomorrow[0].prayer, time: tomorrow[0].time, previous: today.last?.time)
     }
+
+    /// The alert due at `now`, if any: with `early`, the prayer ten minutes away; otherwise the one whose time has
+    /// just come. Only within `window` seconds after the alert's moment, so a Mac that slept doesn't announce old times.
+    func due(at now: Date, early: Bool, window: TimeInterval = 90) -> (prayer: Prayer, time: Date)? {
+        func fresh(_ fireAt: Date) -> Bool { now >= fireAt && now.timeIntervalSince(fireAt) < window }
+        if early {
+            guard let next = upcoming(after: now), fresh(next.time.addingTimeInterval(-600)) else { return nil }
+            return (next.prayer, next.time)
+        }
+        guard let passed = times(on: now)?.last(where: { $0.time <= now }), fresh(passed.time) else { return nil }
+        return passed
+    }
 }
 
 enum PrayerAPI {
@@ -304,12 +316,9 @@ final class PrayerModel {
 
     private func tick() {
         refresh()
-        guard notifies, let schedule, let upcoming = schedule.upcoming(after: Date()) else { return }
-        let fireAt = notifiesEarly ? upcoming.time.addingTimeInterval(-600) : upcoming.time
+        guard notifies, let schedule, let upcoming = schedule.due(at: Date(), early: notifiesEarly) else { return }
         let id = "\(upcoming.prayer.rawValue)-\(Int(upcoming.time.timeIntervalSince1970))-\(notifiesEarly ? "early" : "now")"
-        // Only alerts within the last minute, so a Mac that was asleep doesn't announce old times.
-        guard Date() >= fireAt, Date().timeIntervalSince(fireAt) < 90, defaults.string(forKey: "prayer.lastAlert") != id
-        else { return }
+        guard defaults.string(forKey: "prayer.lastAlert") != id else { return }
         defaults.set(id, forKey: "prayer.lastAlert")
         let clock = Self.clock(upcoming.time, in: schedule.location.timeZone)
         notifier.show(id: "prayer", title: notifiesEarly ? "\(upcoming.prayer.name) in 10 minutes" : "Time for \(upcoming.prayer.name)",

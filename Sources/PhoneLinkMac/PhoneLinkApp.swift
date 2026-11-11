@@ -23,6 +23,10 @@ enum MainWindow {
     static func show() {
         let window = window ?? makeWindow()
         self.window = window
+        // The page is let go while the window is closed, so its animations and views don't keep running.
+        if !(window.contentView is NSHostingView<MainView>) {
+            window.contentView = NSHostingView(rootView: MainView(model: Shared.model))
+        }
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -40,7 +44,6 @@ enum MainWindow {
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.backgroundColor = NSColor(red: 0.035, green: 0.05, blue: 0.075, alpha: 1)
-        window.contentView = NSHostingView(rootView: MainView(model: Shared.model))
         window.center()
         window.delegate = observer
         return window
@@ -49,8 +52,16 @@ enum MainWindow {
     private final class CloseObserver: NSObject, NSWindowDelegate {
         func windowWillClose(_ notification: Notification) {
             // The Dock icon goes away, but connections keep running from the menu bar.
-            let screenOpen = MainActor.assumeIsolated { ScreenWindow.isVisible }
-            if !screenOpen { NSApp.setActivationPolicy(.accessory) }
+            let otherOpen = MainActor.assumeIsolated { ScreenWindow.isVisible || CameraWindow.isVisible }
+            if !otherOpen { NSApp.setActivationPolicy(.accessory) }
+            // Released after the window is gone, and made again by show().
+            let window = notification.object as? NSWindow
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let window, !window.isVisible else { return }
+                    window.contentView = nil
+                }
+            }
         }
     }
 }

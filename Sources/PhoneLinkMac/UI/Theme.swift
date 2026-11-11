@@ -129,10 +129,15 @@ enum Format {
         ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
     }
 
-    static func rate(_ bytesPerSecond: Int64) -> String {
+    /// Made once: a formatter per call showed up while the battery and transfer views redraw.
+    private static let rateFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         formatter.allowsNonnumericFormatting = false
-        return formatter.string(fromByteCount: bytesPerSecond) + "/s"
+        return formatter
+    }()
+
+    static func rate(_ bytesPerSecond: Int64) -> String {
+        rateFormatter.string(fromByteCount: bytesPerSecond) + "/s"
     }
 }

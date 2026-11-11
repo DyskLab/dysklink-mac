@@ -31,7 +31,10 @@ struct LogoGlyph: Shape {
 
     /// Menu bar icon. Its color follows the menu bar theme because it is a template image.
     /// The ring fills the icon here, since the empty part of the 24x24 box would make it look small.
-    static func menuBarImage() -> NSImage {
+    static func menuBarImage() -> NSImage { menuBarCache }
+
+    /// Drawn once; the menu bar label asks for it on every redraw.
+    private static let menuBarCache: NSImage = {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: true) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
@@ -42,5 +45,5 @@ struct LogoGlyph: Shape {
         }
         image.isTemplate = true
         return image
-    }
+    }()
 }

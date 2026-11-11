@@ -69,6 +69,13 @@ struct SmsThread: Identifiable, Equatable {
     let latest: SmsItem
 }
 
+/// Contacts under one letter, for the Contacts tab.
+struct ContactSection: Equatable, Identifiable {
+    let letter: String
+    let contacts: [ContactItem]
+    var id: String { letter }
+}
+
 struct PhoneSnapshot: Equatable {
     private static let maxNotifications = 100
     private static let maxMessages = 1000
@@ -76,8 +83,14 @@ struct PhoneSnapshot: Equatable {
     var isKnown = false
     var features: Set<String> = []
     var notifications: [NotificationItem] = []
-    var messages: [SmsItem] = []
-    var contacts: [ContactItem] = []
+    var messages: [SmsItem] = [] {
+        didSet { rebuildThreads() }
+    }
+    private(set) var contacts: [ContactItem] = []
+    /// Made when the data changes, not on every redraw: threads newest first, and contacts sorted under letters.
+    private(set) var threads: [SmsThread] = []
+    private(set) var sortedContacts: [ContactItem] = []
+    private(set) var contactSections: [ContactSection] = []
     var usage: UsageReport?
     var usageTime: Date?
     var lastCall: CallEvent?
@@ -118,8 +131,7 @@ struct PhoneSnapshot: Equatable {
     mutating func merge(_ items: [SmsItem]) {
         var byId = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
         for item in items { byId[item.id] = item }
-        messages = byId.values.sorted { $0.time > $1.time }
-        if messages.count > Self.maxMessages { messages.removeLast(messages.count - Self.maxMessages) }
+        messages = Array(byId.values.sorted { $0.time > $1.time }.prefix(Self.maxMessages))
     }
 
     mutating func setContacts(_ items: [ContactItem]) {
@@ -128,6 +140,12 @@ struct PhoneSnapshot: Equatable {
         for contact in items {
             for phone in contact.phones { names[Self.numberKey(phone)] = contact.name }
         }
+        sortedContacts = PhoneSearch.contacts(items, query: "")
+        let groups = Dictionary(grouping: sortedContacts, by: { PhoneSearch.section($0.name) })
+        contactSections = groups.keys.sorted { $0 == "#" ? false : $1 == "#" ? true : $0 < $1 }
+            .map { ContactSection(letter: $0, contacts: groups[$0] ?? []) }
+        // Thread names come from contacts.
+        rebuildThreads()
     }
 
     mutating func beginListing(_ path: String) {
@@ -157,9 +175,9 @@ struct PhoneSnapshot: Equatable {
 
     func name(for number: String) -> String { names[Self.numberKey(number)] ?? number }
 
-    var threads: [SmsThread] {
+    private mutating func rebuildThreads() {
         var seen = Set<Int64>()
-        return messages.compactMap { item in
+        threads = messages.compactMap { item in
             guard seen.insert(item.threadId).inserted else { return nil }
             return SmsThread(id: item.threadId, address: item.address, name: name(for: item.address), latest: item)
         }
@@ -273,9 +291,12 @@ enum DeviceInput {
     static func handle(_ event: InputEvent) {
         if TestEnv.isDryRun { return TestEnv.log("INPUT \(event.kind) \(event.key ?? event.text ?? "")") }
         switch event.kind {
-        case "move": move(dx: event.dx ?? 0, dy: event.dy ?? 0)
+        case "move", "scroll":
+            // Phone numbers are checked like the other Mac's, so a huge or broken one can't crash the conversion.
+            guard let dx = RemoteLimits.delta(event.dx.map(Double.init), limit: RemoteLimits.maxMove),
+                  let dy = RemoteLimits.delta(event.dy.map(Double.init), limit: RemoteLimits.maxMove) else { return }
+            if event.kind == "move" { move(dx: Float(dx), dy: Float(dy)) } else { scroll(dx: Float(dx), dy: Float(dy)) }
         case "click": click(right: event.button == "right")
-        case "scroll": scroll(dx: event.dx ?? 0, dy: event.dy ?? 0)
         case "text": type(event.text ?? "")
         case "key": press(event.key ?? "")
         case "shortcut": shortcut(event.key ?? "")
@@ -439,6 +460,11 @@ enum Shortcut {
 @MainActor
 final class ClipboardWatcher {
     var onChange: ((String) -> Void)?
+    /// A copied picture as PNG, for other computers. Phones only get text.
+    var onImage: ((Data) -> Void)?
+    /// Bigger pictures, such as a full-resolution photo, stay on this Mac.
+    nonisolated static let maxImageBytes = 24 * 1024 * 1024
+    private var lastImageHash: String?
 
     private let pasteboard: NSPasteboard
     private var changeCount: Int
@@ -471,16 +497,88 @@ final class ClipboardWatcher {
         TestEnv.log("CLIPBOARD_SET \(text)")
     }
 
+    /// Decoding, encoding, and hashing pictures runs here, so a large one doesn't stall the app.
+    private static let imageQueue = DispatchQueue(label: "dysklink.clipboard.image", qos: .userInitiated)
+    /// Bumped on each copy, so a picture still being encoded is dropped when something newer was copied.
+    private var imageGeneration = 0
+
+    /// Puts a picture from another computer on the clipboard, as PNG and TIFF so every app can paste it.
+    func setImage(_ png: Data) {
+        imageGeneration += 1
+        let generation = imageGeneration
+        Self.imageQueue.async { [weak self] in
+            let hash = Self.hash(png)
+            let tiff = NSBitmapImageRep(data: png)?.tiffRepresentation
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, generation == self.imageGeneration else { return }
+                    self.lastImageHash = hash
+                    self.pasteboard.declareTypes([.png, .tiff], owner: nil)
+                    self.pasteboard.setData(png, forType: .png)
+                    if let tiff { self.pasteboard.setData(tiff, forType: .tiff) }
+                    self.changeCount = self.pasteboard.changeCount
+                    TestEnv.log("CLIPBOARD_IMAGE_SET \(png.count)")
+                }
+            }
+        }
+    }
+
+    /// Reads a received picture from disk and puts it on the clipboard, then removes the file.
+    func setImage(contentsOf url: URL) {
+        Self.imageQueue.async { [weak self] in
+            let png = try? Data(contentsOf: url)
+            try? FileManager.default.removeItem(at: url)
+            guard let png else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.setImage(png) } }
+        }
+    }
+
     private func check() {
         guard pasteboard.changeCount != changeCount else { return }
         changeCount = pasteboard.changeCount
+        imageGeneration += 1
         let types = pasteboard.types ?? []
-        guard !types.contains(where: Self.excludedTypes.contains),
-              let text = pasteboard.string(forType: .string), !text.isEmpty,
-              text != lastText, text.count <= PhoneLinkProtocol.maxClipboardChars
+        guard !types.contains(where: Self.excludedTypes.contains) else { return }
+        if let text = pasteboard.string(forType: .string), !text.isEmpty {
+            // Counted in UTF-16 units, like the Kotlin side, so both agree on what fits.
+            guard text != lastText, text.utf16.count <= PhoneLinkProtocol.maxClipboardChars else { return }
+            lastText = text
+            onChange?(text)
+            return
+        }
+        // A copied file has its own icon as a picture; only real pictures are sent.
+        guard onImage != nil, !types.contains(.fileURL) else { return }
+        // Only the raw bytes are read here; converting and hashing happen off the main thread.
+        let raw: (data: Data, isPNG: Bool)
+        if let png = pasteboard.data(forType: .png) { raw = (png, true) }
+        else if let tiff = pasteboard.data(forType: .tiff) { raw = (tiff, false) }
         else { return }
-        lastText = text
-        onChange?(text)
+        let generation = imageGeneration
+        Self.imageQueue.async { [weak self] in
+            guard let png = raw.isPNG ? raw.data : Self.png(fromTIFF: raw.data), png.count <= Self.maxImageBytes else { return }
+            let hash = Self.hash(png)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, generation == self.imageGeneration, hash != self.lastImageHash else { return }
+                    self.lastImageHash = hash
+                    self.onImage?(png)
+                }
+            }
+        }
+    }
+
+    static func png(from board: NSPasteboard) -> Data? {
+        if let png = board.data(forType: .png) { return png }
+        guard let tiff = board.data(forType: .tiff) else { return nil }
+        return png(fromTIFF: tiff)
+    }
+
+    nonisolated static func png(fromTIFF tiff: Data) -> Data? {
+        NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+    }
+
+    nonisolated private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -595,17 +693,26 @@ enum FileNames {
 }
 
 /// Incoming files go to a temporary file and are moved only once the hash matches.
-final class IncomingFile {
+///
+/// The main thread owns `received` and `kind`; writing, hashing, and closing run on the file's own serial queue,
+/// so a large transfer doesn't stall the main thread.
+final class IncomingFile: @unchecked Sendable {
     let peerId: String
     let name: String
     let size: Int64
     let partURL: URL
     let folder: URL
-    let handle: FileHandle
+    /// Bytes accepted so far (main thread).
     var received: Int64 = 0
-    var hasher = SHA256()
     /// What the phone said the file is, such as "photo" or "scan".
     var kind: String?
+
+    // Owned by `queue`.
+    private let queue = DispatchQueue(label: "dysklink.file-in", qos: .utility)
+    private let handle: FileHandle
+    private var hasher = SHA256()
+    private var failed = false
+    private var aborted = false
 
     init(peerId: String, name: String, size: Int64, folder: URL) throws {
         self.peerId = peerId
@@ -620,9 +727,39 @@ final class IncomingFile {
         handle = try FileHandle(forWritingTo: partURL)
     }
 
+    /// Writes and hashes off the main thread. `failure` runs on the main queue if the disk refused the data.
+    func write(_ data: Data, failure: @escaping @MainActor () -> Void) {
+        queue.async { [self] in
+            guard !aborted, !failed else { return }
+            do {
+                try handle.write(contentsOf: data)
+                hasher.update(data: data)
+            } catch {
+                failed = true
+                DispatchQueue.main.async { MainActor.assumeIsolated { failure() } }
+            }
+        }
+    }
+
+    /// After every write: closes the file and hands the SHA-256 (nil if a write failed) to the main queue.
+    /// `sameAs`, when given, is also checked off the main thread: whether that file already has this content.
+    func finish(sameAs existing: URL? = nil, _ done: @escaping @MainActor (_ sha256: String?, _ isSame: Bool) -> Void) {
+        queue.async { [self] in
+            guard !aborted else { return }
+            let hash = failed ? nil : hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            let closed = (try? handle.close()) != nil
+            let same = hash.map { hash in existing.map { FileNames.sameFile($0, size: size, sha256: hash) } ?? false } ?? false
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(closed ? hash : nil, same) } }
+        }
+    }
+
     func abort() {
-        try? handle.close()
-        try? FileManager.default.removeItem(at: partURL)
+        queue.async { [self] in
+            guard !aborted else { return }
+            aborted = true
+            try? handle.close()
+            try? FileManager.default.removeItem(at: partURL)
+        }
     }
 }
 

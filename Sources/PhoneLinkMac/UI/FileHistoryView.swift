@@ -37,6 +37,7 @@ struct FileHistoryView: View {
 
     var body: some View {
         let records = model.history.filter(model.historyFilter.includes)
+        let counts = Self.counts(model.history)
         OptionalScroll(enabled: scrolls) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .bottom) {
@@ -50,7 +51,7 @@ struct FileHistoryView: View {
                         Button("Clear history") { model.clearHistory() }.buttonStyle(SecondaryButtonStyle(tint: Theme.coral))
                     }
                 }
-                filterTabs
+                filterTabs(counts)
                 if records.isEmpty {
                     Card {
                         Text(model.history.isEmpty ? "No files yet. Files you send or receive appear here." : "Nothing here.")
@@ -58,7 +59,7 @@ struct FileHistoryView: View {
                     }
                 } else {
                     Card(padding: 8) {
-                        VStack(spacing: 0) {
+                        LazyVStack(spacing: 0) {
                             ForEach(records) { record in
                                 row(record)
                                 if record.id != records.last?.id { Rectangle().fill(Theme.stroke).frame(height: 1) }
@@ -69,14 +70,23 @@ struct FileHistoryView: View {
             }
             .padding(.horizontal, 28).padding(.top, 10).padding(.bottom, 28)
         }
+        // Whether each file is still there is checked off the main thread when the page opens or the list changes,
+        // not on every redraw.
+        .task(id: model.history.map(\.id)) { await model.checkHistoryFiles() }
+    }
+
+    /// How many files each tab holds, counted in one pass.
+    private static func counts(_ history: [FileRecord]) -> [Filter: Int] {
+        let sent = history.reduce(0) { $0 + ($1.outgoing ? 1 : 0) }
+        return [.all: history.count, .sent: sent, .received: history.count - sent]
     }
 
     /// All, Received, and Sent, each with how many files it holds.
-    private var filterTabs: some View {
+    private func filterTabs(_ counts: [Filter: Int]) -> some View {
         HStack(spacing: 4) {
             ForEach(Filter.allCases) { filter in
                 let selected = model.historyFilter == filter
-                let count = model.history.filter(filter.includes).count
+                let count = counts[filter] ?? 0
                 Button {
                     withAnimation(.easeOut(duration: 0.18)) { model.historyFilter = filter }
                 } label: {
@@ -114,7 +124,7 @@ struct FileHistoryView: View {
     }
 
     private func row(_ record: FileRecord) -> some View {
-        let exists = record.url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        let exists = record.path != nil && !model.missingHistoryFiles.contains(record.id)
         return HStack(spacing: 12) {
             Image(systemName: record.outgoing ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
                 .font(.system(size: 20))

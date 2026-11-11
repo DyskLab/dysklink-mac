@@ -31,6 +31,17 @@ final class UsbBridge {
     /// Serials that already have the reverse port.
     @ObservationIgnored private var forwarded: Set<String> = []
     @ObservationIgnored private var lastListCheck = Date.distantPast
+    /// When adb last listed a phone. Polling is quick shortly after, and slow when no phone has been seen.
+    @ObservationIgnored private var lastDeviceSeen = Date.distantPast
+    static let fastInterval: TimeInterval = 4
+    static let slowInterval: TimeInterval = 30
+    /// How long after the last phone was seen polling stays quick.
+    static let recentWindow: TimeInterval = 120
+
+    /// Quick while a phone is plugged in or was a moment ago; otherwise every 30 seconds.
+    nonisolated static func interval(sinceDevice: TimeInterval) -> TimeInterval {
+        sinceDevice < recentWindow ? fastInterval : slowInterval
+    }
 
     static var downloadedAdb: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -69,17 +80,29 @@ final class UsbBridge {
         self.port = port
         adbPath = Self.findAdb()
         guard timer == nil else { return }
-        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
+        poll()
+    }
+
+    /// One timer at a time, set again after each check, with some slack so macOS can group wakeups.
+    private func scheduleNext() {
+        timer?.invalidate()
+        let interval = Self.interval(sinceDevice: Date().timeIntervalSince(lastDeviceSeen))
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
+        timer.tolerance = interval / 4
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        poll()
     }
 
     var readyDevices: [Device] { devices.filter { $0.state == "device" } }
     var waitingDevices: [Device] { devices.filter { $0.state == "unauthorized" } }
 
     private func poll() {
-        guard enabled, !busy, let adb = adbPath ?? Self.findAdb() else { return }
+        guard !busy else { return }
+        guard enabled, let adb = adbPath ?? Self.findAdb() else {
+            // Without adb, or turned off, it's checked again slowly; turning it on polls right away.
+            if enabled { scheduleNext() } else { timer?.invalidate(); timer = nil }
+            return
+        }
         adbPath = adb
         busy = true
         let port = port
@@ -106,10 +129,13 @@ final class UsbBridge {
             await MainActor.run {
                 if self.enabled {
                     for serial in forwardedNow.subtracting(known) { TestEnv.log("USB_FORWARD \(serial)") }
-                    self.devices = found
-                    self.forwarded = forwardedNow
+                    // Set only when it changed, so views showing devices don't redraw on every check.
+                    if self.devices != found { self.devices = found }
+                    if self.forwarded != forwardedNow { self.forwarded = forwardedNow }
+                    if !found.isEmpty { self.lastDeviceSeen = Date() }
                 }
                 self.busy = false
+                if self.enabled { self.scheduleNext() }
             }
         }
     }

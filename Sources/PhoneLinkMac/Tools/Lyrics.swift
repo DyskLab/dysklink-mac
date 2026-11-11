@@ -139,6 +139,9 @@ final class LyricsModel {
     }
     @ObservationIgnored private var key: String?
     @ObservationIgnored private var cache: [String: State] = [:]
+    /// Songs in the cache, least recently used first. Only the last few dozen are kept.
+    @ObservationIgnored private var cacheOrder: [String] = []
+    static let cacheLimit = 50
     @ObservationIgnored private let isInert: Bool
 
     init(isInert: Bool = false) {
@@ -154,12 +157,25 @@ final class LyricsModel {
         let key = "\(song.artist.lowercased())|\(song.title.lowercased())"
         guard key != self.key else { return }
         self.key = key
-        if let cached = cache[key] { state = cached; return }
+        if let cached = cache[key] {
+            touch(key)
+            state = cached
+            return
+        }
         state = .loading
         let result = await Self.fetch(artist: song.artist, title: song.title, duration: playing.duration)
         guard self.key == key else { return }
-        if result != .failed { cache[key] = result }
+        if result != .failed {
+            cache[key] = result
+            touch(key)
+        }
         state = result
+    }
+
+    private func touch(_ key: String) {
+        cacheOrder.removeAll { $0 == key }
+        cacheOrder.append(key)
+        while cacheOrder.count > Self.cacheLimit { cache[cacheOrder.removeFirst()] = nil }
     }
 
     #if DEBUG

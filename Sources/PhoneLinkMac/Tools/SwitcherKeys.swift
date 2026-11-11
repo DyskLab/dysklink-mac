@@ -33,6 +33,11 @@ enum SwitcherKeys {
         default: return Result(command: nil, swallows: true)
         }
     }
+
+    /// Letting go of Option chooses the window, like letting go of Command in Command + Tab.
+    static func releaseCommits(flags: CGEventFlags, isOpen: Bool) -> Bool {
+        isOpen && !flags.contains(.maskAlternate)
+    }
 }
 
 /// Catches Option + Tab before the app in front sees it. Needs Accessibility.
@@ -51,7 +56,8 @@ final class SwitcherTap: @unchecked Sendable {
         defer { lock.unlock() }
         self.handler = handler
         if tap != nil { return true }
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        // Modifier changes too, so letting go of Option is seen at once instead of polling for it.
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.flagsChanged.rawValue)
         guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask,
             callback: { _, type, event, _ in
@@ -103,6 +109,13 @@ final class SwitcherTap: @unchecked Sendable {
         lock.unlock()
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let port { CGEvent.tapEnable(tap: port, enable: true) }
+            return true
+        }
+        if type == .flagsChanged {
+            // Modifier keys always reach the apps; only the release is noted.
+            if SwitcherKeys.releaseCommits(flags: event.flags, isOpen: open), let handler {
+                DispatchQueue.main.async { MainActor.assumeIsolated { handler(.commit) } }
+            }
             return true
         }
         guard type == .keyDown else { return true }

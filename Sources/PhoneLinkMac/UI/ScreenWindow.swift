@@ -625,7 +625,7 @@ enum ScreenWindow {
             MainActor.assumeIsolated {
                 game.release()
                 if !closingFromModel { onUserClose?() }
-                if !MainWindow.isVisible { NSApp.setActivationPolicy(.accessory) }
+                if !MainWindow.isVisible && !CameraWindow.isVisible { NSApp.setActivationPolicy(.accessory) }
             }
         }
     }

@@ -4,7 +4,7 @@ import SwiftUI
 struct NotchView: View {
     let model: NotchModel
     let tools: ToolsModel
-    var phoneProvider: () -> [Peer] = { Shared.model.peers.filter { $0.isPaired && $0.isConnected && !$0.isMac } }
+    var phoneProvider: () -> [Peer] = { Shared.model.peers.filter { $0.isPaired && $0.isConnected && !$0.isComputer } }
     var transfersProvider: () -> [Transfer] = { Shared.model.transfers }
     var sendFile: (URL, String) -> Void = { Shared.model.sendFile($0, to: $1) }
     var alertsProvider: () -> [PhoneAlert] = { Shared.model.phoneAlerts }
@@ -70,12 +70,12 @@ struct NotchView: View {
                 Image(systemName: model.screenWatchers.isEmpty ? "headphones" : "eye.fill").foregroundStyle(Theme.coral)
                 Text(model.watchText).lineLimit(1).minimumScaleFactor(0.8)
                 if model.isFocusing {
-                    Text(model.focusText).monospacedDigit().foregroundStyle(Theme.violet)
+                    FocusClock(model: model).foregroundStyle(Theme.violet)
                 }
             } else if model.isFocusing {
                 Image(systemName: model.pomodoro.phase == .focus ? "timer" : "cup.and.saucer.fill")
                     .foregroundStyle(model.pomodoro.phase == .focus ? Theme.violet : Theme.mint)
-                Text(model.focusText).monospacedDigit()
+                FocusClock(model: model)
             }
         }
         .font(.system(size: 12, weight: .semibold))
@@ -155,7 +155,7 @@ struct NotchView: View {
         if model.page == .shelf {
             if model.hasShelfSwitch { shelfSwitch }
         } else if model.isShown(.music) {
-            Button { model.page = .music } label: { AudioBars(isPlaying: model.nowPlaying?.isPlaying == true) }
+            Button { model.page = .music } label: { AudioBars(isPlaying: model.nowPlaying?.isPlaying == true, isShown: model.isOpen) }
                 .buttonStyle(.plain)
                 .help("Music")
         }
@@ -244,7 +244,8 @@ struct NotchView: View {
     // MARK: Music
 
     private var music: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        // The song position only moves while the panel is open and something plays.
+        TimelineView(.animation(minimumInterval: 1, paused: !model.isOpen || model.nowPlaying?.isPlaying != true)) { context in
             let playing = model.nowPlaying
             HStack(spacing: 14) {
                 player(playing, at: context.date)
@@ -309,8 +310,14 @@ struct NotchView: View {
 
     private var focus: some View {
         let timer = model.pomodoro
-        let now = model.now
-        return HStack(alignment: .top, spacing: 16) {
+        // Redrawn every second only while it's on screen and running.
+        return TimelineView(.animation(minimumInterval: 1, paused: !model.isOpen || !timer.isRunning)) { context in
+            focusBody(timer, now: model.clockDate(timer.isRunning ? context.date : model.now))
+        }
+    }
+
+    private func focusBody(_ timer: Pomodoro, now: Date) -> some View {
+        HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(phaseText(timer)).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Color.white.opacity(0.6))
                     Text(NotchModel.clock(timer.remaining(at: now)))
@@ -609,12 +616,24 @@ private struct NotchBatteryRing: View {
     }
 }
 
-/// Bars that move while music plays and rest otherwise.
-private struct AudioBars: View {
-    let isPlaying: Bool
+/// The Pomodoro countdown under the closed notch. It ticks on its own, so the rest of the notch isn't redrawn each second.
+private struct FocusClock: View {
+    let model: NotchModel
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1, paused: !model.pomodoro.isRunning)) { context in
+            Text(model.focusText(at: context.date)).monospacedDigit()
+        }
+    }
+}
+
+/// Bars that move while music plays and rest otherwise. They hold still while the panel is closed.
+private struct AudioBars: View {
+    let isPlaying: Bool
+    var isShown = true
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !isPlaying || !isShown)) { context in
             let time = context.date.timeIntervalSinceReferenceDate
             HStack(alignment: .center, spacing: 2.5) {
                 ForEach(0..<5, id: \.self) { index in

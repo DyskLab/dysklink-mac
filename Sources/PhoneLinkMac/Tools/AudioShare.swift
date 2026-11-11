@@ -139,6 +139,8 @@ final class PhoneAudioPlayer {
     private var format: AVAudioFormat?
     private var channels = 2
     private var queued = 0
+    /// Bumped on every stop, so buffers finishing after a restart don't count against the new queue.
+    private var generation = 0
     private var started = false
     private(set) var played = 0
 
@@ -177,8 +179,12 @@ final class PhoneAudioPlayer {
         played += 1
         if TestEnv.isDryRun { return }
         queued += 1
+        let generation = generation
         node.scheduleBuffer(buffer) { [weak self] in
-            Task { @MainActor in self?.queued -= 1 }
+            Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                self.queued = max(0, self.queued - 1)
+            }
         }
         if !started, queued >= (limit == Self.tightQueued ? 2 : Self.startAfter) {
             started = true
@@ -191,6 +197,7 @@ final class PhoneAudioPlayer {
         if engine.isRunning { engine.stop() }
         if engine.attachedNodes.contains(node) { engine.detach(node) }
         format = nil
+        generation += 1
         queued = 0
         started = false
     }

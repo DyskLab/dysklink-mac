@@ -5,7 +5,8 @@ import ScreenCaptureKit
 @_silgen_name("_AXUIElementGetWindow")
 private func axWindowID(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-struct WindowItem: Identifiable {
+/// Made on a background queue and then only read. AX elements may be used from any thread.
+struct WindowItem: Identifiable, @unchecked Sendable {
     let id: CGWindowID
     let title: String
     let appName: String
@@ -17,16 +18,34 @@ struct WindowItem: Identifiable {
 
 /// Finds windows through Accessibility and draws them through ScreenCaptureKit.
 enum WindowCatalog {
-    private static func attribute<T>(_ element: AXUIElement, _ name: String, as type: T.Type = T.self) -> T? {
+    nonisolated private static func attribute<T>(_ element: AXUIElement, _ name: String, as type: T.Type = T.self) -> T? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value as? T
     }
 
-    static func windows(of app: NSRunningApplication) -> [WindowItem] {
-        let element = AXUIElementCreateApplication(app.processIdentifier)
+    /// What's needed of a running app to list its windows, read on the main thread.
+    struct AppRef: @unchecked Sendable {
+        let pid: pid_t
+        let name: String
+        let icon: NSImage?
+
+        @MainActor init(_ app: NSRunningApplication) {
+            pid = app.processIdentifier
+            name = app.localizedName ?? ""
+            icon = app.icon
+        }
+    }
+
+    @MainActor static func windows(of app: NSRunningApplication) -> [WindowItem] {
+        windows(of: AppRef(app))
+    }
+
+    /// Safe off the main thread. `timeout` caps how long an app that stopped responding can hold this up.
+    nonisolated static func windows(of app: AppRef, timeout: Float = 0.25) -> [WindowItem] {
+        let element = AXUIElementCreateApplication(app.pid)
         // An app that has stopped responding must not hold up the whole list.
-        AXUIElementSetMessagingTimeout(element, 0.25)
+        AXUIElementSetMessagingTimeout(element, timeout)
         guard let list: [AXUIElement] = attribute(element, kAXWindowsAttribute) else { return [] }
         return list.compactMap { window in
             let subrole: String? = attribute(window, kAXSubroleAttribute)
@@ -35,15 +54,36 @@ enum WindowCatalog {
             guard axWindowID(window, &id) == .success, id != 0 else { return nil }
             let title: String = attribute(window, kAXTitleAttribute) ?? ""
             let minimized: Bool = attribute(window, kAXMinimizedAttribute) ?? false
-            return WindowItem(id: id, title: title, appName: app.localizedName ?? "", pid: app.processIdentifier,
+            return WindowItem(id: id, title: title, appName: app.name, pid: app.pid,
                               icon: app.icon, isMinimized: minimized, element: window)
         }
     }
 
     /// Every window on the current Space, frontmost first. Minimized windows come last.
-    static func allWindows(limit: Int) -> [WindowItem] {
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
-        let all = apps.flatMap(windows)
+    @MainActor static func allWindows(limit: Int) -> [WindowItem] {
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(AppRef.init)
+        return sorted(apps.flatMap { windows(of: $0) }, limit: limit)
+    }
+
+    /// The same, with every app asked at once on background threads, each given only a short time to answer.
+    @MainActor static func allWindowsInBackground(limit: Int) async -> [WindowItem] {
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(AppRef.init)
+        return await withCheckedContinuation { (done: CheckedContinuation<[WindowItem], Never>) in
+            DispatchQueue.global(qos: .userInteractive).async {
+                var found = [[WindowItem]](repeating: [], count: apps.count)
+                let lock = NSLock()
+                DispatchQueue.concurrentPerform(iterations: apps.count) { index in
+                    let list = windows(of: apps[index], timeout: 0.15)
+                    lock.lock()
+                    found[index] = list
+                    lock.unlock()
+                }
+                done.resume(returning: sorted(found.flatMap { $0 }, limit: limit))
+            }
+        }
+    }
+
+    nonisolated private static func sorted(_ all: [WindowItem], limit: Int) -> [WindowItem] {
         let order = frontToBack()
         return Array(sortWindows(all.map { (item: $0, id: $0.id, isMinimized: $0.isMinimized) }, order: order).map(\.item).prefix(limit))
     }
@@ -59,7 +99,7 @@ enum WindowCatalog {
         }.map(\.element)
     }
 
-    private static func frontToBack() -> [CGWindowID] {
+    nonisolated private static func frontToBack() -> [CGWindowID] {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else { return [] }
         return info.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
@@ -87,23 +127,52 @@ enum WindowCatalog {
         }
     }
 
-    static func thumbnails(for ids: [CGWindowID], width: Int) async -> [CGWindowID: NSImage] {
-        guard CGPreflightScreenCaptureAccess(),
-              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        else { return [:] }
-        var images: [CGWindowID: NSImage] = [:]
-        for id in ids {
-            guard let window = content.windows.first(where: { $0.windowID == id }), window.frame.width > 0 else { continue }
-            let config = SCStreamConfiguration()
-            config.width = width
-            config.height = max(1, Int(CGFloat(width) * window.frame.height / window.frame.width))
-            config.showsCursor = false
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
-                images[id] = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    /// The window list from ScreenCaptureKit, reused for a few seconds: asking for it is slow, and hovering along
+    /// the Dock asks many times in a row.
+    private actor ShareableCache {
+        private var content: SCShareableContent?
+        private var fetched = Date.distantPast
+        static let lifetime: TimeInterval = 3
+
+        func get(needs ids: [CGWindowID]) async -> SCShareableContent? {
+            if let content, Date().timeIntervalSince(fetched) < Self.lifetime {
+                let known = Set(content.windows.map(\.windowID))
+                // A window opened since then isn't in it, so that needs a fresh list.
+                if ids.allSatisfy(known.contains) { return content }
             }
+            guard let fresh = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) else { return nil }
+            content = fresh
+            fetched = Date()
+            return fresh
         }
-        return images
+    }
+
+    private static let shareable = ShareableCache()
+
+    /// Pictures of the windows, taken at the same time. Stops early when the task is cancelled.
+    static func thumbnails(for ids: [CGWindowID], width: Int) async -> [CGWindowID: NSImage] {
+        guard !ids.isEmpty, CGPreflightScreenCaptureAccess(), let content = await shareable.get(needs: ids), !Task.isCancelled
+        else { return [:] }
+        let windows = ids.compactMap { id in content.windows.first { $0.windowID == id && $0.frame.width > 0 } }
+        return await withTaskGroup(of: (CGWindowID, NSImage?).self) { group in
+            for window in windows {
+                let config = SCStreamConfiguration()
+                config.width = width
+                config.height = max(1, Int(CGFloat(width) * window.frame.height / window.frame.width))
+                config.showsCursor = false
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                let id = window.windowID
+                group.addTask {
+                    guard !Task.isCancelled,
+                          let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                    else { return (id, nil) }
+                    return (id, NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)))
+                }
+            }
+            var images: [CGWindowID: NSImage] = [:]
+            for await (id, image) in group { if let image { images[id] = image } }
+            return images
+        }
     }
 
     /// The preview stays while the pointer is on the icon, on the panel, or crossing the gap between them.

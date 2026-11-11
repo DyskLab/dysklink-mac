@@ -238,6 +238,8 @@ struct LauncherItem: Identifiable {
     let title: String
     var subtitle: String = ""
     var icon: NSImage?
+    /// A file whose icon is shown, read only when the row is drawn.
+    var iconPath: String?
     var symbol: String = "magnifyingglass"
     /// Drawn large in place of an icon.
     var emoji: String?
@@ -273,7 +275,11 @@ enum Launcher {
     private static var resignObserver: NSObjectProtocol?
     private static let state = LauncherState()
     private static var apps: [URL] = []
+    /// The app rows, made once per app list rather than on every key.
+    private static var appRows: [LauncherItem] = []
+    private static var isFindingApps = false
     private static var windows: [WindowItem] = []
+    private static var windowTask: Task<Void, Never>?
     private static var fileQuery: NSMetadataQuery?
     private static var fileObserver: NSObjectProtocol?
     private static var fileWork: DispatchWorkItem?
@@ -286,8 +292,10 @@ enum Launcher {
         state.query = ""
         state.selection = 0
         state.files = []
-        if apps.isEmpty { apps = findApps() }
-        windows = DeviceInput.isTrusted ? WindowCatalog.allWindows(limit: 40) : []
+        // The first time the list is needed now; later it's checked again in the background on each open, so newly
+        // installed apps show up without slowing the panel.
+        if apps.isEmpty { setApps(findApps()) } else { refreshApps() }
+        windows = []
         refresh()
         let size = NSSize(width: 640, height: 452)
         let panel = LauncherPanel(contentRect: NSRect(origin: .zero, size: size),
@@ -312,6 +320,40 @@ enum Launcher {
         resignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { _ in
             MainActor.assumeIsolated { close() }
         }
+        // Windows are gathered once the panel is up, off the main thread.
+        windowTask?.cancel()
+        if DeviceInput.isTrusted {
+            windowTask = Task {
+                let found = await WindowCatalog.allWindowsInBackground(limit: 40)
+                guard !Task.isCancelled, self.panel != nil else { return }
+                windows = found
+                if !state.query.trimmingCharacters(in: .whitespaces).isEmpty { refresh() }
+            }
+        }
+    }
+
+    private static func setApps(_ list: [URL]) {
+        apps = list
+        appRows = list.map { url in
+            LauncherItem(id: url.path, kind: .app, title: url.deletingPathExtension().lastPathComponent,
+                         subtitle: url.deletingLastPathComponent().path, iconPath: url.path) {
+                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+            }
+        }
+    }
+
+    private static func refreshApps() {
+        guard !isFindingApps else { return }
+        isFindingApps = true
+        Task.detached(priority: .utility) {
+            let found = findApps()
+            await MainActor.run {
+                isFindingApps = false
+                guard found != apps else { return }
+                setApps(found)
+                if panel != nil { refresh() }
+            }
+        }
     }
 
     static func close() {
@@ -320,6 +362,8 @@ enum Launcher {
         if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
         resignObserver = nil
         stopFileSearch()
+        windowTask?.cancel()
+        windowTask = nil
         panel?.orderOut(nil)
         panel = nil
         windows = []
@@ -528,15 +572,7 @@ enum Launcher {
         return best.map { $0 - 30 }
     }
 
-    private static func appItems() -> [LauncherItem] {
-        apps.map { url in
-            let name = url.deletingPathExtension().lastPathComponent
-            return LauncherItem(id: url.path, kind: .app, title: name, subtitle: url.deletingLastPathComponent().path,
-                                icon: NSWorkspace.shared.icon(forFile: url.path)) {
-                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
-            }
-        }
-    }
+    private static func appItems() -> [LauncherItem] { appRows }
 
     private static func windowItems() -> [LauncherItem] {
         windows.map { window in
@@ -560,7 +596,7 @@ enum Launcher {
     }
 
     /// Applications folders, one level of subfolders deep, like Utilities.
-    private static func findApps() -> [URL] {
+    nonisolated private static func findApps() -> [URL] {
         let fm = FileManager.default
         let roots = ["/Applications", "/System/Applications", "/System/Applications/Utilities",
                      fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path]
@@ -625,7 +661,7 @@ enum Launcher {
                     let opensAsFolder = isFolder.boolValue && !NSWorkspace.shared.isFilePackage(atPath: path)
                     return LauncherItem(id: "file-\(path)", kind: opensAsFolder ? .folder : .file, title: url.lastPathComponent,
                                         subtitle: inside ? "Contains \"\(text)\" · \(folder)" : folder,
-                                        icon: NSWorkspace.shared.icon(forFile: path)) {
+                                        iconPath: path) {
                         if NSEvent.modifierFlags.contains(.command) {
                             NSWorkspace.shared.activateFileViewerSelecting([url])
                         } else {
@@ -645,6 +681,23 @@ enum Launcher {
         fileQuery = nil
         if let fileObserver { NotificationCenter.default.removeObserver(fileObserver) }
         fileObserver = nil
+    }
+}
+
+/// Icons for the rows on screen, read from disk once each.
+@MainActor
+enum LauncherIcons {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 300
+        return cache
+    }()
+
+    static func icon(_ path: String) -> NSImage {
+        if let image = cache.object(forKey: path as NSString) { return image }
+        let image = NSWorkspace.shared.icon(forFile: path)
+        cache.setObject(image, forKey: path as NSString)
+        return image
     }
 }
 
@@ -704,6 +757,8 @@ struct LauncherView: View {
                     Text(emoji).font(.system(size: 22))
                 } else if let icon = item.icon {
                     Image(nsImage: icon).resizable().frame(width: 26, height: 26)
+                } else if let path = item.iconPath {
+                    Image(nsImage: LauncherIcons.icon(path)).resizable().frame(width: 26, height: 26)
                 } else {
                     Image(systemName: item.symbol).font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(item.kind == .answer ? Theme.mint : Theme.textSecondary)

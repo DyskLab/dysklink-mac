@@ -51,6 +51,7 @@ final class PowerMonitor {
         _ = PowerKit.SMC.open()
         sample()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in MainActor.assumeIsolated { PowerMonitor.shared.sample() } }
+        timer?.tolerance = 0.3
     }
 
     func end() {

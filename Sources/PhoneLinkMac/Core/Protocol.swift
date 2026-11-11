@@ -15,7 +15,11 @@ enum PhoneLinkProtocol {
     static let maxScreenFrameBytes = 760 * 1024
     static let pairingTimeout: TimeInterval = 60
     static let maxClipboardChars = 256 * 1024
-    static let chunkBytes = 192 * 1024
+    /// Platforms that are computers; anything else in hello is a phone.
+    static let computers: Set<String> = ["macos", "windows", "linux"]
+    /// Raw bytes per `file.chunk`. Every receiver (Mac, Android, desktop) takes chunks of any size, so smaller
+    /// chunks keep less bulk data ahead of live messages on the connection.
+    static let chunkBytes = 64 * 1024
 }
 
 struct Hello: Codable, Equatable {
@@ -41,6 +45,8 @@ struct DeviceInfo: Codable, Equatable {
     var signalLevel: Int?
     var wifiLevel: Int?
     var inputTrusted: Bool?
+    /// From a Mac: other Macs may use their mouse and keyboard on it.
+    var remoteControl: Bool?
     /// From the Mac: Keep Awake is `active`, `idle`, or `unavailable` while the tool is turned off.
     var keepAwake: String?
     /// From the Mac: its network card's hardware address and the network's broadcast address, for Wake-on-LAN.
@@ -322,6 +328,8 @@ struct Envelope: Codable {
     var clips: [SyncedClip]?
     /// On the `terminal.*` messages.
     var terminal: TerminalMessage?
+    /// On the `remote.*` messages between Macs.
+    var remote: RemoteEvent?
 
     init(type: String, hello: Hello? = nil, info: DeviceInfo? = nil, text: String? = nil,
          file: FileMessage? = nil, media: String? = nil, input: InputEvent? = nil,
@@ -422,6 +430,11 @@ enum MessageType {
     static let ring = "ring"
     static let macAction = "mac.action"
     static let clipboardHistory = "clipboard.history"
+    /// Mouse and keyboard shared between Macs: the pointer crossed over, input, it went back, or control ended.
+    static let remoteEnter = "remote.enter"
+    static let remoteInput = "remote.input"
+    static let remoteLeave = "remote.leave"
+    static let remoteExit = "remote.exit"
     static let terminalOpen = "terminal.open"
     static let terminalOpened = "terminal.opened"
     static let terminalInput = "terminal.input"
@@ -464,3 +477,32 @@ enum Hex {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
+
+// Messages cross from the session queues to the main thread.
+extension Envelope: Sendable {}
+extension Hello: Sendable {}
+extension DeviceInfo: Sendable {}
+extension GalleryItem: Sendable {}
+extension DisplayChoice: Sendable {}
+extension MacCharge: Sendable {}
+extension FileMessage: Sendable {}
+extension InputEvent: Sendable {}
+extension CommandItem: Sendable {}
+extension NotificationItem: Sendable {}
+extension SmsItem: Sendable {}
+extension SmsSend: Sendable {}
+extension SmsResult: Sendable {}
+extension CallEvent: Sendable {}
+extension UsageApp: Sendable {}
+extension UsageReport: Sendable {}
+extension ContactItem: Sendable {}
+extension FsEntry: Sendable {}
+extension ScreenInfo: Sendable {}
+extension ControlEvent: Sendable {}
+extension NotchState: Sendable {}
+extension NotchState.Task: Sendable {}
+extension NotchState.Water: Sendable {}
+extension NotchState.Focus: Sendable {}
+extension NotchState.Music: Sendable {}
+extension NotchAction: Sendable {}
+extension SyncedClip: Sendable {}

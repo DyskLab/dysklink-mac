@@ -52,22 +52,35 @@ private enum AVService {
         return unsafeBitCast(pointer, to: type)
     }
 
-    static func externalServices() -> [CFTypeRef] {
+    static func externalServices() -> [CFTypeRef] { externalServicesWithIdentity().map(\.service) }
+
+    /// Each external monitor's DDC service with the monitor it belongs to, as far as the registry tells.
+    /// A service follows its framebuffer in the registry, so the framebuffer seen last holds its monitor's EDID facts.
+    static func externalServicesWithIdentity() -> [(service: CFTypeRef, identity: MonitorIdentity)] {
         guard let create else { return [] }
         var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("DCPAVServiceProxy"), &iterator) == KERN_SUCCESS
+        let root = IORegistryGetRootEntry(kIOMainPortDefault)
+        guard IORegistryEntryCreateIterator(root, kIOServicePlane, IOOptionBits(kIORegistryIterateRecursively), &iterator) == KERN_SUCCESS
         else { return [] }
         defer { IOObjectRelease(iterator) }
-        var services: [CFTypeRef] = []
+        var found: [(service: CFTypeRef, identity: MonitorIdentity)] = []
+        var lastFramebuffer = MonitorIdentity()
+        func property(_ entry: io_registry_entry_t, _ key: String) -> Any? {
+            IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+        }
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             defer { IOObjectRelease(entry) }
-            let location = IORegistryEntryCreateCFProperty(entry, "Location" as CFString, kCFAllocatorDefault, 0)?
-                .takeRetainedValue() as? String
-            if location == "External", let service = create(kCFAllocatorDefault, entry)?.takeRetainedValue() {
-                services.append(service)
+            if IOObjectConformsTo(entry, "IOMobileFramebufferShim") != 0 {
+                let attributes = (property(entry, "DisplayAttributes") as? [String: Any])?["ProductAttributes"] as? [String: Any]
+                lastFramebuffer = MonitorIdentity(attributes: attributes)
+            } else if IOObjectConformsTo(entry, "DCPAVServiceProxy") != 0 {
+                guard property(entry, "Location") as? String == "External",
+                      let service = create(kCFAllocatorDefault, entry)?.takeRetainedValue() else { continue }
+                found.append((service, lastFramebuffer))
+                lastFramebuffer = MonitorIdentity()
             }
         }
-        return services
+        return found
     }
 
     static func read(_ service: CFTypeRef, code: UInt8) -> (current: Int, maximum: Int)? {
@@ -93,6 +106,67 @@ private enum AVService {
         guard let write else { return false }
         var packet = DDC.writePacket(code: code, value: value)
         return write(service, 0x37, 0x51, &packet, UInt32(packet.count)) == kIOReturnSuccess
+    }
+}
+
+/// What the registry says about the monitor behind a DDC service: its EDID vendor, product and serial numbers.
+struct MonitorIdentity: Equatable, Sendable {
+    var vendor: UInt32?
+    var product: UInt32?
+    var serial: UInt32?
+
+    init(vendor: UInt32? = nil, product: UInt32? = nil, serial: UInt32? = nil) {
+        self.vendor = vendor
+        self.product = product
+        self.serial = serial
+    }
+
+    init(attributes: [String: Any]?) {
+        func number(_ key: String) -> UInt32? {
+            guard let value = (attributes?[key] as? NSNumber)?.uint64Value, value <= UInt64(UInt32.max) else { return nil }
+            return UInt32(value)
+        }
+        vendor = number("LegacyManufacturerID") ?? (attributes?["ManufacturerID"] as? String).flatMap(Self.eisaVendor)
+        product = number("ProductID")
+        serial = number("SerialNumber")
+    }
+
+    /// "GSM" → 0x1E6D, the number CoreGraphics gives as the vendor.
+    static func eisaVendor(_ letters: String) -> UInt32? {
+        let values = letters.uppercased().unicodeScalars.map { Int($0.value) - 64 }
+        guard values.count == 3, values.allSatisfy({ (1...26).contains($0) }) else { return nil }
+        return UInt32(values[0] << 10 | values[1] << 5 | values[2])
+    }
+}
+
+/// Pairs screens with DDC services. Pure, so it can be tested.
+enum MonitorMatch {
+    /// Indices into `services` for each screen that could be told apart. With one monitor and one service they go
+    /// together. Otherwise a pair needs the same vendor and product, and the serial too when both know it. Screens
+    /// left out can't be told apart and aren't guessed.
+    static func assign(screens: [(id: CGDirectDisplayID, identity: MonitorIdentity)], services: [MonitorIdentity]) -> [CGDirectDisplayID: Int] {
+        if screens.count == 1, services.count == 1 { return [screens[0].id: 0] }
+        func candidates(_ screen: MonitorIdentity) -> [Int] {
+            let same = services.indices.filter { index in
+                let service = services[index]
+                guard let vendor = service.vendor, let product = service.product,
+                      vendor == screen.vendor, product == screen.product else { return false }
+                if let a = service.serial, a != 0, let b = screen.serial, b != 0 { return a == b }
+                return true
+            }
+            // A serial that matches exactly wins over services that don't know theirs.
+            let exact = same.filter { services[$0].serial != nil && services[$0].serial != 0 && services[$0].serial == screen.serial }
+            return exact.isEmpty ? same : exact
+        }
+        var result: [CGDirectDisplayID: Int] = [:]
+        let options = screens.map { (id: $0.id, choices: candidates($0.identity)) }
+        for option in options where option.choices.count == 1 {
+            let index = option.choices[0]
+            // Two screens pointing at the one service can't both be right.
+            guard options.filter({ $0.choices == [index] }).count == 1 else { continue }
+            result[option.id] = index
+        }
+        return result
     }
 }
 
@@ -210,6 +284,8 @@ final class DisplayControl {
     private(set) var outputVolume: Double?
     private(set) var isReading = false
     private(set) var needsAccessibility = false
+    /// Set when several monitors couldn't be told apart, so they're dimmed instead of being sent DDC changes.
+    private(set) var matchProblem: String?
 
     var linksScreens: Bool { didSet { defaults.set(linksScreens, forKey: "display.link") } }
     var goesDarker: Bool {
@@ -232,6 +308,9 @@ final class DisplayControl {
     @ObservationIgnored private var pictureLevels: [CGDirectDisplayID: Double] = [:]
     @ObservationIgnored private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
     @ObservationIgnored private let queue = DispatchQueue(label: "id.phonelink.ddc", qos: .userInitiated)
+    /// A refresh asked for while one is reading runs again when it finishes.
+    @ObservationIgnored private var refreshPending = false
+    @ObservationIgnored private var refreshForcePending = false
 
     private var curve: BrightnessCurve { goesDarker ? .extended : .normal }
 
@@ -245,8 +324,9 @@ final class DisplayControl {
     func start() {
         guard observers.isEmpty else { return }
         func watch(_ center: NotificationCenter, _ name: Notification.Name) {
+            // After waking or a display change, macOS may have reset the picture dimming, so it's applied again.
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+                MainActor.assumeIsolated { self?.refresh(force: true) }
             }
             observers.append((center: center, token: token))
         }
@@ -297,8 +377,13 @@ final class DisplayControl {
         refresh()
     }
 
-    func refresh() {
-        guard !isReading else { return }
+    /// `force` applies the picture dimming again even where it looks unchanged.
+    func refresh(force: Bool = false) {
+        guard !isReading else {
+            refreshPending = true
+            refreshForcePending = refreshForcePending || force
+            return
+        }
         isReading = true
         refreshOutput()
         let curve = curve
@@ -309,12 +394,16 @@ final class DisplayControl {
         }
         queue.async {
             // Monitors answer slowly, so this stays off the main thread.
-            let services = AVService.externalServices()
-            let externalCount = screens.filter { CGDisplayIsBuiltin($0.id) == 0 }.count
+            let found = AVService.externalServicesWithIdentity()
+            let externals = screens.filter { CGDisplayIsBuiltin($0.id) == 0 }.map {
+                (id: $0.id, identity: MonitorIdentity(vendor: CGDisplayVendorNumber($0.id), product: CGDisplayModelNumber($0.id),
+                                                       serial: CGDisplaySerialNumber($0.id)))
+            }
+            let assigned = MonitorMatch.assign(screens: externals, services: found.map(\.identity))
+            let unmatched = found.isEmpty ? 0 : externals.filter { assigned[$0.id] == nil }.count
             var items: [DisplayItem] = []
             var mapped: [CGDirectDisplayID: CFTypeRef] = [:]
             var maximums: [String: Int] = [:]
-            var nextService = 0
             /// The saved position only counts if it's below the normal minimum and the screen is still at its minimum.
             func position(backlight: Double, saved: Double?) -> Double {
                 if backlight == 0, let saved, saved < curve.extraRange { return saved }
@@ -327,9 +416,8 @@ final class DisplayControl {
                                              brightness: position(backlight: backlight, saved: screen.saved)), at: 0)
                     continue
                 }
-                // Several monitors may not be in the same order here, so each one is checked by reading it.
-                let service = nextService < services.count && externalCount <= services.count ? services[nextService] : nil
-                nextService += 1
+                // Matched by the monitor's EDID facts, never by order: a wrong guess would change the other monitor.
+                let service = assigned[screen.id].map { found[$0].service }
                 let bright = service.flatMap { AVService.read($0, code: DDC.brightness) }
                 if let service, !screen.dimOnly {
                     mapped[screen.id] = service
@@ -353,7 +441,20 @@ final class DisplayControl {
                     self.services = mapped
                     self.maximums = maximums
                     self.isReading = false
+                    if unmatched > 0 { log.info("\(unmatched) monitors couldn't be matched to a DDC service") }
+                    self.matchProblem = unmatched > 0
+                        ? "DyskLink couldn't tell \(unmatched == 1 ? "one monitor" : "\(unmatched) monitors") apart from the others, so \(unmatched == 1 ? "it's" : "they're") dimmed instead of changing the monitor's own brightness."
+                        : nil
+                    if self.refreshPending {
+                        // Something changed while reading: read again with what's there now.
+                        let force = force || self.refreshForcePending
+                        self.refreshPending = false
+                        self.refreshForcePending = false
+                        self.refresh(force: force)
+                        return
+                    }
                     guard !self.observers.isEmpty else { return }
+                    if force { self.pictureLevels = [:] }
                     self.displays = items
                     for item in items { self.applyPicture(of: item) }
                 }

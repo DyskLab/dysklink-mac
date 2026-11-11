@@ -179,6 +179,8 @@ final class MacCareModel {
     var chosenApp: InstalledApp?
     var leftovers: [Uninstaller.Leftover] = []
     var leftoverSelected: Set<String> = []
+    /// Set when another copy of the chosen app shares its bundle ID, so the ID-matched files may be that copy's too.
+    var leftoverWarning: String?
 
     var appRoots: [URL] { [URL(fileURLWithPath: "/Applications"), home.appendingPathComponent("Applications")] }
 
@@ -212,14 +214,24 @@ final class MacCareModel {
         chosenApp = app
         leftovers = []
         leftoverSelected = []
+        leftoverWarning = nil
         guard let app else { return }
         let home = home
+        let listed = apps.filter { $0.bundleId == app.bundleId && $0.id != app.id }.map(\.url)
         Task.detached(priority: .userInitiated) {
             let found = Uninstaller.leftovers(for: app, home: home)
+            let others = Uninstaller.otherCopies(of: app, listed: listed)
             await MainActor.run {
                 guard self.chosenApp?.id == app.id else { return }
                 self.leftovers = found
-                self.leftoverSelected = Set(found.filter(\.byId).map(\.id))
+                if others.isEmpty {
+                    self.leftoverSelected = Set(found.filter(\.byId).map(\.id))
+                } else {
+                    // The files carry the ID, not the copy: they may belong to the other one.
+                    self.leftoverSelected = []
+                    let places = others.prefix(3).map { MacCare.shortPath($0, home: home) }.joined(separator: ", ")
+                    self.leftoverWarning = "Another copy of this app is installed (\(places)). It shares these files, so none are ticked. Tick only what you're sure the other copy doesn't need."
+                }
             }
         }
     }

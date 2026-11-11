@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 /// The phone's photos and videos, newest first. Click opens one; it's copied from the phone only then.
@@ -64,7 +65,7 @@ private struct GalleryCell: View {
         Color.white.opacity(0.04)
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                if let image = GalleryThumbs.image(item, peerId: peerId) {
+                if let image = GalleryThumbs.slot(item, peerId: peerId).image {
                     Image(nsImage: image).resizable().scaledToFill()
                 } else {
                     Image(systemName: item.isVideo ? "video" : "photo").font(.system(size: 22)).foregroundStyle(Theme.textFaint)
@@ -92,16 +93,55 @@ private struct GalleryCell: View {
     }
 }
 
-/// Decoded thumbnails, so scrolling doesn't decode them again.
+/// One thumbnail, filled in once it's decoded. Each cell watches only its own.
+@MainActor
+@Observable
+final class ThumbSlot {
+    var image: NSImage?
+    @ObservationIgnored var started = false
+}
+
+/// Decoded thumbnails, so scrolling doesn't decode them again. Decoding runs off the main thread, at about twice
+/// the largest cell size, and the cache has a limit.
 @MainActor
 enum GalleryThumbs {
-    private static let cache = NSCache<NSString, NSImage>()
+    /// Pixels on the longer side: cells are at most 160 points, shown on Retina displays.
+    nonisolated static let maxPixels = 320
+    private static let cache: NSCache<NSString, ThumbSlot> = {
+        let cache = NSCache<NSString, ThumbSlot>()
+        cache.countLimit = 600
+        cache.totalCostLimit = 96 * 1024 * 1024
+        return cache
+    }()
 
-    static func image(_ item: GalleryItem, peerId: String) -> NSImage? {
+    /// The slot for this item, decoding its thumbnail the first time.
+    static func slot(_ item: GalleryItem, peerId: String) -> ThumbSlot {
         let key = "\(peerId)/\(item.id)" as NSString
-        if let image = cache.object(forKey: key) { return image }
-        guard let thumb = item.thumb, let data = Data(base64Encoded: thumb), let image = NSImage(data: data) else { return nil }
-        cache.setObject(image, forKey: key)
-        return image
+        let slot = cache.object(forKey: key) ?? ThumbSlot()
+        guard !slot.started else { return slot }
+        slot.started = true
+        cache.setObject(slot, forKey: key, cost: 1024)
+        guard let thumb = item.thumb else { return slot }
+        Task {
+            let decoded = await Task.detached(priority: .utility) { () -> CGImage? in
+                guard let data = Data(base64Encoded: thumb) else { return nil }
+                return decode(data, maxPixels: maxPixels)
+            }.value
+            guard let decoded else { return }
+            slot.image = NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
+            cache.setObject(slot, forKey: key, cost: decoded.bytesPerRow * decoded.height)
+        }
+        return slot
+    }
+
+    nonisolated static func decode(_ data: Data, maxPixels: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }

@@ -138,9 +138,12 @@ final class ToolsModel {
         if isLayoutOn { layout.start() } else { layout.stop() }
     }
 
-    /// Mouse settings outlive the app unless they are put back.
+    /// Mouse settings outlive the app unless they are put back. Edits waiting to be saved are written now.
     func shutDown() {
         mouse.stop()
+        guard !isInert else { return }
+        clipboard.flush()
+        notch.model.note.flush()
     }
 
     private func applyDisplays() {

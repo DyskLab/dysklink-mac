@@ -119,10 +119,11 @@ final class KeepAwake {
 
     var remainingText: String {
         guard let endsAt else { return "Until you stop it" }
-        let seconds = max(0, Int(endsAt.timeIntervalSince(now)))
-        let time = seconds >= 3600
-            ? String(format: "%d h %02d min", seconds / 3600, seconds % 3600 / 60)
-            : String(format: "%d:%02d", seconds / 60, seconds % 60)
+        // Checked every 20 seconds, so it counts in whole minutes, rounded up.
+        let minutes = Int((max(0, endsAt.timeIntervalSince(now)) / 60).rounded(.up))
+        let time = minutes >= 60
+            ? String(format: "%d h %02d min", minutes / 60, minutes % 60)
+            : "\(minutes) min"
         return time + " left"
     }
 
@@ -133,9 +134,10 @@ final class KeepAwake {
         let length = sessionMinutes
         endsAt = length > 0 ? Date().addingTimeInterval(TimeInterval(length * 60)) : nil
         if timer == nil {
-            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: Self.checkInterval, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.evaluate() }
             }
+            timer.tolerance = 3
             RunLoop.main.add(timer, forMode: .common)
             self.timer = timer
         }
@@ -159,8 +161,17 @@ final class KeepAwake {
         self.note = note
     }
 
+    /// How often the time, idle input, and battery are checked. The last check lands on the end time.
+    static let checkInterval: TimeInterval = 20
+
     private func evaluate() {
         guard isActive else { return }
+        defer {
+            // So a session ends on time rather than up to one interval late.
+            if isActive, let endsAt, let timer, endsAt.timeIntervalSinceNow < Self.checkInterval {
+                timer.fireDate = max(endsAt, Date().addingTimeInterval(0.5))
+            }
+        }
         now = Date()
         idleSecondsNow = Self.idleSeconds
         let decision = AwakeDecision.decide(

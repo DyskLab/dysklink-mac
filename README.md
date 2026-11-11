@@ -73,10 +73,14 @@ Accessibility, Screen Recording, and notifications again, and turn **Open at log
 - **Quick actions:** the phone's Quick Settings tiles and widget can send the clipboard, lock the Mac, and start or
   stop Keep Awake.
 - **File history:** every file sent or received with any device, under **File history** in the sidebar.
-- **Other Macs:** turn on **Advanced > Other Macs** on two or more Macs on the same network, pair them with the
-  6-digit code, and text you copy on one can be pasted on the others. When they connect, the newest 500 text copies
-  in Clipboard History are merged too. Files can be sent between them, and each can ring the other. A paired Mac
-  can't control the mouse, keyboard, or commands. Everything goes straight between the Macs, encrypted.
+- **Other computers:** turn on **Advanced > Other computers** on two or more Macs on the same network, pair them with
+  the 6-digit code, and text and pictures you copy on one can be pasted on the others. When they connect, the newest
+  500 text copies in Clipboard History are merged too. Files can be sent between them, and each can ring the other.
+  Everything goes straight between the Macs, encrypted. A paired computer can't run commands.
+- **One mouse and keyboard:** under **Mouse and keyboard** in Other computers, choose which side of this Mac another
+  Mac sits on, and turn on **Let paired Macs use their mouse and keyboard here** on that Mac (off by default). Push the
+  pointer past that edge to use the other Mac, and back to come home; Control-Option-Command brings it home at once.
+  Both Macs need Accessibility. Copy and paste works across through the shared clipboard.
 
 Phone data, screen, and control are off until you turn them on from the phone. The Mac keeps phone data in memory
 only. It's cleared when a feature is turned off or the devices unpair. Contacts reach the disk only if you press

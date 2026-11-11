@@ -50,7 +50,7 @@ struct MenuBarView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var connectedPhones: [Peer] { model.peers.filter { $0.isPaired && $0.isConnected && !$0.isMac } }
+    private var connectedPhones: [Peer] { model.peers.filter { $0.isPaired && $0.isConnected && !$0.isComputer } }
     private var recentCopies: [ClipEntry] { Array(tools.clipboard.entries.filter { $0.text?.isEmpty == false }.prefix(3)) }
 
     /// Parts with nothing to show are left out, so the menu has no empty sections.
@@ -149,7 +149,7 @@ struct MenuBarView: View {
             }
             ForEach(paired) { peer in
                 HStack(spacing: 9) {
-                    Image(systemName: peer.isMac ? "laptopcomputer" : "iphone.gen3")
+                    Image(systemName: peer.isComputer ? "laptopcomputer" : "iphone.gen3")
                         .foregroundStyle(peer.isConnected ? Theme.mint : Theme.textFaint)
                     Text(peer.name).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1)
                     Spacer()
@@ -256,11 +256,12 @@ struct MenuBarView: View {
 
     private var pomodoro: some View {
         let notch = tools.notch.model
-        return TimelineView(.periodic(from: .now, by: 1)) { _ in
+        // Ticks only while a timer runs.
+        return TimelineView(.animation(minimumInterval: 1, paused: !notch.isFocusing)) { context in
             HStack(spacing: 8) {
                 Image(systemName: "timer").foregroundStyle(notch.isFocusing ? Theme.coral : Theme.textFaint)
                 Text("Pomodoro").font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary)
-                Text(notch.focusText).font(.system(size: 12.5, weight: .bold).monospacedDigit()).foregroundStyle(Theme.textSecondary)
+                Text(notch.focusText(at: context.date)).font(.system(size: 12.5, weight: .bold).monospacedDigit()).foregroundStyle(Theme.textSecondary)
                 Spacer()
                 Button(notch.isFocusing ? "Pause" : "Start") { notch.togglePomodoro() }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
@@ -326,8 +327,73 @@ struct MenuBatterySection: View {
                 Text("Reading the battery…").font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
             }
         }
-        .onAppear { power.begin() }
-        .onDisappear { power.end() }
+        // The menu's window stays alive while it's closed, so onAppear and onDisappear don't follow it.
+        // Sampling follows the window being on screen instead.
+        .background(WindowVisibility { visible in
+            if visible { power.begin() } else { power.end() }
+        })
+    }
+}
+
+/// Tells when the window holding this view comes on screen and goes away: ordered in or out, or fully covered.
+/// Each "true" is followed by one "false", also when the view leaves the window.
+struct WindowVisibility: NSViewRepresentable {
+    let changed: @MainActor (Bool) -> Void
+
+    func makeNSView(context: Context) -> WatchView { WatchView(changed: changed) }
+    func updateNSView(_ view: WatchView, context: Context) { view.changed = changed }
+    static func dismantleNSView(_ view: WatchView, coordinator: ()) { view.set(false) }
+
+    final class WatchView: NSView {
+        var changed: @MainActor (Bool) -> Void
+        private var observers: [NSObjectProtocol] = []
+        private var isVisible = false
+
+        init(changed: @escaping @MainActor (Bool) -> Void) {
+            self.changed = changed
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard let window else { return set(false) }
+            let names: [Notification.Name] = [NSWindow.didChangeOcclusionStateNotification, NSWindow.didBecomeKeyNotification,
+                                              NSWindow.didResignKeyNotification, NSWindow.willCloseNotification,
+                                              NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification]
+            for name in names {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] note in
+                    MainActor.assumeIsolated {
+                        self?.check(closing: note.name == NSWindow.willCloseNotification)
+                        // A menu window is ordered out just after it loses focus, so it's looked at again then.
+                        if note.name == NSWindow.didResignKeyNotification {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                                MainActor.assumeIsolated { self?.check(closing: false) }
+                            }
+                        }
+                    }
+                })
+            }
+            check(closing: false)
+        }
+
+        private func check(closing: Bool) {
+            guard let window, !closing else { return set(false) }
+            set(window.isVisible && window.occlusionState.contains(.visible))
+        }
+
+        func set(_ visible: Bool) {
+            guard visible != isVisible else { return }
+            isVisible = visible
+            changed(visible)
+        }
+
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+        }
     }
 }
 

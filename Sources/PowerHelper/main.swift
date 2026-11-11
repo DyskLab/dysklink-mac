@@ -9,14 +9,36 @@ import PowerKit
 /// Below this the charger always comes back, whatever DyskLink asked for.
 let guardLowPercent = 10
 
+let dyskLinkBundleId = "id.dysklink.mac"
+
+/// True when a running process is exactly DyskLink's executable: `<something>.app/Contents/MacOS/DyskLink` inside a
+/// bundle whose Info.plist names DyskLink's bundle ID and executable. A process that merely has the words in its
+/// arguments doesn't count. When processes can't be listed at all, the charger is put back, which is the safe side.
 func isDyskLinkRunning() -> Bool {
-    let pgrep = Process()
-    pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-    pgrep.arguments = ["-f", "DyskLink.app/Contents/MacOS/DyskLink"]
-    pgrep.standardOutput = FileHandle.nullDevice
-    guard (try? pgrep.run()) != nil else { return true }
-    pgrep.waitUntilExit()
-    return pgrep.terminationStatus == 0
+    let count = proc_listallpids(nil, 0)
+    guard count > 0 else { return false }
+    var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+    let filled = pids.withUnsafeMutableBufferPointer { buffer in
+        proc_listallpids(buffer.baseAddress, Int32(buffer.count * MemoryLayout<pid_t>.size))
+    }
+    guard filled > 0 else { return false }
+    var checked = Set<String>()
+    for pid in pids.prefix(Int(filled)) where pid > 0 {
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { continue }
+        let path = String(cString: buffer)
+        guard path.hasSuffix(".app/Contents/MacOS/DyskLink"), checked.insert(path).inserted else { continue }
+        if isDyskLinkExecutable(path) { return true }
+    }
+    return false
+}
+
+func isDyskLinkExecutable(_ path: String) -> Bool {
+    let executable = URL(fileURLWithPath: path)
+    let contents = executable.deletingLastPathComponent().deletingLastPathComponent()
+    guard contents.lastPathComponent == "Contents", executable.deletingLastPathComponent().lastPathComponent == "MacOS",
+          let info = NSDictionary(contentsOf: contents.appendingPathComponent("Info.plist")) as? [String: Any] else { return false }
+    return info["CFBundleIdentifier"] as? String == dyskLinkBundleId && info["CFBundleExecutable"] as? String == executable.lastPathComponent
 }
 
 func usage() -> Never {

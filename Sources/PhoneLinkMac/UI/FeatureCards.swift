@@ -19,7 +19,7 @@ struct FeatureCards: View {
                 if !model.isInputTrusted { accessibilityCard }
                 clipboardCard
                 codesCard
-                if !peer.isMac { autoLockCard }
+                if !peer.isComputer { autoLockCard }
                 commandsCard
                 terminalCard
                 screenShareCard
