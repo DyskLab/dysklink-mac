@@ -48,6 +48,7 @@ enum ToolsSelfTest {
         testMenuBarLayout()
         testGameKeys()
         testGameKeysMore()
+        testGameKeysTiming()
         testChargePolicy()
         testPlayerDetails()
         testPowerSettings()
@@ -404,12 +405,14 @@ enum ToolsSelfTest {
         let look = GameKey(kind: .look, label: "Look", x: 0.7, y: 0.5, radius: 0.1)
         let fire = GameKey(kind: .fire, label: "Click", x: 0.9, y: 0.8)
         var engine = GameKeyEngine(keys: [look, fire], aspect: 0.5)
-        let begin = engine.lookBegin()
+        let begin = engine.lookBegin(now: 0)
         check("aiming puts the look finger in the middle", begin.count == 1 && begin[0].kind == "tdown" && begin[0].key == "9")
-        let small = engine.look(dx: 0.05, dy: 0)
+        let small = engine.look(dx: 0.05, dy: 0, now: 30)
         check("a small move drags the finger", small.count == 1 && small[0].kind == "tmove" && abs(Double(small[0].x ?? 0) - 0.75) < 0.001)
-        let far = engine.look(dx: 0.2, dy: 0)
-        check("at the edge the finger lifts and starts again", far.map(\.kind) == ["tup", "tdown", "tmove"] && abs(Double(far[2].x ?? 0) - 0.9) < 0.001)
+        let far = engine.look(dx: 0.2, dy: 0, now: 40)
+        let farMove = engine.tick(now: 60)
+        check("at the edge the finger lifts and starts again", far.map(\.kind) == ["tup", "tdown"]
+            && farMove.map(\.kind) == ["tmove"] && abs(Double(farMove[0].x ?? 0) - 0.9) < 0.001)
         let shot = engine.fire(true)
         check("clicking presses the click spot", shot.count == 1 && shot[0].key == "8" && shot[0].kind == "tdown")
         check("a second press does nothing", engine.fire(true).isEmpty)
@@ -629,14 +632,15 @@ enum ToolsSelfTest {
         let tap = engine.keyDown(49)
         check("game tap key goes down", tap.count == 1 && tap[0].kind == "tdown" && tap[0].key == "1" && tap[0].x == 0.9)
         check("game key repeat ignored", engine.keyDown(49).isEmpty)
-        let w = engine.keyDown(GameKeyEngine.up)
-        check("joystick presses at center then moves up", w.count == 2 && w[0].kind == "tdown" && w[0].key == "0"
-            && w[0].y == Float(0.7) && w[1].kind == "tmove" && abs((w[1].y ?? 0) - 0.5) < 0.0001)
-        let d = engine.keyDown(GameKeyEngine.right)
+        let w = engine.keyDown(GameKeyEngine.up, now: 100)
+        let early = engine.tick(now: 110), wMove = engine.tick(now: 120)
+        check("joystick presses at center alone, then moves up a tick later", w.count == 1 && w[0].kind == "tdown" && w[0].key == "0"
+            && w[0].y == Float(0.7) && early.isEmpty && wMove.count == 1 && wMove[0].kind == "tmove" && abs((wMove[0].y ?? 0) - 0.5) < 0.0001)
+        let d = engine.keyDown(GameKeyEngine.right, now: 130)
         check("joystick goes diagonal", d.count == 1 && d[0].kind == "tmove" && (d[0].x ?? 0) > 0.2 && (d[0].y ?? 1) < 0.7)
         check("held fingers repeat", engine.held().count == 2)
-        _ = engine.keyUp(GameKeyEngine.up)
-        let release = engine.keyUp(GameKeyEngine.right)
+        _ = engine.keyUp(GameKeyEngine.up, now: 140)
+        let release = engine.keyUp(GameKeyEngine.right, now: 150)
         check("joystick lifts when no direction is held", release.count == 1 && release[0].kind == "tup" && release[0].key == "0")
         check("other keys pass through", !engine.handles(12))
         let all = engine.releaseAll()
@@ -654,15 +658,130 @@ enum ToolsSelfTest {
         check("game key points survive rotation", roundTrips)
     }
 
+    /// The audit fixes: a new finger's tdown goes alone, ⌘ key ups, right modifiers, the mouse finger, throttles, pairing.
+    private static func testGameKeysTiming() {
+        func near(_ a: Float?, _ b: Double) -> Bool { abs(Double(a ?? -9) - b) < 0.0005 }
+        /// No batch moves a finger it put down in that same batch.
+        func downAlone(_ batches: [[ControlEvent]]) -> Bool {
+            batches.allSatisfy { batch in
+                let downs = Set(batch.filter { $0.kind == "tdown" }.compactMap(\.key))
+                return !batch.contains { $0.kind == "tmove" && downs.contains($0.key ?? "") }
+            }
+        }
+        let skill = GameKey(kind: .skill, keyCode: 12, label: "Q", x: 0.8, y: 0.8, radius: 0.05)
+        var aim = GameKeyEngine(keys: [skill], aspect: 1)
+        _ = aim.mouseMoved(to: (0.5, 1.0), now: 0)
+        let press = aim.keyDown(12, now: 100)
+        let soon = aim.tick(now: 110)
+        let moved = aim.mouseMoved(to: (0.5, 0.0), now: 115)
+        let waiting = aim.needsTick
+        let later = aim.tick(now: 120)
+        check("skill: tdown alone at the button, the aim on a tick 20 ms later", press.map(\.kind) == ["tdown"]
+            && near(press[0].y, 0.8) && soon.isEmpty && moved.isEmpty && waiting
+            && later.map(\.kind) == ["tmove"] && near(later[0].y, 0.75) && !aim.needsTick)
+        let stick = GameKey(kind: .joystick, label: "WASD", x: 0.2, y: 0.7, radius: 0.1)
+        var sticks = GameKeyEngine(keys: [stick], aspect: 1)
+        let stickDown = sticks.keyDown(13, now: 0)
+        let stickRight = sticks.keyDown(2, now: 5)
+        let stickTicks = [sticks.tick(now: 8), sticks.tick(now: 16), sticks.tick(now: 24)]
+        check("joystick: tdown alone at the centre, the push on a later tick", stickDown.map(\.kind) == ["tdown"]
+            && near(stickDown[0].x, 0.2) && stickRight.isEmpty && stickTicks[0].isEmpty && stickTicks[1].isEmpty
+            && stickTicks[2].count == 1 && (stickTicks[2][0].x ?? 0) > 0.2 && (stickTicks[2][0].y ?? 1) < 0.7)
+        var tapStick = GameKeyEngine(keys: [stick], aspect: 1)
+        _ = tapStick.keyDown(13, now: 0)
+        let tapUp = tapStick.keyUp(13, now: 10)
+        check("joystick let go before it moved still moves, then lifts", tapUp.map(\.kind) == ["tmove", "tup"] && tapStick.down.isEmpty)
+        // Swipes and combos, even with a slow tick.
+        let swipe = GameKey(kind: .swipe, keyCode: 3, label: "F", x: 0.2, y: 0.5, toX: 0.6, toY: 0.1)
+        var combo = GameKey(kind: .tap, keyCode: 14, label: "E", x: 0.5, y: 0.5, mode: .combo)
+        combo.steps = [.init(kind: .tap, x: 0.1, y: 0.1), .init(kind: .wait, ms: 10), .init(kind: .swipe, x: 0.3, y: 0.3, toX: 0.4, toY: 0.4, ms: 32)]
+        for step in [8.0, 25.0] {
+            var gestures = GameKeyEngine(keys: [swipe, combo], aspect: 1)
+            var batches = [gestures.keyDown(3, now: 0) + gestures.keyDown(14, now: 0)]
+            for t in stride(from: step, through: 400, by: step) { batches.append(gestures.tick(now: t)) }
+            let swipeMoves = batches.enumerated().filter { $0.element.contains { $0.kind == "tmove" && $0.key == "0" } }
+            check("swipe and combo: tdown alone, every \(Int(step)) ms tick", downAlone(batches) && gestures.down.isEmpty
+                && Double(swipeMoves.first?.offset ?? 0) * step >= GameKeyEngine.settleMs
+                && batches.joined().filter { $0.kind == "tdown" }.count == 3 && batches.joined().last?.kind == "tup")
+        }
+        // Right-hand modifiers recorded as a joystick's keys work like the left ones.
+        let model = GameKeysModel()
+        var fakeTime = 0.0
+        model.clock = { fakeTime += 50; return fakeTime }
+        model.preview(keys: [stick])
+        model.editing = true
+        model.capture = .stickKeys(stick.id, [], [])
+        for code: UInt16 in [60, 62, 61, 13] { _ = model.assign(code: code, label: GameKeysModel.label(code: code, characters: nil)) }
+        model.editing = false
+        model.enabled = true
+        var sent: [ControlEvent] = []
+        model.send = { sent.append($0) }
+        check("right ⇧⌃⌥ stick keys are stored as the left ones", model.keys.first?.customKeys == [56, 59, 58, 13]
+            && model.key(60, down: true) && sent.first?.kind == "tdown" && model.key(62, down: true))
+        // ⌘ swallows key ups: letting go of ⌘ releases what the keyboard no longer holds.
+        sent = []
+        model.releaseLifted(isHeld: { $0 == 62 })
+        check("⌘ up releases keys let go meanwhile, right modifiers held stay", !sent.isEmpty && sent.allSatisfy { $0.kind == "tmove" })
+        model.releaseLifted(isHeld: { _ in false })
+        let lifted = sent.count
+        _ = model.key(60, down: false)
+        check("⌘ up with nothing held lifts the finger", sent.last?.kind == "tup" && sent.count == lifted)
+        model.enabled = false
+        // The mouse finger is kept by the engine, so the heartbeat holds it, and looking takes it over cleanly.
+        let look = GameKey(kind: .look, label: "Look", x: 0.7, y: 0.5, radius: 0.1)
+        var mouse = GameKeyEngine(keys: [look], aspect: 1)
+        let touch = mouse.mouseTouch("tdown", x: 0.3, y: 0.3, now: 0)
+        let drag = mouse.mouseTouch("tmove", x: 0.35, y: 0.3, now: 30)
+        check("the mouse finger is in the heartbeat", touch.map(\.kind) == ["tdown"] && touch[0].key == "9" && drag.count == 1
+            && mouse.held().contains { $0.key == "9" && near($0.x, 0.35) })
+        let begin = mouse.lookBegin(now: 40)
+        check("looking lifts the mouse finger before taking finger 9", begin.map(\.kind) == ["tup", "tdown"]
+            && near(begin[0].x, 0.35) && near(begin[1].x, 0.7) && begin.allSatisfy { $0.key == "9" })
+        check("mouse touches wait while looking", mouse.mouseTouch("tmove", x: 0.1, y: 0.1, now: 50).isEmpty
+            && mouse.mouseTouch("tup", x: 0.1, y: 0.1, now: 60).isEmpty && mouse.held().count == 1)
+        _ = mouse.lookEnd(now: 70)
+        check("a stray mouse up after looking sends nothing", mouse.mouseTouch("tup", x: 0.1, y: 0.1, now: 80).isEmpty && mouse.down.isEmpty)
+        // Aim and look moves at most about 90 a second; look adds up what it holds back.
+        var aimRate = MoveThrottle(interval: 1.0 / 90)
+        let due = [0, 0.004, 0.009, 0.0112, 0.015, 0.0224].map { aimRate.isDue($0) }
+        check("aim moves are throttled to ~90 Hz", due == [true, false, false, true, false, true])
+        var lookRate = MoveThrottle(interval: 1.0 / 90)
+        let sums = [(1.0, 0.0, 0.0), (1.0, 0.0, 0.004), (2.0, 0.5, 0.008), (1.0, 1.0, 0.0115)].map { lookRate.add(dx: $0.0, dy: $0.1, at: $0.2) }
+        check("look moves are throttled and add up", sums[0]! == (1, 0) && sums[1] == nil && sums[2] == nil && sums[3]! == (4, 1.5))
+        // Pairing: one CPace share per prompt, a new nonce only after a wrong code or every 2 s.
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var renewal = PakeRenewal()
+        renewal.started(now: start)
+        let burst = (1...50).map { renewal.allowsNewShare(now: start.addingTimeInterval(Double($0) * 0.03)) }
+        let afterWait = renewal.allowsNewShare(now: start.addingTimeInterval(2.1))
+        let rightAfter = renewal.allowsNewShare(now: start.addingTimeInterval(2.2))
+        renewal.wrongCode()
+        let afterWrong = renewal.allowsNewShare(now: start.addingTimeInterval(2.3))
+        let afterWrongAgain = renewal.allowsNewShare(now: start.addingTimeInterval(2.4))
+        check("pairing: new nonces get a new share only every 2 s or after a wrong code", !burst.contains(true) && afterWait
+            && !rightAfter && afterWrong && !afterWrongAgain)
+        var pending = PendingCode()
+        pending.hold("123456")
+        pending.clear()
+        let afterReject = pending.take(localAccepted: true)
+        pending.hold("123456")
+        let notAccepted = pending.take(localAccepted: false)
+        pending.hold("654321")
+        check("pairing: a wrong code drops the waiting code; only an accepted code is sent", afterReject == nil && notAccepted == nil
+            && pending.code == "654321" && pending.take(localAccepted: true) == "654321" && pending.code == nil)
+    }
+
     private static func testGameKeysMore() {
         func near(_ a: Float?, _ b: Double) -> Bool { abs(Double(a ?? -9) - b) < 0.0005 }
         // Two joysticks with different key sets, each on its own finger.
         let move = GameKey(kind: .joystick, label: "WASD", x: 0.2, y: 0.7, radius: 0.1)
         let camera = GameKey(kind: .joystick, label: "↑←↓→", x: 0.8, y: 0.7, radius: 0.1, keySet: .arrows)
         var two = GameKeyEngine(keys: [move, camera], aspect: 1)
-        let w = two.keyDown(13), up = two.keyDown(126)
-        check("two joysticks use separate fingers", w.first?.key == "0" && up.first?.key == "1" && w.count == 2 && up.count == 2)
-        let d = two.keyDown(2), left = two.keyDown(123)
+        let w = two.keyDown(13, now: 0), up = two.keyDown(126, now: 0)
+        let settled = two.tick(now: 20)
+        check("two joysticks use separate fingers", w.first?.key == "0" && up.first?.key == "1" && w.count == 1 && up.count == 1
+            && settled.map(\.key) == ["0", "1"] && settled.allSatisfy { $0.kind == "tmove" })
+        let d = two.keyDown(2, now: 30), left = two.keyDown(123, now: 30)
         let k = 0.1 / 2.0.squareRoot()
         check("WASD diagonal is normalized", d.count == 1 && near(d[0].x, 0.2 + k) && near(d[0].y, 0.7 - k))
         check("arrow diagonal is normalized", left.count == 1 && near(left[0].x, 0.8 - k) && near(left[0].y, 0.7 - k))
@@ -671,15 +790,17 @@ enum ToolsSelfTest {
         // Walking: Shift for full reach, half otherwise.
         let walker = GameKey(kind: .joystick, label: "WASD", x: 0.5, y: 0.5, radius: 0.1, walk: .fullWithKey)
         var walk = GameKeyEngine(keys: [walker], aspect: 1)
-        let half = walk.keyDown(2)
-        let full = walk.keyDown(60) // right Shift counts as Shift
-        let back = walk.keyUp(60)
+        _ = walk.keyDown(2, now: 0)
+        let half = walk.tick(now: 20)
+        let full = walk.keyDown(60, now: 30) // right Shift counts as Shift
+        let back = walk.keyUp(60, now: 40)
         check("walk mode starts at half reach", near(half.last?.x, 0.55))
         check("shift pushes the joystick to full reach", full.count == 1 && near(full[0].x, 0.6))
         check("letting go of shift walks again", back.count == 1 && near(back[0].x, 0.55))
         var halfWith = GameKeyEngine(keys: [GameKey(kind: .joystick, label: "", x: 0.5, y: 0.5, radius: 0.1, walk: .halfWithKey)], aspect: 1)
-        let fullFirst = halfWith.keyDown(2)
-        check("the other walk mode halves with shift", near(fullFirst.last?.x, 0.6) && near(halfWith.keyDown(56).last?.x, 0.55))
+        _ = halfWith.keyDown(2, now: 0)
+        let fullFirst = halfWith.tick(now: 20)
+        check("the other walk mode halves with shift", near(fullFirst.last?.x, 0.6) && near(halfWith.keyDown(56, now: 30).last?.x, 0.55))
         // Skill aim.
         let skill = GameKey(kind: .skill, keyCode: 12, label: "Q", x: 0.8, y: 0.8, radius: 0.05)
         let far = GameKeyEngine.aimPoint(button: (0.8, 0.8), radius: 0.05, mouse: (1.0, 0.5), aspect: 1)
@@ -689,13 +810,16 @@ enum ToolsSelfTest {
         var aim = GameKeyEngine(keys: [skill], aspect: 1)
         _ = aim.mouseMoved(to: (0.5, 1.0))
         let press = aim.keyDown(12, now: 0)
-        check("a skill presses its button, then aims", press.map(\.kind) == ["tdown", "tmove"] && near(press[0].x, 0.8) && near(press[1].y, 0.85))
-        let follow = aim.mouseMoved(to: (0.5, 0.0))
+        let aimed = aim.tick(now: 20)
+        check("a skill presses its button, then aims a tick later", press.map(\.kind) == ["tdown"] && near(press[0].x, 0.8)
+            && near(press[0].y, 0.8) && aimed.map(\.kind) == ["tmove"] && near(aimed[0].y, 0.85))
+        let follow = aim.mouseMoved(to: (0.5, 0.0), now: 30)
         check("the held skill follows the mouse", follow.count == 1 && near(follow[0].y, 0.75))
-        let cancel = aim.cancelAim()
+        let cancel = aim.cancelAim(now: 40)
         check("Esc returns to the middle, then lifts", cancel.map(\.kind) == ["tmove", "tup"] && near(cancel[0].x, 0.8) && near(cancel[0].y, 0.8))
         check("the release after a cancel does nothing", aim.keyUp(12, now: 500).isEmpty && aim.down.isEmpty)
         _ = aim.keyDown(12, now: 1000)
+        _ = aim.tick(now: 1020)
         let cast = aim.keyUp(12, now: 1500)
         check("letting go casts where it aims", cast.count == 1 && cast[0].kind == "tup" && near(cast[0].y, 0.75))
         var quick = GameKeyEngine(keys: [{ var k = skill; k.quickCast = true; return k }()], aspect: 1)

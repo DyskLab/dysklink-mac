@@ -44,6 +44,9 @@ enum CpaceSelfTest {
         check("field: inverse", (x * x.inverse) == .one && (y * y.inverse) == .one && FieldElement.zero.inverse.isZero)
         check("field: add and subtract", ((x + y) - y) == x && (x - x).isZero && (-x + x).isZero)
         check("field: multiply commutes and distributes", (x * y) == (y * x) && (x * (y + .one)) == (x * y + x))
+        check("field: addition chains match plain powers", x.inverse == x.power(FieldElement.pMinus2)
+            && y.legendre == y.power(FieldElement.legendreExponent) && x.legendre == x.power(FieldElement.legendreExponent)
+            && FieldElement.zero.legendre.isZero)
         check("field: squares", !FieldElement(small: 2).isSquare && FieldElement(small: 4).isSquare
             && (-FieldElement.one).isSquare && FieldElement.zero.isSquare && x.squared.isSquare)
         check("field: p-1 is -1", hex((-FieldElement.one).bytes) == "ec" + String(repeating: "ff", count: 30) + "7f")
@@ -113,6 +116,16 @@ enum CpaceSelfTest {
         check("cpace cross transcript", hex(shower.yaPublic) == crossYa && accept.flatMap { Pake.decode($0.y, 32) }.map(hex) == crossYb
             && accept.flatMap { Pake.decode($0.confirm, 32) }.map(hex) == crossConfirmT
             && reply.flatMap { Pake.decode($0.confirm, 32) }.map(hex) == crossConfirmS && typer.confirms(reply))
+
+        // One Shower runs SHA-512, Elligator 2 (two field exponentiations), and X25519 on the main actor.
+        let timedChannel = Pake.channel(typing: "aa", showing: "bb")
+        _ = Pake.Shower(code: "123456", nonceT: nonceT, ci: timedChannel)
+        let timing = Date()
+        let timedRuns = 5
+        for _ in 0..<timedRuns { _ = Pake.Shower(code: "123456", nonceT: Cpace.randomBytes(16), ci: timedChannel) }
+        let showerMs = Date().timeIntervalSince(timing) * 1000 / Double(timedRuns)
+        print("CPACE_SHOWER_MS " + String(format: "%.2f", showerMs))
+        check("cpace: one Shower is quick (\(String(format: "%.2f", showerMs)) ms)", showerMs < 20)
 
         // Whole exchanges.
         func exchange(_ shown: String, _ typed: String, typerCi: [UInt8], showerCi: [UInt8]) -> Bool {

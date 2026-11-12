@@ -382,7 +382,9 @@ final class AppModel {
     @ObservationIgnored private var pakeShower: Pake.Shower?
     @ObservationIgnored private var pakeTyper: Pake.Typer?
     /// A code typed before the other side's `pair.pake` arrived.
-    @ObservationIgnored private var pendingCode: String?
+    @ObservationIgnored private var pendingCode = PendingCode()
+    /// When the showing prompt may make a new CPace share for a new nonce.
+    @ObservationIgnored private var pakeRenewal = PakeRenewal()
     /// A pairing request waiting for the prompt rate limit, by device.
     @ObservationIgnored private var deferredPairing: String?
     /// One timer per ringing phone, so ringing again restarts it instead of an old one ending the new ring.
@@ -932,10 +934,12 @@ final class AppModel {
         case MessageType.pairRequest:
             guard records[id] == nil, session.hello != nil else { return }
             // A code already showing for this device stays; asking again doesn't make a new one. A new request
-            // (a new nonce) gets a new CPace share for that same code.
+            // (a new nonce) gets a new CPace share for that same code, but only after a wrong code or every couple
+            // of seconds, so a stream of requests can't keep the Mac busy making shares.
             if let current = pairingPrompt, current.peerId == id, current.showsCode {
                 guard !current.outdated, let nonce = Pake.requestNonce(envelope.pake) else { return }
-                if pakeShower?.sameRequest(nonce) != true, let identity {
+                if pakeShower?.sameRequest(nonce) != true {
+                    guard let identity, pakeRenewal.allowsNewShare() else { return }
                     pakeShower = Pake.Shower(code: current.code, nonceT: nonce,
                                              ci: Pake.channel(typing: id, showing: identity.deviceId))
                 }
@@ -976,8 +980,7 @@ final class AppModel {
                 print("Pairing with \(prompt.peerName) failed: its CPace share isn't valid")
                 return rejectPairing()
             }
-            if let code = pendingCode {
-                pendingCode = nil
+            if let code = pendingCode.take(localAccepted: prompt.localAccepted) {
                 sendCode(code, to: session, prompt: prompt)
             }
         case MessageType.pairAccept:
@@ -999,6 +1002,7 @@ final class AppModel {
                     completePairing(id)
                 } else {
                     prompt.attempts += 1
+                    pakeRenewal.wrongCode()
                     // Wrong codes add up across prompts, so asking again doesn't give five more tries.
                     if pairingGuard.wrongCode(id) || prompt.attempts >= Pairing.maxAttempts {
                         var reject = Envelope(type: MessageType.pairReject)
@@ -1012,7 +1016,7 @@ final class AppModel {
                     wrong.error = Pairing.wrongCode
                     session.send(wrong)
                 }
-            } else if prompt.localAccepted, pendingCode == nil {
+            } else if prompt.localAccepted, pendingCode.code == nil {
                 // Saved only once the other side proves it derived the same key from the code.
                 if pakeTyper?.confirms(envelope.pake) == true {
                     completePairing(id)
@@ -1031,6 +1035,7 @@ final class AppModel {
                 pairingPrompt = prompt
             } else if envelope.error == Pairing.wrongCode, !prompt.showsCode {
                 pakeTyper?.wrongCode()
+                pendingCode.clear()
                 prompt.localAccepted = false
                 pairingEntry = ""
                 prompt.error = "That code isn't right. Check the code on \(prompt.peerName) and try again."
@@ -1144,7 +1149,7 @@ final class AppModel {
         prompt.error = nil
         pairingPrompt = prompt
         // The other side's share hasn't come yet: the code goes as soon as it does.
-        if typer.ready { sendCode(digits, to: session, prompt: prompt) } else { pendingCode = digits }
+        if typer.ready { sendCode(digits, to: session, prompt: prompt) } else { pendingCode.hold(digits) }
     }
 
     /// The CPace answer for a typed code, with a fresh secret each time so the same code can be typed again.
@@ -1210,6 +1215,7 @@ final class AppModel {
         } else if let nonceT {
             let shower = Pake.Shower(code: code, nonceT: nonceT, ci: Pake.channel(typing: id, showing: identity.deviceId))
             pakeShower = shower
+            pakeRenewal.started()
             var share = Envelope(type: MessageType.pairPake)
             share.pake = shower.message
             session.send(share)
@@ -1257,7 +1263,7 @@ final class AppModel {
     private func dropPake() {
         pakeShower = nil
         pakeTyper = nil
-        pendingCode = nil
+        pendingCode.clear()
     }
 
     private func clearPairing() {

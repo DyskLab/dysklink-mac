@@ -26,6 +26,32 @@ enum PhoneKeys {
     }
 }
 
+/// Lets a stream of mouse moves through at most once per `interval`. Look moves are added up meanwhile, so nothing
+/// of the turn is lost; aim only needs the latest point.
+struct MoveThrottle {
+    var interval: TimeInterval
+    private var lastAt: TimeInterval = -.infinity
+    private var dx = 0.0, dy = 0.0
+
+    init(interval: TimeInterval) { self.interval = interval }
+
+    /// True when a move at `time` may be sent, and then counts it as sent.
+    mutating func isDue(_ time: TimeInterval) -> Bool {
+        guard time - lastAt >= interval || time < lastAt else { return false }
+        lastAt = time
+        return true
+    }
+
+    /// Adds a relative move; the total since the last one sent, when it's due.
+    mutating func add(dx: Double, dy: Double, at time: TimeInterval) -> (dx: Double, dy: Double)? {
+        self.dx += dx
+        self.dy += dy
+        guard isDue(time) else { return nil }
+        defer { self.dx = 0; self.dy = 0 }
+        return (self.dx, self.dy)
+    }
+}
+
 /// Shows the phone video and forwards mouse and keyboard as touch.
 final class ScreenSurface: NSView {
     private static let sendInterval: TimeInterval = 1.0 / 90
@@ -75,13 +101,19 @@ final class ScreenSurface: NSView {
         }
     }
 
+    /// Aim and look send a move at most about 90 times a second, as drags do.
+    private var aimThrottle = MoveThrottle(interval: sendInterval)
+    private var lookThrottle = MoveThrottle(interval: sendInterval)
+
     /// A mouse movement turned into a move on the phone, following the picture's rotation.
     private func lookMove(_ event: NSEvent) {
         guard let game, game.looking else { return }
         let dx = Float(event.deltaX * Self.lookScale), dy = Float(event.deltaY * Self.lookScale)
         let origin = Self.phonePoint((0.5, 0.5), quarterTurns: quarterTurns)
         let moved = Self.phonePoint((0.5 + dx, 0.5 + dy), quarterTurns: quarterTurns)
-        game.look(dx: Double(moved.x - origin.x), dy: Double(moved.y - origin.y) * game.aspect)
+        guard let total = lookThrottle.add(dx: Double(moved.x - origin.x), dy: Double(moved.y - origin.y) * game.aspect,
+                                           at: event.timestamp) else { return }
+        game.look(dx: total.dx, dy: total.dy)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -91,7 +123,7 @@ final class ScreenSurface: NSView {
 
     /// The mouse over the picture aims held skill keys.
     private func aimMove(_ event: NSEvent) {
-        guard let game, game.enabled, !game.editing, !game.looking else { return }
+        guard let game, game.enabled, !game.editing, !game.looking, aimThrottle.isDue(event.timestamp) else { return }
         let phone = phonePoint(atView: convert(event.locationInWindow, from: nil))
         game.mouse(at: (Double(phone.x), Double(phone.y)))
     }
@@ -101,7 +133,7 @@ final class ScreenSurface: NSView {
     private let video = CALayer()
 
     private var isPressed = false
-    private var lastSentAt: TimeInterval = 0
+    private var dragThrottle = MoveThrottle(interval: sendInterval)
     private var scrollStart: (x: Float, y: Float)?
     private var scrollFinger: (x: Float, y: Float)?
     private var scrollEnd: DispatchWorkItem?
@@ -204,21 +236,18 @@ final class ScreenSurface: NSView {
 
     private func touch(_ kind: String, _ point: (x: Float, y: Float)) {
         let phone = Self.phonePoint(point, quarterTurns: quarterTurns)
-        if playing {
-            // In game mode the mouse is its own finger, so it works while keys are held.
+        if playing, let game {
+            // In game mode the mouse is its own finger, so it works while keys are held. The engine keeps it, so
+            // the heartbeat holds it down and aiming takes the finger over cleanly.
             let multi = ["down": "tdown", "drag": "tmove", "up": "tup"][kind] ?? kind
-            onControl?(ControlEvent(kind: multi, x: phone.x, y: phone.y, key: String(GameKeyEngine.mouseFinger)))
+            game.mouseTouch(multi, at: (Double(phone.x), Double(phone.y)))
         } else {
             onControl?(ControlEvent(kind: kind, x: phone.x, y: phone.y))
         }
     }
 
     /// Movement is sent while it happens, at most about 90 times a second.
-    private func isDue(_ event: NSEvent) -> Bool {
-        guard event.timestamp - lastSentAt >= Self.sendInterval else { return false }
-        lastSentAt = event.timestamp
-        return true
-    }
+    private func isDue(_ event: NSEvent) -> Bool { dragThrottle.isDue(event.timestamp) }
 
     override func mouseDown(with event: NSEvent) {
         if let game, game.looking { return game.fire(true) }
@@ -314,9 +343,36 @@ final class ScreenSurface: NSView {
         if let game, game.enabled { _ = game.key(event.keyCode, down: false) }
     }
 
+    private var keyUpMonitor: Any?
+
+    /// AppKit doesn't send a key up to the view while ⌘ is down, so a game key let go then would keep its finger.
+    /// A local monitor sees those key ups first. Started with the window and stopped when it closes.
+    func startKeyMonitor() {
+        guard keyUpMonitor == nil else { return }
+        keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+            if let self, event.window === self.window, event.modifierFlags.contains(.command),
+               let game = self.game, game.enabled { _ = game.key(event.keyCode, down: false) }
+            return event
+        }
+    }
+
+    func stopKeyMonitor() {
+        if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor) }
+        keyUpMonitor = nil
+    }
+
+    /// Whether the keyboard holds this key now.
+    static func keyIsHeld(_ code: UInt16) -> Bool {
+        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code))
+    }
+
     /// Shift, Control, and Option only arrive as flag changes.
     override func flagsChanged(with event: NSEvent) {
         guard let game, game.enabled else { return super.flagsChanged(with: event) }
+        // ⌘ let go: keys released while it was down get their release now.
+        if [54, 55].contains(event.keyCode), !event.modifierFlags.contains(.command) {
+            return game.releaseLifted(isHeld: Self.keyIsHeld)
+        }
         let flag: NSEvent.ModifierFlags? = switch event.keyCode {
         case 56, 60: .shift
         case 59, 62: .control
@@ -632,6 +688,7 @@ enum ScreenWindow {
         NSApp.setActivationPolicy(.regular)
         created.makeKeyAndOrderFront(nil)
         created.makeFirstResponder(view)
+        view.startKeyMonitor()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -640,6 +697,7 @@ enum ScreenWindow {
     }
 
     static func close() {
+        surface?.stopKeyMonitor()
         game.enabled = false
         closingFromModel = true
         window?.close()
@@ -659,6 +717,7 @@ enum ScreenWindow {
 
         func windowWillClose(_ notification: Notification) {
             MainActor.assumeIsolated {
+                surface?.stopKeyMonitor()
                 game.release()
                 if !closingFromModel { onUserClose?() }
                 if !MainWindow.isVisible && !CameraWindow.isVisible { NSApp.setActivationPolicy(.accessory) }

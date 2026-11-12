@@ -274,6 +274,8 @@ struct MacCareView: View {
                                    onToggle: { care.setStartup(item, on: $0) },
                                    onRemove: { care.confirm = .startup(item) },
                                    onReveal: { care.reveal(item.url) })
+                            .disabled(care.isBusy(item))
+                            .opacity(care.isBusy(item) ? 0.6 : 1)
                         if item.id != mine.last?.id { Divider().overlay(Theme.stroke).padding(.leading, 52) }
                     }
                     if mine.isEmpty {

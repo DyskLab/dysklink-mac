@@ -3,17 +3,19 @@ import Foundation
 import Security
 
 /// An element of GF(2^255 - 19) in 16 signed limbs of 16 bits (the TweetNaCl layout). Only what Elligator 2 needs.
-/// No branches or table lookups depend on the value, so the code doesn't leak through timing.
+/// No branches or table lookups depend on the value, so the code doesn't leak through timing. The limbs live in a
+/// SIMD vector, a fixed-size value, so the arithmetic allocates nothing.
 struct FieldElement {
-    fileprivate var limbs: [Int64]
+    typealias Limbs = SIMD16<Int64>
+    fileprivate var limbs: Limbs
 
-    init(limbs: [Int64]) { self.limbs = limbs }
+    init(limbs: Limbs) { self.limbs = limbs }
 
-    static let zero = FieldElement(limbs: [Int64](repeating: 0, count: 16))
+    static let zero = FieldElement(limbs: Limbs())
     static let one = FieldElement(small: 1)
 
     init(small value: UInt64) {
-        var limbs = [Int64](repeating: 0, count: 16)
+        var limbs = Limbs()
         var rest = value
         for index in 0..<4 {
             limbs[index] = Int64(rest & 0xffff)
@@ -25,7 +27,7 @@ struct FieldElement {
     /// RFC 7748 decoding: little-endian, bit 255 ignored. Values from p to 2^255 - 1 are fine, they reduce later.
     init(bytes: [UInt8]) {
         precondition(bytes.count == 32)
-        var limbs = [Int64](repeating: 0, count: 16)
+        var limbs = Limbs()
         for index in 0..<16 {
             limbs[index] = Int64(bytes[2 * index]) + (Int64(bytes[2 * index + 1]) << 8)
         }
@@ -39,7 +41,7 @@ struct FieldElement {
         Self.carry(&t)
         Self.carry(&t)
         Self.carry(&t)
-        var m = [Int64](repeating: 0, count: 16)
+        var m = Limbs()
         for _ in 0..<2 {
             m[0] = t[0] - 0xffed
             for index in 1..<15 {
@@ -60,8 +62,14 @@ struct FieldElement {
         return out
     }
 
-    private static func carry(_ o: inout [Int64]) {
-        for index in 0..<16 {
+    private static func carry(_ o: inout Limbs) {
+        withUnsafeMutableBytes(of: &o) { raw in carry(raw.baseAddress!.assumingMemoryBound(to: Int64.self)) }
+    }
+
+    /// The carry on 16 limbs in place. Pointers keep it quick in debug builds too.
+    private static func carry(_ o: UnsafeMutablePointer<Int64>) {
+        var index = 0
+        while index < 16 {
             o[index] += 1 << 16
             let c = o[index] >> 16
             if index < 15 {
@@ -71,15 +79,14 @@ struct FieldElement {
                 o[0] += 38 * (c - 1)
             }
             o[index] -= c << 16
+            index += 1
         }
     }
 
     /// `target` becomes `other` when `take` is 1, and stays when it's 0, without branching on it.
-    private static func select(_ target: inout [Int64], _ other: [Int64], take: Int64) {
-        let mask = ~(take - 1)
-        for index in 0..<16 {
-            target[index] ^= mask & (target[index] ^ other[index])
-        }
+    private static func select(_ target: inout Limbs, _ other: Limbs, take: Int64) {
+        let mask = Limbs(repeating: ~(take - 1))
+        target ^= mask & (target ^ other)
     }
 
     /// `b` when `condition`, otherwise `a`.
@@ -90,17 +97,13 @@ struct FieldElement {
     }
 
     static func + (a: FieldElement, b: FieldElement) -> FieldElement {
-        var out = a.limbs
-        for index in 0..<16 { out[index] += b.limbs[index] }
-        var result = FieldElement(limbs: out)
+        var result = FieldElement(limbs: a.limbs &+ b.limbs)
         result.normalize()
         return result
     }
 
     static func - (a: FieldElement, b: FieldElement) -> FieldElement {
-        var out = a.limbs
-        for index in 0..<16 { out[index] -= b.limbs[index] }
-        var result = FieldElement(limbs: out)
+        var result = FieldElement(limbs: a.limbs &- b.limbs)
         result.normalize()
         return result
     }
@@ -108,15 +111,34 @@ struct FieldElement {
     static prefix func - (a: FieldElement) -> FieldElement { zero - a }
 
     static func * (a: FieldElement, b: FieldElement) -> FieldElement {
-        var t = [Int64](repeating: 0, count: 31)
-        for i in 0..<16 {
-            for j in 0..<16 { t[i + j] += a.limbs[i] * b.limbs[j] }
+        var out = Limbs()
+        withUnsafeTemporaryAllocation(of: Int64.self, capacity: 31) { t in
+            let t = t.baseAddress!
+            t.initialize(repeating: 0, count: 31)
+            withUnsafeBytes(of: a.limbs) { ra in
+                withUnsafeBytes(of: b.limbs) { rb in
+                    let x = ra.baseAddress!.assumingMemoryBound(to: Int64.self)
+                    let y = rb.baseAddress!.assumingMemoryBound(to: Int64.self)
+                    // While loops: ranges cost a lot in debug builds, and this runs about 1000 times per Shower.
+                    var i = 0
+                    while i < 16 {
+                        let xi = x[i], row = t + i
+                        var j = 0
+                        while j < 16 { row[j] += xi * y[j]; j += 1 }
+                        i += 1
+                    }
+                }
+            }
+            // 2^256 = 38 mod p.
+            var index = 0
+            while index < 15 { t[index] += 38 * t[index + 16]; index += 1 }
+            withUnsafeMutableBytes(of: &out) { raw in
+                let o = raw.baseAddress!.assumingMemoryBound(to: Int64.self)
+                o.update(from: t, count: 16)
+                carry(o)
+                carry(o)
+            }
         }
-        // 2^256 = 38 mod p.
-        for index in 0..<15 { t[index] += 38 * t[index + 16] }
-        var out = Array(t[0..<16])
-        carry(&out)
-        carry(&out)
         return FieldElement(limbs: out)
     }
 
@@ -140,17 +162,49 @@ struct FieldElement {
     }
 
     /// p - 2 and (p - 1) / 2, little-endian.
-    private static let pMinus2: [UInt8] = [0xeb] + [UInt8](repeating: 0xff, count: 30) + [0x7f]
-    private static let legendreExponent: [UInt8] = [0xf6] + [UInt8](repeating: 0xff, count: 30) + [0x3f]
+    static let pMinus2: [UInt8] = [0xeb] + [UInt8](repeating: 0xff, count: 30) + [0x7f]
+    static let legendreExponent: [UInt8] = [0xf6] + [UInt8](repeating: 0xff, count: 30) + [0x3f]
 
-    /// The inverse, and 0 for 0 (inv0 in RFC 9380).
-    var inverse: FieldElement { power(Self.pMinus2) }
+    /// `self` squared `count` times.
+    func squared(times count: Int) -> FieldElement {
+        var result = self
+        for _ in 0..<count { result = result * result }
+        return result
+    }
+
+    /// z^(2^250 - 1) and z^11, the start of ref10's addition chains. About 250 squarings and 11 multiplications,
+    /// half the work of `power`.
+    private var chain250: (z250: FieldElement, z11: FieldElement) {
+        let z2 = squared
+        let z9 = self * z2.squared(times: 2)
+        let z11 = z2 * z9
+        let z5 = z9 * z11.squared
+        let z10 = z5.squared(times: 5) * z5
+        let z20 = z10.squared(times: 10) * z10
+        let z40 = z20.squared(times: 20) * z20
+        let z50 = z40.squared(times: 10) * z10
+        let z100 = z50.squared(times: 50) * z50
+        let z200 = z100.squared(times: 100) * z100
+        return (z200.squared(times: 50) * z50, z11)
+    }
+
+    /// The inverse, and 0 for 0 (inv0 in RFC 9380): z^(p - 2) = z^(2^255 - 21).
+    var inverse: FieldElement {
+        let chain = chain250
+        return chain.z250.squared(times: 5) * chain.z11
+    }
+
+    /// z^((p - 1) / 2) = z^(2^254 - 10).
+    var legendre: FieldElement {
+        let z2 = squared
+        return chain250.z250.squared(times: 4) * z2 * z2.squared
+    }
 
     var isZero: Bool { Self.constantTimeEqual(bytes, [UInt8](repeating: 0, count: 32)) }
 
     /// Whether this is a square in the field, 0 included (is_square in RFC 9380).
     var isSquare: Bool {
-        let legendre = power(Self.legendreExponent).bytes
+        let legendre = self.legendre.bytes
         let zero = Self.constantTimeEqual(legendre, [UInt8](repeating: 0, count: 32))
         let one = Self.constantTimeEqual(legendre, FieldElement.one.bytes)
         return zero || one

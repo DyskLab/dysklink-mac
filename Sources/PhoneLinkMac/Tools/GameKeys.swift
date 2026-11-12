@@ -125,6 +125,8 @@ struct GameKeyEngine {
     static let tapMs = 40.0
     /// Swipes move about once a frame.
     static let stepMs = 16.0
+    /// A new finger's first move comes at least this long after its tdown, on a later tick.
+    static let settleMs = 20.0
     /// A skill let go sooner than this, with quick cast on, taps the button's middle.
     static let quickCastMs = 200.0
     /// The mouse this far from the screen's middle, as a share of the phone's width, aims a skill at full reach.
@@ -177,6 +179,11 @@ struct GameKeyEngine {
     private var stickFor: [UInt16: UUID] = [:]
     private var actionFor: [UInt16: UUID] = [:]
     private var walkKeys: Set<UInt16> = []
+    /// The time of the latest call, in milliseconds.
+    private var clock = 0.0
+    /// Until when each new finger's moves wait, and where they go once it may move.
+    private var settleUntil: [Int: Double] = [:]
+    private var owed: [Int: (x: Double, y: Double)] = [:]
 
     init(keys: [GameKey], aspect: Double) {
         self.keys = keys
@@ -200,7 +207,7 @@ struct GameKeyEngine {
     var lookArea: GameKey? { keys.first { $0.kind == .look } }
     var fireSpot: GameKey? { keys.first { $0.kind == .fire } }
     /// True while a swipe, combo, or auto-fire needs `tick`.
-    var needsTick: Bool { !runs.isEmpty || !repeats.isEmpty }
+    var needsTick: Bool { !runs.isEmpty || !repeats.isEmpty || !owed.isEmpty }
     var isAiming: Bool { !aims.isEmpty }
 
     private func key(_ id: UUID) -> GameKey? { keys.first { $0.id == id } }
@@ -215,18 +222,65 @@ struct GameKeyEngine {
         }
     }
 
+    /// The keys on the keyboard that count as this normalized code.
+    static func physicalCodes(_ code: UInt16) -> [UInt16] {
+        switch code {
+        case 56: [56, 60]
+        case 59: [59, 62]
+        case 58: [58, 61]
+        default: [code]
+        }
+    }
+
     func handles(_ code: UInt16) -> Bool {
         let code = Self.normalized(code)
         return stickFor[code] != nil || actionFor[code] != nil || walkKeys.contains(code)
     }
 
-    private mutating func emit(_ kind: String, _ finger: Int, _ x: Double, _ y: Double) -> ControlEvent {
+    /// One finger event. A new finger's tdown goes alone: its first move waits `settleMs` for a later tick, since the
+    /// phone folds a finger's first stroke to its last point when the move comes in the same batch, and the finger
+    /// would land at the aim instead of the button. Moves in the meantime only update where it goes.
+    private mutating func emit(_ kind: String, _ finger: Int, _ x: Double, _ y: Double) -> [ControlEvent] {
         let x = min(max(x, 0), 1), y = min(max(y, 0), 1)
-        if kind == "tup" { down[finger] = nil } else { down[finger] = (x, y) }
-        return ControlEvent(kind: kind, x: Float(x), y: Float(y), key: String(finger))
+        func event(_ kind: String, _ x: Double, _ y: Double) -> ControlEvent {
+            ControlEvent(kind: kind, x: Float(x), y: Float(y), key: String(finger))
+        }
+        switch kind {
+        case "tdown":
+            settleUntil[finger] = clock + Self.settleMs
+            owed[finger] = nil
+            down[finger] = (x, y)
+            return [event(kind, x, y)]
+        case "tmove":
+            if let until = settleUntil[finger], clock < until, down[finger] != nil {
+                owed[finger] = (x, y)
+                return []
+            }
+            settleUntil[finger] = nil
+            owed[finger] = nil
+            down[finger] = (x, y)
+            return [event(kind, x, y)]
+        default:
+            settleUntil[finger] = nil
+            down[finger] = nil
+            // A move still waiting goes first, and the finger lifts where it went.
+            guard let at = owed.removeValue(forKey: finger) else { return [event(kind, x, y)] }
+            return [event("tmove", at.x, at.y), event(kind, at.x, at.y)]
+        }
+    }
+
+    /// Moves that waited for their finger's tdown to go alone, sent once it has.
+    private mutating func sendOwed() -> [ControlEvent] {
+        var events: [ControlEvent] = []
+        for finger in owed.keys.sorted() where clock >= settleUntil[finger] ?? 0 {
+            guard let at = owed[finger] else { continue }
+            events += emit("tmove", finger, at.x, at.y)
+        }
+        return events
     }
 
     mutating func keyDown(_ code: UInt16, now: Double = 0) -> [ControlEvent] {
+        clock = now
         let code = Self.normalized(code)
         guard handles(code), !pressed.contains(code) else { return [] }
         pressed.insert(code)
@@ -241,6 +295,7 @@ struct GameKeyEngine {
     }
 
     mutating func keyUp(_ code: UInt16, now: Double = 0) -> [ControlEvent] {
+        clock = now
         let code = Self.normalized(code)
         guard pressed.remove(code) != nil else { return [] }
         var events: [ControlEvent] = []
@@ -259,13 +314,13 @@ struct GameKeyEngine {
         case .tap:
             switch key.mode {
             case .tap:
-                return [emit("tdown", finger, key.x, key.y)]
+                return emit("tdown", finger, key.x, key.y)
             case .toggle:
-                return [emit(down[finger] == nil ? "tdown" : "tup", finger, key.x, key.y)]
+                return emit(down[finger] == nil ? "tdown" : "tup", finger, key.x, key.y)
             case .autoFire:
                 let period = 1000 / min(max(key.rate, 1), 20)
                 repeats[key.id] = Repeat(finger: finger, x: key.x, y: key.y, period: period, nextAt: now + period / 2, isDown: true)
-                return [emit("tdown", finger, key.x, key.y)]
+                return emit("tdown", finger, key.x, key.y)
             case .combo:
                 return start(key.id, finger: finger, timeline: Self.comboTimeline(key), now: now)
             }
@@ -273,10 +328,11 @@ struct GameKeyEngine {
             return start(key.id, finger: finger, timeline: Self.swipeTimeline(from: (key.x, key.y), to: (key.toX, key.toY), durationMs: key.duration), now: now)
         case .skill:
             aims[key.id] = Aim(start: now)
-            var events = [emit("tdown", finger, key.x, key.y)]
+            var events = emit("tdown", finger, key.x, key.y)
+            // The move to the aim waits for a later tick, so the finger first lands on the button.
             if let mouse {
                 let point = Self.aimPoint(button: (key.x, key.y), radius: key.radius, mouse: mouse, aspect: aspect)
-                events.append(emit("tmove", finger, point.x, point.y))
+                events += emit("tmove", finger, point.x, point.y)
             }
             return events
         default:
@@ -291,11 +347,11 @@ struct GameKeyEngine {
             switch key.mode {
             case .tap:
                 guard let at = down[finger] else { return [] }
-                return [emit("tup", finger, at.x, at.y)]
+                return emit("tup", finger, at.x, at.y)
             case .autoFire:
                 repeats[key.id] = nil
                 guard let at = down[finger] else { return [] }
-                return [emit("tup", finger, at.x, at.y)]
+                return emit("tup", finger, at.x, at.y)
             case .toggle, .combo:
                 // A toggle waits for the next press; a combo plays to its end.
                 return []
@@ -303,9 +359,9 @@ struct GameKeyEngine {
         case .skill:
             guard let aim = aims.removeValue(forKey: key.id), let at = down[finger] else { return [] }
             if key.quickCast && now - aim.start < Self.quickCastMs {
-                return [emit("tmove", finger, key.x, key.y), emit("tup", finger, key.x, key.y)]
+                return emit("tmove", finger, key.x, key.y) + emit("tup", finger, key.x, key.y)
             }
-            return [emit("tup", finger, at.x, at.y)]
+            return emit("tup", finger, at.x, at.y)
         default:
             return []
         }
@@ -323,7 +379,7 @@ struct GameKeyEngine {
         var events: [ControlEvent] = []
         while run.next < run.timeline.count, run.start + run.timeline[run.next].at <= now {
             let step = run.timeline[run.next]
-            events.append(emit(step.kind, run.finger, step.x, step.y))
+            events += emit(step.kind, run.finger, step.x, step.y)
             run.next += 1
         }
         runs[id] = run.next >= run.timeline.count ? nil : run
@@ -332,11 +388,12 @@ struct GameKeyEngine {
 
     /// Plays whatever swipes, combos, and auto-fire are due by `now`.
     mutating func tick(now: Double) -> [ControlEvent] {
-        var events: [ControlEvent] = []
+        clock = now
+        var events = sendOwed()
         for key in keys where runs[key.id] != nil { events += advance(key.id, now: now) }
         for key in keys {
             guard var item = repeats[key.id], now >= item.nextAt else { continue }
-            events.append(emit(item.isDown ? "tup" : "tdown", item.finger, item.x, item.y))
+            events += emit(item.isDown ? "tup" : "tdown", item.finger, item.x, item.y)
             item.isDown.toggle()
             item.nextAt += item.period / 2
             // After a stall the rhythm starts again instead of catching up in a burst.
@@ -385,12 +442,12 @@ struct GameKeyEngine {
                                      up: held[0], left: held[1], down: held[2], right: held[3], scale: walkScale(stick))
         guard let target else {
             guard let current = down[finger] else { return [] }
-            return [emit("tup", finger, current.x, current.y)]
+            return emit("tup", finger, current.x, current.y)
         }
         var events: [ControlEvent] = []
-        if down[finger] == nil { events.append(emit("tdown", finger, stick.x, stick.y)) }
+        if down[finger] == nil { events += emit("tdown", finger, stick.x, stick.y) }
         if let current = down[finger], abs(current.x - target.x) < 1e-9, abs(current.y - target.y) < 1e-9, events.isEmpty { return [] }
-        events.append(emit("tmove", finger, target.x, target.y))
+        events += emit("tmove", finger, target.x, target.y)
         return events
     }
 
@@ -409,26 +466,28 @@ struct GameKeyEngine {
     }
 
     /// The mouse moved on the phone screen; held skills follow it.
-    mutating func mouseMoved(to point: (x: Double, y: Double)) -> [ControlEvent] {
+    mutating func mouseMoved(to point: (x: Double, y: Double), now: Double = 0) -> [ControlEvent] {
+        clock = now
         mouse = point
         var events: [ControlEvent] = []
         for key in keys where aims[key.id] != nil {
             guard let finger = fingers[key.id] else { continue }
             let at = Self.aimPoint(button: (key.x, key.y), radius: key.radius, mouse: point, aspect: aspect)
-            events.append(emit("tmove", finger, at.x, at.y))
+            events += emit("tmove", finger, at.x, at.y)
         }
         return events
     }
 
     /// Esc while a skill is held: the finger goes back to the button's middle before lifting, which games take as
     /// a cancel. The key's release later does nothing.
-    mutating func cancelAim() -> [ControlEvent] {
+    mutating func cancelAim(now: Double = 0) -> [ControlEvent] {
+        clock = now
         var events: [ControlEvent] = []
         for key in keys where aims[key.id] != nil {
             aims[key.id] = nil
             guard let finger = fingers[key.id], down[finger] != nil else { continue }
-            events.append(emit("tmove", finger, key.x, key.y))
-            events.append(emit("tup", finger, key.x, key.y))
+            events += emit("tmove", finger, key.x, key.y)
+            events += emit("tup", finger, key.x, key.y)
         }
         return events
     }
@@ -475,42 +534,65 @@ struct GameKeyEngine {
 
     // MARK: Looking with the mouse
 
-    /// Puts the look finger down in the middle of the look area.
-    mutating func lookBegin() -> [ControlEvent] {
+    /// Puts the look finger down in the middle of the look area. A mouse touch on the same finger lifts first.
+    mutating func lookBegin(now: Double = 0) -> [ControlEvent] {
+        clock = now
         guard let area = lookArea, lookAt == nil else { return [] }
+        var events: [ControlEvent] = []
+        if let at = down[Self.mouseFinger] { events += emit("tup", Self.mouseFinger, at.x, at.y) }
         lookAt = (area.x, area.y)
-        return [emit("tdown", Self.mouseFinger, area.x, area.y)]
+        return events + emit("tdown", Self.mouseFinger, area.x, area.y)
+    }
+
+    /// The mouse button on the picture while playing: finger 9, kept with the others so the heartbeat sends it too.
+    /// While looking the finger is the look finger, so mouse touches are ignored.
+    mutating func mouseTouch(_ kind: String, x: Double, y: Double, now: Double = 0) -> [ControlEvent] {
+        clock = now
+        guard lookAt == nil else { return [] }
+        let finger = Self.mouseFinger
+        switch kind {
+        case "tdown":
+            let stray = down[finger].map { emit("tup", finger, $0.x, $0.y) } ?? []
+            return stray + emit("tdown", finger, x, y)
+        case "tmove", "tup":
+            guard down[finger] != nil else { return [] }
+            return emit(kind, finger, x, y)
+        default:
+            return []
+        }
     }
 
     /// Drags the look finger by a share of the phone's width and height, as a thumb swipes to turn a game camera.
     /// At the edge of the area the finger lifts and starts again from the middle, so turning never runs out.
-    mutating func look(dx: Double, dy: Double) -> [ControlEvent] {
+    mutating func look(dx: Double, dy: Double, now: Double = 0) -> [ControlEvent] {
+        clock = now
         guard let area = lookArea, let current = lookAt else { return [] }
         var next = (x: current.x + dx, y: current.y + dy)
         var events: [ControlEvent] = []
         let reachX = area.radius * 1.6
         let reachY = area.radius * 1.6 * aspect
         if abs(next.x - area.x) > reachX || abs(next.y - area.y) > reachY || !(0.01...0.99).contains(next.x) || !(0.01...0.99).contains(next.y) {
-            events.append(emit("tup", Self.mouseFinger, current.x, current.y))
-            events.append(emit("tdown", Self.mouseFinger, area.x, area.y))
+            events += emit("tup", Self.mouseFinger, current.x, current.y)
+            events += emit("tdown", Self.mouseFinger, area.x, area.y)
             next = (area.x + dx, area.y + dy)
         }
         lookAt = next
-        events.append(emit("tmove", Self.mouseFinger, next.x, next.y))
+        events += emit("tmove", Self.mouseFinger, next.x, next.y)
         return events
     }
 
-    mutating func lookEnd() -> [ControlEvent] {
+    mutating func lookEnd(now: Double = 0) -> [ControlEvent] {
+        clock = now
         guard let current = lookAt else { return [] }
         lookAt = nil
-        return [emit("tup", Self.mouseFinger, current.x, current.y)]
+        return emit("tup", Self.mouseFinger, current.x, current.y)
     }
 
     /// The mouse button while looking presses the click spot.
     mutating func fire(_ isDown: Bool) -> [ControlEvent] {
         guard let spot = fireSpot, isDown != firing else { return [] }
         firing = isDown
-        return [emit(isDown ? "tdown" : "tup", Self.fireFinger, spot.x, spot.y)]
+        return emit(isDown ? "tdown" : "tup", Self.fireFinger, spot.x, spot.y)
     }
 
     /// Where every held finger is, sent again now and then so the phone knows the Mac is still there.
@@ -523,9 +605,11 @@ struct GameKeyEngine {
     /// Lifts every finger and stops every gesture, auto-fire, and aim.
     mutating func releaseAll() -> [ControlEvent] {
         let events = down.keys.sorted().compactMap { finger in
-            down[finger].map { ControlEvent(kind: "tup", x: Float($0.x), y: Float($0.y), key: String(finger)) }
+            (owed[finger] ?? down[finger]).map { ControlEvent(kind: "tup", x: Float($0.x), y: Float($0.y), key: String(finger)) }
         }
         down = [:]
+        owed = [:]
+        settleUntil = [:]
         pressed = []
         runs = [:]
         repeats = [:]
@@ -685,10 +769,10 @@ final class GameKeysModel {
     func toggleLook() {
         guard enabled, !editing else { return }
         if looking {
-            dispatch(engine.lookEnd() + engine.fire(false))
+            dispatch(engine.lookEnd(now: now) + engine.fire(false))
             setLooking(false)
         } else if hasLook {
-            dispatch(engine.lookBegin())
+            dispatch(engine.lookBegin(now: now))
             setLooking(true)
         }
     }
@@ -703,7 +787,7 @@ final class GameKeysModel {
     /// A mouse move while looking, as a share of the phone's width and height.
     func look(dx: Double, dy: Double) {
         guard looking else { return }
-        dispatch(engine.look(dx: dx * lookSpeed, dy: dy * lookSpeed))
+        dispatch(engine.look(dx: dx * lookSpeed, dy: dy * lookSpeed, now: now))
     }
 
     func fire(_ down: Bool) {
@@ -813,11 +897,13 @@ final class GameKeysModel {
 
     /// Gives the waiting spot, swipe, or picked key a keyboard key. Returns false when nothing is waiting.
     func assign(code: UInt16, label: String) -> Bool {
+        // Right Shift, Control, and Option are stored as the left ones, as the engine reads them.
+        let code = GameKeyEngine.normalized(code)
         if let capture {
             switch capture {
             case .key(let id):
                 self.capture = nil
-                update(id) { $0.keyCode = GameKeyEngine.normalized(code); $0.label = label }
+                update(id) { $0.keyCode = code; $0.label = label }
             case .stickKeys(let id, var codes, var labels):
                 guard !codes.contains(code) else { return true }
                 codes.append(code)
@@ -981,7 +1067,9 @@ final class GameKeysModel {
 
     // MARK: Playing
 
-    private var now: Double { ProcessInfo.processInfo.systemUptime * 1000 }
+    /// Milliseconds of uptime; tests set their own clock.
+    @ObservationIgnored var clock: () -> Double = { ProcessInfo.processInfo.systemUptime * 1000 }
+    private var now: Double { clock() }
 
     private func dispatch(_ events: [ControlEvent]) {
         events.forEach { send?($0) }
@@ -998,13 +1086,32 @@ final class GameKeysModel {
     /// The mouse over the phone picture while playing, for aiming skills.
     func mouse(at point: (x: Double, y: Double)) {
         guard enabled, !editing, !looking else { return }
-        dispatch(engine.mouseMoved(to: point))
+        dispatch(engine.mouseMoved(to: point, now: now))
+    }
+
+    /// The mouse button on the picture while playing, as finger 9. It goes through the engine so the heartbeat
+    /// keeps it down and aiming can take the finger over.
+    func mouseTouch(_ kind: String, at point: (x: Double, y: Double)) {
+        guard enabled, !editing else { return }
+        dispatch(engine.mouseTouch(kind, x: point.x, y: point.y, now: now))
+    }
+
+    /// Keys let go while ⌘ was down never get a key up. When ⌘ goes up, each key the engine still holds that the
+    /// keyboard doesn't is let go. `isHeld` reads the keyboard; tests pass their own.
+    func releaseLifted(isHeld: (UInt16) -> Bool) {
+        guard enabled, !editing else { return }
+        let time = now
+        var events: [ControlEvent] = []
+        for code in engine.pressed.sorted() where !GameKeyEngine.physicalCodes(code).contains(where: isHeld) {
+            events += engine.keyUp(code, now: time)
+        }
+        dispatch(events)
     }
 
     /// Esc while a skill is held cancels it. Returns true when one was held.
     func cancelSkill() -> Bool {
         guard enabled, !editing, engine.isAiming else { return false }
-        dispatch(engine.cancelAim())
+        dispatch(engine.cancelAim(now: now))
         return true
     }
 

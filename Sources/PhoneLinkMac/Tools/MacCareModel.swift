@@ -267,6 +267,11 @@ final class MacCareModel {
 
     var startupItems: [StartupItem] = []
     var startupError: String?
+    /// Agents being turned on, off, or removed, by file name, which stays the same when the file moves. Their rows are
+    /// disabled until it's done, so a second toggle can't race the first.
+    private(set) var startupBusy: Set<String> = []
+
+    func isBusy(_ item: StartupItem) -> Bool { startupBusy.contains(item.url.lastPathComponent) }
 
     // MARK: Battery
 
@@ -324,6 +329,9 @@ final class MacCareModel {
     /// launchctl waits for the agent to stop or start, so it runs off the main thread.
     func setStartup(_ item: StartupItem, on: Bool) {
         let home = home
+        let key = item.url.lastPathComponent
+        guard !startupBusy.contains(key) else { return }
+        startupBusy.insert(key)
         Task.detached(priority: .userInitiated) {
             let failure: String?
             do {
@@ -333,6 +341,7 @@ final class MacCareModel {
                 failure = "Couldn't change \(item.label): \(error.localizedDescription)"
             }
             await MainActor.run {
+                self.startupBusy.remove(key)
                 self.startupError = failure
                 self.loadStartup()
             }
@@ -340,10 +349,16 @@ final class MacCareModel {
     }
 
     func removeStartup(_ item: StartupItem) {
+        let key = item.url.lastPathComponent
+        guard !startupBusy.contains(key) else { return }
+        startupBusy.insert(key)
         Task.detached(priority: .userInitiated) {
             if !item.isOff { _ = Startup.launchctl(["bootout", "gui/\(getuid())", item.url.path]) }
             await MainActor.run {
-                self.trash([CareItem(url: item.url, size: 0)]) { _ in self.loadStartup() }
+                self.trash([CareItem(url: item.url, size: 0)]) { _ in
+                    self.startupBusy.remove(key)
+                    self.loadStartup()
+                }
             }
         }
     }

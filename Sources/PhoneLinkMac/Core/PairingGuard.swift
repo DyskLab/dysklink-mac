@@ -168,3 +168,45 @@ enum IncomingFileRule {
         }
     }
 }
+
+/// While a code shows, a `pair.request` with a new nonce would need a new CPace share, which costs a hash, Elligator 2,
+/// and X25519. One share stays per prompt: a new nonce gets a new one only after a counted wrong code from that device,
+/// or at most once every `interval` seconds. Other new nonces are dropped.
+struct PakeRenewal {
+    static let interval: TimeInterval = 2
+
+    private var madeAt: Date?
+    private var wrongSince = false
+
+    /// A share was just made for a new prompt.
+    mutating func started(now: Date = Date()) {
+        madeAt = now
+        wrongSince = false
+    }
+
+    /// The device typed a wrong code, which PairingGuard counted.
+    mutating func wrongCode() { wrongSince = true }
+
+    /// Whether a request with a new nonce gets a new share now. True also records it.
+    mutating func allowsNewShare(now: Date = Date()) -> Bool {
+        let due = madeAt.map { now.timeIntervalSince($0) >= Self.interval || now < $0 } ?? true
+        guard wrongSince || due else { return false }
+        started(now: now)
+        return true
+    }
+}
+
+/// A code typed on this Mac before the other side's `pair.pake` came. It goes once the share arrives, but only while
+/// that typed code still stands: a wrong-code answer or a reset drops it.
+struct PendingCode {
+    private(set) var code: String?
+
+    mutating func hold(_ code: String) { self.code = code }
+    mutating func clear() { code = nil }
+
+    /// The code to send now that the share came, if this Mac's typed code is still the one waiting.
+    mutating func take(localAccepted: Bool) -> String? {
+        defer { code = nil }
+        return localAccepted ? code : nil
+    }
+}

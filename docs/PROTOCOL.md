@@ -331,7 +331,178 @@ Phones also listen on TCP 47822 (TLS, client certificate required, so the ID is 
 Between two phones only the one with the smaller ID dials. Pairing is the same 6-digit code.
 
 Allowed between phones: `hello`, `pair.*`, `unpair`, `info`, `clipboard` (the receiver answers `clipboard.ack`), `ring`,
-`ping`/`pong`, and `file.*`. Everything else from a phone is dropped.
+`ping`/`pong`, and `file.*`, plus the screen and camera messages below (since 1.3), the notification, call,
+push-to-talk, and sound messages (since 1.4), the link, music, monitor, quiet, and locate messages (since 1.5),
+and the SMS, move, and photo backup messages (since 1.6), which pass only the per-phone switches. Everything else from
+a phone is dropped, so Mac-only messages (`sms.*`, `contacts.*`, `fs.*`, `input`, ...) stay Mac-only.
+
+### Another phone's screen and camera (1.3)
+
+A phone lists `p2p-screen` and `p2p-camera` in `hello.caps`. The other phone shows View screen and Camera only for a
+peer that lists them, so phones on 1.2.0 and older (`caps` of `["bin1"]` or none) never see the buttons. Computers
+never list them, and the desktop apps keep sending `["bin1"]`.
+
+The phone being viewed or used (B) keeps a switch per paired phone (A): view the screen, control it, use the camera.
+All start off; unpairing clears them. Viewing and the camera have three states: never asked, allowed, refused.
+
+| Type | Content | Direction | Passes on B when |
+|---|---|---|---|
+| `screen.request` | - | A to B | Always, unless refused: B only shows a notification. Never asked: tapping it asks "Allow A to view this screen?" (Allow, Not now, Never) before Android's own recording dialog, which asks every session. Refused: B answers `screen.stopped` with `error` |
+| `screen.sync` | - | A to B | Viewing allowed |
+| `screen.stop` | - | A to B | Always; it only ends A's own session |
+| `control` | `control` as from a Mac (`down`, `drag`, `up`, `key` `back`/`home`/`recents`, ...) | A to B | Viewing and control allowed, B's screen is shared with A now, and DyskLink's Accessibility service runs on B. Otherwise dropped |
+| `screen.started` | `screen`, and `canControl` (whether A's taps go through) | B to A | Sent again when B turns, or a switch or Accessibility changes |
+| `camera.request` | - | A to B | Always, unless refused: B shows a notification, and the camera starts only after a tap (Android doesn't allow it from the background). Never asked: the tap asks "Allow A to use the camera?" first |
+| `camera.sync` | - | A to B | Camera allowed |
+| `camera.control` | `text`: `switch`, `torch`, `record.start`, `record.stop` | A to B | Camera allowed, and only for A's own stream |
+| `camera.zoom` | `zoom` from 1 to `maxZoom` | A to B | Camera allowed |
+| `camera.shutter` | `key`: a name for this photo | A to B | Camera allowed. Answered with `camera.shot` |
+| `camera.stop` | - | A to B | Always; it only ends A's own stream |
+| `camera.started` | as for the Mac, plus `cameraState`: `zoom`, `maxZoom`, `flash`, `torch`, `recording`, `stills` | B to A | Sent again when any of these change |
+| `camera.shot` | `key`, `text` (`photo` or `video`), `file.name`, or `error` | B to A | |
+
+Messages from B to A (`screen.started`/`frame`/`stopped`, `camera.started`/`frame`/`stopped`/`shot`) are taken only
+while A has asked B for that one and hasn't stopped; anything else is dropped. A `*.stopped` ends it until A asks again.
+
+- One viewer at a time: a second phone or Mac asking while B's camera is in use gets `camera.stopped` with `error` at
+  once; for the screen, `screen.stopped` with `error` comes when its request is tapped on B.
+- B shows "Being viewed by A" or "Camera used by A" with Stop while it runs. It ends when either side stops, when the
+  connection drops (no waiting for it to come back, unlike with a Mac), when A's viewer leaves the screen, when Android
+  ends the recording, or when B turns the switch off.
+- `camera.shutter`: B takes a full-size JPEG on a second output at the camera's largest JPEG size, while the video goes
+  on, saves it in Pictures/DyskLink, answers `camera.shot`, then sends the photo with the usual `file.*` messages.
+  At most 3 photos wait at once; more are answered with `error`. The self-timer runs on A.
+- `record.start`/`record.stop`: B records the stream it already encodes (no sound, up to 10 minutes) into
+  Movies/DyskLink, then answers `camera.shot` with `text: "video"` and sends the file.
+- Frame sizes and the 1 MiB frame limit are unchanged; video is the same H.264 as for the Mac, binary to `bin1` peers.
+
+### Notifications, calls, push-to-talk, and sound between phones (1.4)
+
+A phone lists `p2p-notify`, `p2p-talk`, and `p2p-sound` in `hello.caps`; the other phone shows Notifications, Hold to
+talk, and Play sound there only for a peer that lists them, and tells the user to update a peer that doesn't. B is the
+phone whose notifications are sent, or that plays the voice or sound; A is the other one. B's switches for A (kept with
+the screen and camera ones, cleared on unpair): send notifications (off), the apps left out of them, send calls (off),
+talk to this phone and play sound from A (never asked, allowed, refused).
+
+| Type | Content | Direction | Passes when |
+|---|---|---|---|
+| `notification.posted` | `notification` as for a Mac, plus `reply` and `markRead` (B's notification has those actions) | B to A | Sent only while B's switch for A is on, never for a left-out app; the ones showing go with `silent: true` when A connects or the switch turns on |
+| `notification.removed` | `key` | B to A | For a notification B sent A |
+| `notification.cleared` | - | B to A | The switch went off or the left-out apps changed; A drops all from B (B then resends what it may) |
+| `call` | `call` as for a Mac | B to A | B's call switch for A is on (and Android's phone permission) |
+| `notification.dismiss` | `key` | A to B | B's switch is on and B sent A that key; otherwise dropped |
+| `notification.read` | `key` | A to B | As for dismiss. B presses the notification's "mark as read" action |
+| `notification.reply` | `key`, `text` (at most 2000 characters) | A to B | As for dismiss. B fills the notification's reply action (RemoteInput). Always answered |
+| `notification.result` | `key`, `error` | B to A | Answer to `notification.reply`, with `error` when refused or failed |
+| `talk.start` | `audioRate`, `audioChannels` (16000, 1) | A to B | Allowed and no other phone is talking to B. Never asked: refused, and B asks "Allow A to talk to this phone?" (Allow, Not now, Never) |
+| `talk.frame` | 16-bit PCM in `audio`, binary to `bin1` peers; 40 ms each | A to B | After a `talk.start` B took |
+| `talk.stop` | - | A to B | Ends A's own voice |
+| `talk.stopped` | `error` | B to A | Refused (with why), or stopped on B |
+| `audio.started`, `audio.frame`, `audio.stopped` | as from a phone to a Mac | A to B | Like `talk.*`, by B's "Play sound from A" switch; one phone's sound at a time |
+| `audio.stop` | `error` | B to A | Refused (with why), or stopped on B; A stops recording |
+
+- B's notifications follow the Mac's rules: none an app marks secret, no ongoing ones, none of DyskLink's own. One-time
+  codes go as text, as to a Mac. A shows them as notifications under a channel group per phone (private on the lock
+  screen), and in a list on B's page, only while B is connected: removed on B or a dropped connection removes them on A.
+- A ringing call shows on A with Silence, which only quiets A. There is no reject or answer from A: B has no call control.
+- Push-to-talk is half-duplex: A records the microphone while Talk is held (a microphone foreground service), B plays it
+  with a short queue and a beep at start and end, and shows "A is talking" with Stop.
+- Sound uses B's player for a Mac's sound (the same queue and cushion after a gap), and A's recording of what it plays
+  (Android 10 and newer, the same Android prompt as for a Mac). Either side can stop it; a dropped connection ends both
+  voice and sound on both sides at once, and turning B's switch off ends them too.
+
+### Links, music remote, family monitor, quiet mode, and Locate (1.5)
+
+A phone lists `p2p-open`, `p2p-media`, `p2p-monitor`, `p2p-quiet`, and `p2p-locate` in `hello.caps`; the other phone
+shows the matching cards only for a peer that lists them, and tells the user to update a peer that doesn't. A asks, B
+carries it out. B keeps a switch per kind for A (with the others, cleared on unpair): accept links, control music,
+share screen time, silence this phone, share location. Each is never asked, allowed, or refused. A request B doesn't
+carry out is answered at once with the answer type and `error` saying why; never asked, B also asks its user once
+(Allow, Not now, Never). A takes an answer only for a request it sent, once each, within 20 s (60 s for Locate); any
+other answer is dropped.
+
+| Type | Content | Direction | Passes on B when |
+|---|---|---|---|
+| `link.open` | `text`: the link, `key` | A to B | Links allowed. B checks the link again (below) and shows "A sent a link" with Open |
+| `link.result` | `key`, `text` (the link as shown), or `error` | B to A | |
+| `media.remote` | `media`: `play_pause`, `next`, `previous`, `volume_up`, `volume_down`, or `state` | A to B | Music allowed. Anything else is answered with `error` |
+| `media.state` | `nowPlaying`: `title`, `artist`, `app`, `playing`, `art` (base64 JPEG, at most 128 px), `volume`, `maxVolume`, `note`; or `error` | B to A | Answer to each `media.remote` |
+| `monitor.request` | - | A to B | Screen time allowed |
+| `monitor.report` | `usage` as `usage` for a Mac, or `error` (no Usage access) | B to A | |
+| `quiet.set` | `quiet`: `mode` (`silent`, `vibrate`, `normal`, `dnd.on`, `dnd.off`), and `minutes` (1 to 720) or `untilMorning` | A to B | Quiet allowed |
+| `quiet.result` | `quiet` as set, with `until` (ms since 1970) when it goes back by itself; or `error` | B to A | |
+| `locate.request` | - | A to B | Location allowed |
+| `locate.result` | `location`: `lat`, `lon`, `accuracy` (m), `time` (ms since 1970), `provider`; or `error` | B to A | |
+
+- Links: only `http`/`https` (with a host, no user info), `geo:` with valid coordinates, and phone numbers (`tel:` or
+  bare digits with `+ - ( ) .` and spaces; no `*` or `#`). Everything else (`intent:`, `file:`, `content:`,
+  `javascript:`, `data:`, `sms:`, `mailto:`, ...) is refused by both phones. Nothing opens by itself: Open starts the
+  browser (`BROWSABLE`), the maps app, or the dialer with the number filled in (`ACTION_DIAL`, never a call). A sends
+  them from its share sheet ("Open on B") or the "Send link…" field on B's page.
+- Music: B uses the active media session (through DyskLink's notification listener; without notification access the
+  buttons still go as media keys and `note` says why there's no title). Volume is the music stream, without a panel on B.
+  A asks for `state` every 3 s while the card shows, only after B answered once.
+- Monitor: B's battery comes in `info` as before and needs no switch. A's alerts (kept on A, cleared on unpair): low at
+  10-30 % (15 % by default), once until B charges above it or rises 5 points over it; full at 100 % while charging,
+  once until unplugged.
+- Quiet: `until` is worked out on B, in B's time zone (`untilMorning` is the next 07:00 there). Silent and Do Not
+  Disturb need Do Not Disturb access on B; vibrate and normal are tried without it. B keeps what was on before the
+  first change and shows "A turned on Do Not Disturb" (or the mode) with Undo, which puts it back, as does the end time.
+- Locate: B answers with a current fix (the platform fused provider on Android 12+, else GPS or network) within 12 s,
+  else the last known one. B needs the location permission while in use; never background location. While some phone
+  may ask, B's DyskLink service adds the `location` foreground type the next time the app is on screen; until then
+  Android may give nothing, and the answer says "Location unavailable while DyskLink is in the background on B".
+- Ring + flash: `ring` `start` with `text: "flash"` also blinks B's back torch until the ring stops. Older phones
+  ignore `text` and only ring.
+
+### SMS through another phone, moving to a new phone, and photo backup (1.6)
+
+A phone lists `p2p-sms`, `p2p-move`, and `p2p-backup` in `hello.caps`; the other phone shows SMS, Move here, and the
+photo backup card only for a peer that lists them, and tells the user to update a peer that doesn't. B keeps three
+more switches for A (never asked, allowed, refused; cleared on unpair): read and send SMS, accept a phone move, accept
+photo backup. Never asked, B refuses with `error` and asks its user once (Allow, Not now, Never).
+
+| Type | Content | Direction | Passes on B when |
+|---|---|---|---|
+| `psms.list` | `key`; `smsThread` for one thread | A to B | SMS allowed, and Android's SMS permission on B |
+| `psms.listing` | `key`, `smsThread`, `sms` (the newest message of each thread, at most 100; or the thread's last 200), or `error` | B to A | |
+| `psms.send` | `smsSend`: `id`, `address`, `body` (at most 2000 characters) | A to B | SMS allowed, at most 10 a minute from A |
+| `psms.result` | `smsResult`: `id`, `ok`, `error` | B to A | Answer to each `psms.send`, once the carrier took it or refused it |
+| `psms.watch` | `key` | A to B | SMS allowed. B then sends new SMS while connected |
+| `psms.watching` | `key`, or `error`; without `key`, B stopped (the switch went off) | B to A | |
+| `psms.unwatch` | - | A to B | Always; it only stops what A gets |
+| `psms.new` | `sms`: up to 20 new messages | B to A | Only to a phone that watches and is still allowed |
+| `move.request` | `key`, `move`: `id`, `contacts`, `photos`, `files`, `bytes` | A (old) to B (new) | Move allowed, and `bytes` leaves at least 1 GB free |
+| `move.answer` | `key`, `move`, `info.storageFreeBytes`; or `error` (and `file.reason: "low-space"`) | B to A | |
+| `move.done` | `move` with `sent`, `skipped`, `failed`, `contactsFile` | A to B | Move allowed. B shows a summary with Import contacts |
+
+- SMS: B's `sms.*` for a Mac are unchanged and never pass between phones. `address` is digits with `+ - ( ) .` and
+  spaces only (no `*` or `#`, so no USSD). B shows "A sent an SMS to <number> using this phone" for each one sent,
+  and keeps a log of every send and refused send on A's page (kept after unpairing). A takes `psms.listing` and
+  `psms.watching` only with a `key` it sent within 20 s, `psms.result` only for an `id` it sent within 2 min, and
+  `psms.new` only while B took its watch; anything else is dropped. A opens the SMS screen only after its own screen
+  lock (fingerprint, face, or PIN) is confirmed, once per session: the session ends after 5 minutes without use, when
+  the screen turns off, or when DyskLink leaves the screen. "Show new SMS here" (kept on A) sends `psms.watch` again
+  each time B connects; new SMS show as notifications on A, private on the lock screen. B sends with its default SMS
+  SIM. No MMS.
+- Files of a move and photo backup use the usual `file.*` messages, with `file.kind`: `photo` (backup),
+  `move.contacts`, `move.media`, or `move.file`. A plain `file.offer` without one of these kinds goes to Downloads as
+  before, without a switch. `file.offer` may carry `folder` (a `/`-separated path, made safe by the receiver: no
+  `..`, at most 6 levels) and `sha256`. B refuses with `file.result` `ok: false`, `error`, and `reason`: `ask` (never
+  asked), `off` (refused), or `low-space` (less than 1 GB would be left; B shows a notification). A copy B already has
+  (same folder, name, size, and SHA-256, still on B) is answered at once with `ok: true, skipped: true`, and A stops
+  sending it.
+- Where B keeps them: photos and videos (`photo`, `move.media`) in Pictures/DyskLink/<A's name>/, everything else in
+  Download/DyskLink/<A's name>/<folder>/. B never writes contacts: `move.done` names the .vcf (vCard 3.0), and Import
+  contacts opens it with the system Contacts app.
+- Moving (on the old phone): pick contacts (read with the contacts permission, sent as one .vcf), photos and videos
+  (all, or a date range), and folders (the system folder picker). A sends `move.request`, then one file at a time,
+  then `move.done`. Its progress is kept on disk: pause cancels the file being sent and resumes with it; a dropped
+  connection waits and asks again when B is back; a file that fails three times is left out. Refusals pause the move
+  with why.
+- Photo backup (on the phone with the photos): as photo sync to a Mac, each target with its own position and its own
+  options (Include videos, Only on Wi-Fi, Only while charging, earlier photos). To a phone, each offer carries
+  `sha256`. On `low-space`, A turns backup to that phone off and shows a notification.
 
 ## Pairing, version 2 (no longer accepted)
 
@@ -385,7 +556,8 @@ phones can start it, and the Mac shows a notification while its screen is viewed
 Photos use the usual file messages. A `file.offer` with `file.kind = "photo"` is saved in
 `~/Pictures/DyskLink/<phone name>/` instead of Downloads. Older Macs ignore `kind` and save to Downloads.
 The phone sends photos added after sync was turned on, oldest first, one at a time, and moves on only after
-`file.result` says the Mac saved it.
+`file.result` says the Mac saved it. Since 1.6 a paired phone that lists `p2p-backup` can be a target too (see "SMS through another
+phone, moving to a new phone, and photo backup"), and "Only while charging" waits until the phone is plugged in.
 
 ## Phone camera on the Mac
 
