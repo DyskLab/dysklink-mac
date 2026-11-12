@@ -186,13 +186,24 @@ final class MacCareModel {
 
     var appRoots: [URL] { [URL(fileURLWithPath: "/Applications"), home.appendingPathComponent("Applications")] }
 
+    /// Drops apps that are gone, such as ones dragged to the Trash in Finder, then lists the folders again
+    /// so new ones show up too.
+    func refreshApps() {
+        apps.removeAll { !MacCare.exists($0.url) }
+        if let chosen = chosenApp, !MacCare.exists(chosen.url) { choose(nil) }
+        loadApps()
+    }
+
     func loadApps() {
         guard !isLoadingApps else { return }
         isLoadingApps = true
         let roots = appRoots
         Task.detached(priority: .userInitiated) {
             let list = Uninstaller.apps(in: roots)
-            await MainActor.run { self.apps = list }
+            await MainActor.run {
+                let sizes = Dictionary(self.apps.compactMap { app in app.size.map { (app.id, $0) } }, uniquingKeysWith: { a, _ in a })
+                self.apps = list.map { app in var app = app; app.size = sizes[app.id]; return app }
+            }
             // Sizes come in as they're counted, so the list shows right away.
             for app in list {
                 let size = MacCare.size(of: app.url)
@@ -238,12 +249,49 @@ final class MacCareModel {
         }
     }
 
-    func isRunning(_ app: InstalledApp) -> Bool {
-        !NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleId).isEmpty
+    /// Bumped when an app opens or quits, so views that ask `isRunning` draw again.
+    private var runningChanges = 0
+    @ObservationIgnored private var workspaceObservers: [NSObjectProtocol] = []
+    /// The app that was asked to quit and hasn't yet, offered a Force Quit.
+    var stuckQuit: String?
+    /// Set while waiting for an app to quit.
+    var quitting: String?
+
+    private func watchRunningApps() {
+        guard workspaceObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.runningChanges += 1 }
+            })
+        }
     }
 
-    func quit(_ app: InstalledApp) {
-        NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleId).forEach { $0.terminate() }
+    func isRunning(_ app: InstalledApp) -> Bool {
+        _ = runningChanges
+        watchRunningApps()
+        return !NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleId).isEmpty
+    }
+
+    /// Asks the app to quit, as Quit in its menu does (it may ask to save). After 6 seconds still open, Force Quit is offered.
+    func quit(_ app: InstalledApp, force: Bool = false) {
+        watchRunningApps()
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleId)
+        guard !running.isEmpty else { runningChanges += 1; return }
+        stuckQuit = nil
+        quitting = app.bundleId
+        for app in running { if force { app.forceTerminate() } else { app.terminate() } }
+        let id = app.bundleId
+        Task { @MainActor [weak self] in
+            for _ in 0..<12 {
+                try? await Task.sleep(for: .milliseconds(500))
+                if NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty { break }
+            }
+            guard let self, self.quitting == id else { return }
+            self.quitting = nil
+            self.runningChanges += 1
+            if !NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty { self.stuckQuit = id }
+        }
     }
 
     var uninstallSize: Int64 {
@@ -252,6 +300,13 @@ final class MacCareModel {
 
     func uninstallChosen() {
         guard let app = chosenApp else { return }
+        // Removed meanwhile, in Finder or by its own uninstaller.
+        guard MacCare.exists(app.url) else {
+            apps.removeAll { $0.id == app.id }
+            choose(nil)
+            message = "\(app.name) is no longer on this Mac."
+            return
+        }
         let items = [CareItem(url: app.url, size: app.size ?? 0)] + leftovers.map(\.item).filter { leftoverSelected.contains($0.id) }
         trash(items) { moved in
             if moved.contains(app.id) {
@@ -373,14 +428,22 @@ final class MacCareModel {
 
     private func trash(_ items: [CareItem], done: @escaping (Set<String>) -> Void) {
         let byPath = Dictionary(items.map { ($0.url.standardizedFileURL.path, $0) }, uniquingKeysWith: { a, _ in a })
-        MacCare.trash(items.map(\.url)) { moved, failed in
+        MacCare.trash(items.map(\.url)) { moved, failed, problem in
             let movedItems = moved.compactMap { byPath[$0.standardizedFileURL.path] }
             let ids = Set(movedItems.map(\.id))
             let bytes = movedItems.reduce(0) { $0 + $1.size }
             var text = movedItems.isEmpty ? "" : "Moved \(movedItems.count) item\(movedItems.count == 1 ? "" : "s")"
                 + (bytes > 0 ? ", \(Format.bytes(bytes))," : "") + " to the Trash. Empty the Trash to free the space."
-            if !failed.isEmpty { text += (text.isEmpty ? "" : " ") + "\(failed.count) couldn't be moved, maybe because they're in use or protected." }
-            self.message = text
+            if !failed.isEmpty {
+                let count = "\(failed.count) item\(failed.count == 1 ? "" : "s")"
+                let why = switch problem {
+                case .cancelled: "\(count) stayed, because the password was cancelled."
+                case .finderNotAllowed: "\(count) couldn't be moved: allow DyskLink to control Finder in System Settings › Privacy & Security › Automation, then try again."
+                default: "\(count) couldn't be moved, maybe because they're in use or protected. Quit the app, or drag it to the Trash in Finder."
+                }
+                text += (text.isEmpty ? "" : " ") + why
+            }
+            self.message = text.isEmpty ? nil : text
             done(ids)
         }
     }

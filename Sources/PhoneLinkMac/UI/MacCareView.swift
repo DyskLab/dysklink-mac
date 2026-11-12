@@ -40,13 +40,19 @@ struct MacCareView: View {
         .alert(item: $care.confirm) { confirm in alert(for: confirm) }
         .onAppear {
             guard care.loadsOnShow else { return }
-            if care.tab == .uninstall, care.apps.isEmpty { care.loadApps() }
+            if care.tab == .uninstall { care.refreshApps() }
             if care.tab == .startup { care.loadStartup() }
             if care.tab == .battery { care.startBattery() }
         }
         .onDisappear { care.stopBattery() }
+        // Back from Finder or an app's own uninstaller: show what's really there now.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            guard care.loadsOnShow else { return }
+            if care.tab == .uninstall { care.refreshApps() }
+            if care.tab == .startup { care.loadStartup() }
+        }
         .onChange(of: care.tab) { _, tab in
-            if tab == .uninstall, care.apps.isEmpty { care.loadApps() }
+            if tab == .uninstall { care.refreshApps() }
             if tab == .startup { care.loadStartup() }
             if tab == .battery, care.loadsOnShow { care.startBattery() } else { care.stopBattery() }
         }
@@ -672,9 +678,18 @@ private struct AppUninstallCard: View {
                     if care.isRunning(app) {
                         HStack(spacing: 10) {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amber)
-                            Text("\(app.name) is open. Quit it before uninstalling.").font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
+                            Text(care.stuckQuit == app.bundleId
+                                 ? "\(app.name) didn't quit. It may be asking something in its window, or it's stuck."
+                                 : "\(app.name) is open. Quit it before uninstalling.")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).fixedSize(horizontal: false, vertical: true)
                             Spacer()
-                            Button("Quit \(app.name)") { care.quit(app) }.buttonStyle(SecondaryButtonStyle())
+                            if care.quitting == app.bundleId {
+                                ProgressView().controlSize(.small)
+                            } else if care.stuckQuit == app.bundleId {
+                                Button("Force Quit") { care.quit(app, force: true) }.buttonStyle(SecondaryButtonStyle())
+                            } else {
+                                Button("Quit \(app.name)") { care.quit(app) }.buttonStyle(SecondaryButtonStyle())
+                            }
                         }
                         .padding(10)
                         .background(Theme.amber.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -736,12 +751,14 @@ private struct StartupRow: View {
             .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Text(item.appName ?? item.label).font(.system(size: 13, weight: .semibold)).foregroundStyle(item.isOff ? Theme.textSecondary : Theme.textPrimary).lineLimit(1)
-                    if item.scope == .daemon { tag("System") }
-                    if item.keepsAlive { tag("Always running") } else if item.runsAtLoad { tag("At login") }
+                    Text(item.displayName).font(.system(size: 13, weight: .semibold)).foregroundStyle(item.isOff ? Theme.textSecondary : Theme.textPrimary).lineLimit(1)
+                    if item.isOff { tag("Off") } else if item.keepsAlive { tag("Always running") } else if item.runsAtLoad { tag("At login") }
                 }
-                Text(item.appName == nil ? item.program : item.label).font(.system(size: 11)).foregroundStyle(Theme.textFaint).lineLimit(1).truncationMode(.middle)
+                Text(item.purpose + (item.scope == .daemon ? " · for all users" : ""))
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                Text(item.label).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.textFaint).lineLimit(1).truncationMode(.middle)
             }
+            .help("\(item.label)\n\(item.program)")
             Spacer(minLength: 8)
             IconButton(icon: "magnifyingglass", help: "Show in Finder", action: onReveal)
             if editable {

@@ -34,7 +34,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key><true/>
     <key>LSUIElement</key><true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>DyskLink asks Music, Spotify, and your browser what's playing, to show album art and the song's position in the notch.</string>
+    <string>DyskLink asks Music, Spotify, and your browser what's playing, to show album art in the notch, and asks Finder to move apps you uninstall to the Trash.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>DyskLink uses the local network to connect to your phone.</string>
     <key>NSBonjourServices</key>

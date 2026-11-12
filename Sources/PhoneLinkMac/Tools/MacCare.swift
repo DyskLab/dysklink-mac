@@ -66,12 +66,48 @@ enum MacCare {
     /// Moves items to the Trash, where they can be put back. Finder asks for a password when one needs it.
     @MainActor
     static func trash(_ urls: [URL], done: @escaping (_ moved: [URL], _ failed: [URL]) -> Void) {
-        guard !urls.isEmpty else { return done([], []) }
+        trash(urls) { moved, failed, _ in done(moved, failed) }
+    }
+
+    /// Why the Finder couldn't move an item, so the message can say what to do.
+    enum TrashProblem: Sendable { case cancelled, finderNotAllowed, other }
+
+    /// Moves items to the Trash. What NSWorkspace can't move (apps owned by root, or blocked by App Management since
+    /// macOS 13) goes through the Finder, which asks for an administrator password as it does when you drag an app
+    /// to the Trash.
+    static func trash(_ urls: [URL], done: @escaping (_ moved: [URL], _ failed: [URL], _ problem: TrashProblem?) -> Void) {
+        guard !urls.isEmpty else { return done([], [], nil) }
         NSWorkspace.shared.recycle(urls) { moved, _ in
-            let gone = Array(moved.keys)
-            let failed = urls.filter { url in !gone.contains { $0.standardizedFileURL == url.standardizedFileURL } && exists(url) }
-            DispatchQueue.main.async { done(gone, failed) }
+            var gone = Array(moved.keys)
+            let left = urls.filter { url in !gone.contains { $0.standardizedFileURL == url.standardizedFileURL } && exists(url) }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var failed: [URL] = []
+                var problem: TrashProblem?
+                for url in left {
+                    if problem == .cancelled || problem == .finderNotAllowed { failed.append(url); continue }
+                    switch finderTrash(url) {
+                    case nil where !exists(url): gone.append(url)
+                    case nil: failed.append(url); problem = problem ?? .other
+                    case let p?: failed.append(url); problem = p
+                    }
+                }
+                DispatchQueue.main.async { done(gone, failed, problem) }
+            }
         }
+    }
+
+    /// Asks the Finder to move one item to the Trash. The path goes in as an argument, never into the script text.
+    /// Nil when the Finder said yes.
+    private static func finderTrash(_ url: URL) -> TrashProblem? {
+        let script = ["on run argv", "tell application \"Finder\" to delete (POSIX file (item 1 of argv) as alias)", "end run"]
+        let args = script.flatMap { ["-e", $0] } + [url.path]
+        // No time limit: the Finder may be waiting for the password.
+        guard let result = ProcessRunner.run("/usr/bin/osascript", args, timeout: nil, errorOutput: .capture) else { return .other }
+        if result.succeeded { return nil }
+        let text = result.errorText
+        if text.contains("-128") { return .cancelled }
+        if text.contains("-1743") { return .finderNotAllowed }
+        return .other
     }
 }
 
@@ -450,6 +486,66 @@ struct StartupItem: Identifiable, Hashable, Sendable {
     /// The app the program belongs to, from the .app in its path.
     var appName: String? {
         program.components(separatedBy: "/").first { $0.hasSuffix(".app") }.map { String($0.dropLast(4)) }
+    }
+
+    /// A name people recognise: the app in the program's path, an installed app whose ID starts the label
+    /// (`us.zoom.ZoomDaemon` → zoom.us), a Homebrew service, or the label tidied up.
+    @MainActor var displayName: String { StartupNames.name(for: self) }
+
+    /// What it does, in a few words, from its label and program.
+    var purpose: String {
+        let text = (label + " " + program).lowercased()
+        if label.hasPrefix("sh.brew.") { return "Homebrew service" }
+        if text.contains("update") || text.contains("keystone") { return "Checks for updates" }
+        if text.contains("licens") { return "Checks the license" }
+        if text.contains("notification") { return "Shows notifications" }
+        if text.contains("helper") || text.contains("daemon") || text.hasSuffix("d") && scope == .daemon {
+            return scope == .daemon ? "Helper with system rights" : "Background helper"
+        }
+        if text.contains("loader") || text.contains("driver") { return "Loads a driver" }
+        return scope == .daemon ? "Runs as the system" : "Runs in the background"
+    }
+}
+
+/// Friendly names for startup items, worked out once per label.
+@MainActor enum StartupNames {
+    private static var cache: [String: String] = [:]
+    private static let known: [String: String] = [
+        "com.google.keystone": "Google Updater", "com.google.GoogleUpdater": "Google Updater",
+        "com.microsoft.autoupdate": "Microsoft AutoUpdate", "com.microsoft.update": "Microsoft AutoUpdate",
+        "com.microsoft.office": "Microsoft Office", "com.paragon-software.ntfs": "Paragon NTFS",
+        "id.dysklink": "DyskLink", "com.docker": "Docker", "us.zoom": "Zoom", "de.beyondco.herd": "Herd",
+        "com.apphousekitchen.aldente-pro": "AlDente Pro", "com.apphousekitchen.aldente": "AlDente",
+    ]
+
+    static func name(for item: StartupItem) -> String {
+        if let app = item.appName { return app }
+        if let hit = cache[item.label] { return hit }
+        let found = lookUp(item.label)
+        cache[item.label] = found
+        return found
+    }
+
+    private static func lookUp(_ label: String) -> String {
+        if label.hasPrefix("sh.brew.") {
+            let service = label.dropFirst("sh.brew.".count).split(separator: "@").first.map(String.init) ?? label
+            return service.prefix(1).uppercased() + service.dropFirst()
+        }
+        if let name = known.first(where: { label == $0.key || label.hasPrefix($0.key + ".") })?.value { return name }
+        // An installed app whose ID is the label or starts it, trying shorter prefixes down to vendor.product.
+        var parts = label.split(separator: ".").map(String.init)
+        while parts.count >= 2 {
+            let id = parts.joined(separator: ".")
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+                return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+            }
+            parts.removeLast()
+        }
+        // Vendor and product from the label: com.apphousekitchen.aldente-pro.helper → Aldente Pro.
+        let pieces = label.split(separator: ".").map(String.init)
+        let product = pieces.count >= 3 ? pieces[2] : pieces.last ?? label
+        return product.replacingOccurrences(of: "-", with: " ").split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
     }
 }
 
