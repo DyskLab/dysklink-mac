@@ -14,7 +14,9 @@ DyskLink for Windows and Linux advertises the same service on the same port, wit
 `platform=linux`, and plays the Mac's part: phones dial it, it shows the pairing code, and it accepts the clipboard,
 files, notifications, calls, ringing, and status. Phones treat `macos`, `windows`, and `linux` as computers and any
 other platform as a phone. With **Sync with other computers** on, it also browses for other computers and
-connects to Macs and PCs the same way Macs connect to each other, with the same allow-list. Mac-only messages (screen, notch, charging, and so on) are only sent to `macos`.
+connects to Macs and PCs the same way Macs connect to each other, with the same allow-list. Mac-only messages (screen, notch, charging, and so on) are only sent to `macos`, except the phone's screen, camera, gallery, and SMS, which
+a Windows or Linux computer gets once its `hello.caps` lists `pc-screen`, `pc-camera`, `pc-gallery`, or `pc-sms` (see
+"Phone features on Windows and Linux").
 
 Android closes duplicate connections to the same device before sending `hello`.
 The Mac only registers a connection after receiving `hello`, and that connection then replaces the old one.
@@ -232,7 +234,7 @@ Keys in `input.key` are also limited by a fixed list on the Mac. A `shortcut` se
 
 ## Notch: Todo list, water, and Pomodoro
 The Mac keeps this data. The phone shows it and asks for changes, and the Mac then sends the new state to every
-paired phone.
+paired phone. A Windows or Linux PC that lists `pc-notch` does the same (see Deck, tools, scans, and typing on a PC).
 
 | Type | Content | Condition |
 |---|---|---|
@@ -304,7 +306,8 @@ Live copies use the normal `clipboard` message. Images aren't synced.
 ## DeviceInfo
 All fields are optional: `batteryPercent`, `isCharging`, `network`, `storageFreeBytes`, `storageTotalBytes`,
 `osVersion`, `model`, `carrier`, `cellType`, `signalLevel` (0 to 4), `wifiLevel` (0 to 4), `inputTrusted` (from
-the Mac: Accessibility permission is on), `keepAwake` (from the Mac, see Mac actions).
+the Mac: Accessibility permission is on), `keepAwake` (from the Mac, see Mac actions), `remoteControl` (from a Mac or
+PC: it takes another computer's mouse and keyboard now, see One mouse and keyboard).
 
 ## Terminal
 
@@ -340,7 +343,8 @@ a phone is dropped, so Mac-only messages (`sms.*`, `contacts.*`, `fs.*`, `input`
 
 A phone lists `p2p-screen` and `p2p-camera` in `hello.caps`. The other phone shows View screen and Camera only for a
 peer that lists them, so phones on 1.2.0 and older (`caps` of `["bin1"]` or none) never see the buttons. Computers
-never list them, and the desktop apps keep sending `["bin1"]`.
+never list them. Macs keep sending `["bin1"]`; the Windows and Linux app sends `["bin1"]` plus the `pc-*` caps (see
+"Phone features on Windows and Linux").
 
 The phone being viewed or used (B) keeps a switch per paired phone (A): view the screen, control it, use the camera.
 All start off; unpairing clears them. Viewing and the camera have three states: never asked, allowed, refused.
@@ -618,8 +622,176 @@ receivers keep getting every chunk, silence included.
 
 | Type | Fields | Notes |
 |---|---|---|
-| `audio.listen` | - | Phone to Mac. Refused with `audio.stopped` and `error` unless "Let phones hear this Mac" is on |
+| `audio.listen` | - | Phone to Mac, or to a PC that lists `pc-sound-out`. Refused with `audio.stopped` and `error` unless "Let phones hear this Mac" (or "this PC") is on |
 | `audio.started` | `audioRate`, `audioChannels` | From the side that sends sound, before its chunks |
 | `audio.frame` | `audio` (or the binary payload) | One chunk. The Mac keeps at most 6 unconfirmed chunks per phone in flight |
 | `audio.stop` | - | Asks the other side to stop sending its sound. A phone screen goes on without sound |
 | `audio.stopped` | `error` (optional) | The sender stopped |
+
+## Phone features on Windows and Linux
+
+Since the desktop app's phone tabs, a Windows or Linux computer can show the phone's screen (and control it), its camera,
+its gallery, and its SMS, as a Mac does. Each is opened by a cap in `hello.caps`:
+
+| Cap | Lets a `windows`/`linux` computer send | Video |
+|---|---|---|
+| `pc-screen` | `screen.request`, `screen.sync`, `screen.stop`, `control` | JPEG frames |
+| `pc-camera` | `camera.request`, `camera.sync`, `camera.stop`, `camera.control` | JPEG frames |
+| `pc-gallery` | `gallery.list`, `gallery.get` | - |
+| `pc-sms` | `sms.list`, `sms.send`; the phone also pushes `sms.new` to it | - |
+| `pc-contacts` | `contacts.list` (the phone answers with `contacts`) | - |
+| `pc-files` | `fs.list`, `fs.get` (the phone answers with `fs.listing` and a file transfer) | - |
+
+- The desktop app lists all six (with `bin1`); `pc-contacts` and `pc-files` came later than the first four, and the
+  rules below are the same for them. The phone drops these messages from a PC whose hello doesn't list the
+  matching cap, and pushes `sms.new` only to Macs and to PCs with `pc-sms`, so older desktop builds (`["bin1"]` or no
+  `caps`) get exactly what they got before. Macs never list `pc-*` and are served as before, H.264 included; a Mac
+  passes these messages whatever its caps say.
+- The phone lists the same four caps, meaning it serves them to PCs. The desktop app shows "Update DyskLink on the
+  phone" for a phone that doesn't list one. A phone that doesn't know PCs may still answer `gallery.*` and `sms.*`
+  (it never checked), and may send H.264 for the screen: the PC refuses video without `format: "jpeg"` (see below),
+  sends `screen.stop`/`camera.stop`, and shows the update hint.
+- The phone's own rules are unchanged: every request is checked against the same `features` switches as for a Mac
+  (`screen`, `control`, `gallery`, `sms`); the screen needs Android's recording dialog every session (after a
+  notification the user taps); the camera starts only after a tap on its notification (one-time intent token); one
+  viewer at a time, and a second one gets `screen.stopped`/`camera.stopped` with `error`. `control` needs the `control`
+  feature and DyskLink's Accessibility service, as for a Mac.
+
+### What a PC serves: its sound, commands, a terminal, and a Mac's mouse and keyboard
+
+The desktop app also lists caps for what it serves, which phones don't list (they don't serve these):
+
+| Cap | The PC | The phone |
+|---|---|---|
+| `pc-sound-out` | answers `audio.listen` with its own sound, as a Mac does (see Sound sharing) | shows Hear the PC |
+| `pc-commands` | sends `commands.list` and answers `command.run` with `command.result` | shows PC commands; drops `commands.list` and `command.result` from a PC without it |
+| `pc-terminal` | answers the `terminal.*` messages, as a Mac does (see Terminal) | shows Terminal; drops `terminal.opened`, `terminal.output`, `terminal.closed` from a PC without it |
+| `pc-shared-input` | takes a Mac's `remote.*` (see One mouse and keyboard), as the target only | - |
+| `pc-screen-out` | answers `macscreen.start` with its own screen as JPEG frames (see This PC's screen on a phone) | shows PC screen; drops `macscreen.started`, `macscreen.frame`, `macscreen.stopped` from a PC without it |
+| `pc-deck` | takes the deck's `input` `shortcut` keys with Mac names and maps them (see Deck, tools, scans, and typing on a PC) | shows Stream Deck |
+| `pc-notch` | keeps the notch's Todo, water, and Pomodoro, sends `notch.state`, and answers `notch.action`, as a Mac does | shows PC tools; drops `notch.state` from a PC without it |
+| `pc-type` | types the `input` text and keys of Scan and Voice typing, as a Mac does | shows Scan and Voice typing |
+| `pc-scan` | takes a file with `kind: "scan"` into Documents/DyskLink/Scans, notifies, and opens the PDF | shows Document scan; sends a scan to a PC without it as a plain file (no `kind`) |
+
+- Older desktop builds (`["bin1"]`, or the four `pc-*` phone caps only) refused `audio.listen` with `audio.stopped`
+  and `error`, and never sent commands or terminal messages; the phone shows none of this for them. A Mac is served
+  as before, whatever its caps say.
+- Sound: one phone at a time. The PC answers `audio.listen` with `audio.stopped` and `error` unless "Let phones hear
+  this PC" is on (off by default). Then `audio.started` (48000, 2) and 40 ms chunks of 16-bit stereo PCM, binary to a
+  `bin1` phone with silence held back as for a Mac; at most 6 chunks wait, and the oldest is dropped when the network
+  is behind. `audio.stop` from the phone, the switch going off, Stop on the PC, a second phone asking, and the
+  disconnect all end it; the phone gets `audio.stopped` (with `error` when another phone took over or recording
+  failed). Windows records the default output with WASAPI loopback (shared mode) and converts the mix format (float or
+  integer, any rate and channel count) to 48 kHz stereo; Linux runs `parec` on `@DEFAULT_MONITOR@`, or `pw-record`
+  capturing the default sink, as raw s16le 48 kHz stereo.
+- Commands: each phone is off until "Let <phone> run commands" is on for it on the PC; while off it gets an empty
+  `commands.list` and `command.run` gets `exitCode` -1. The list (sent after `hello` and pairing, and again when the
+  list or the switch changes) has only `id` and `name`. Only listed IDs run: `cmd.exe /c` on Windows, `/bin/sh -c`
+  on Linux, in the home folder, no input, stderr with stdout, at most 60 s (then the process and its children are
+  killed and `exitCode` is -2), and only the last 4096 bytes of output go back.
+- Terminal: each phone is off until "Let <phone> open a terminal" is on for it; while off `terminal.open` gets
+  `terminal.closed` with `error`. Up to 4 per phone; each one opened shows a notice on the PC; turning the switch off,
+  End on the PC, and the disconnect end that phone's terminals (`terminal.closed` with `error` while it's still
+  connected). The shell is PowerShell (else `cmd.exe`) on a ConPTY on Windows, the user's login shell on a pty on
+  Linux, with `TERM=xterm-256color`; `terminal.close` hangs up (SIGHUP on Linux, ending the process on Windows) and
+  kills it after 2 s. The phone asks for its own lock before each session, as for a Mac.
+- One mouse and keyboard: the PC reports `info.remoteControl` true only while "Let paired computers use their mouse
+  and keyboard here" is on (off by default), Other computers is on, and it can post input (not under Wayland). It
+  takes `remote.enter` and `remote.input` only from a device paired as `macos`, refuses `remote.enter` with
+  `remote.exit` otherwise, checks every number as a Mac does, and lets go of held keys and buttons on `remote.exit`,
+  on `remote.leave`, on disconnect, and when the switch goes off (sending `remote.exit`). Pushing the pointer twice
+  past the edge it came in by sends `remote.leave` with `edge` and `at`. Mac key codes are mapped to PC keys by US
+  position; `flags` press and release Shift, Ctrl (Control, and Command unless "Use Command as Ctrl" is off, when
+  Command is the Windows or Super key), and Alt (Option); Caps Lock taps once per change; scroll pixels become wheel
+  notches. A PC never sends `remote.enter`: it isn't a source.
+- The Mac side: to choose a PC in Mouse and keyboard, a Mac must list paired PCs whose `hello.caps` has
+  `pc-shared-input`, and accept `remote.leave` (only that) from a device paired as `windows` or `linux`. Macs that don't
+  yet do this still end control with Control-Option-Command (`remote.exit` is taken from anyone).
+- A PC as the source (its mouse and keyboard moving onto a Mac) isn't built. It needs a global low-level hook on
+  Windows (`WH_MOUSE_LL`/`WH_KEYBOARD_LL`) or an X11 grab, which can't be checked here and would leave the PC without
+  input if it stuck. A Mac that wants it later takes `remote.enter` and `remote.input` from a device paired as
+  `windows` or `linux` whose `hello.caps` has `pc-shared-input-source`, only while "Let paired Macs use their mouse and
+  keyboard here" is on, with the same checks as for a Mac, and answers `remote.exit` to anyone else. No PC lists that
+  cap yet.
+
+### Deck, tools, scans, and typing on a PC
+
+- Contacts (`pc-contacts`): as on a Mac, read-only. The PC asks with `contacts.list` when its Contacts tab opens (and on
+  Refresh), keeps pages until one without `more: true`, and sorts by name. Search folds case and accents, and a number
+  matches with or without the country code (`0812...` and `+62812...`), as the Mac's. A number can be copied, or opens a
+  new SMS when the phone serves `pc-sms`. No call is placed and nothing is changed on the phone.
+- Files (`pc-files`): as on a Mac, read-only: `fs.list` with `path` ("" for the top) and `hidden`, then `fs.get` for each
+  file picked (at most 200 at once), which arrives as a normal file transfer in Downloads. A listing for another folder
+  than the one asked for is ignored except for its `error`. The phone's own rules are unchanged: inside internal storage
+  only, and no message can change or delete a file. Putting files on the phone is the normal file send (to its Download
+  folder); there's no upload into a chosen folder or delete, because the protocol has neither and the Mac has neither.
+- Deck (`pc-deck`): the phone sends what it sends a Mac. A `shortcut` keeps Mac names; the PC maps `cmd` to Ctrl,
+  `opt` to Alt, drops `fn`, and turns Mac-only shortcuts into the PC's match: `cmd+space` is the Windows key (Super on
+  Linux), `ctrl+cmd+q` locks (Win+L, or Super+L), `shift+cmd+3`/`4`/`5` take a screenshot (Win+PrintScreen and Win+Shift+S on
+  Windows, PrintScreen and Shift+PrintScreen on Linux), `cmd+q` closes (Alt+F4), `cmd+tab` switches windows (Alt+Tab), `ctrl+cmd+f` is F11, and `opt+space` is
+  ignored. Media and text are the normal `media` and `input`; commands are `pc-commands`; OBS goes from the phone
+  straight to obs-websocket 5 and never through the PC. Buttons are kept on the phone. There's no button kind to open
+  an app, a link, or a file: the deck sends what a Mac takes, and a PC command does those.
+- Tools (`pc-notch`): the PC keeps the Mac's data model in its data folder (`notch-todos.json`, `notch-water.json`,
+  `notch-pomodoro.json`, `notch-note.json`) and shows it on a Tools page: at most 50 tasks of 80 characters, done tasks
+  of an earlier day cleared, water by the day with a goal, glass size, and reminders every so many minutes between two
+  hours until the goal (a system notification), and a Pomodoro whose countdown is in the tray. `notch.state` goes to
+  every paired phone after `hello`, after pairing, and on every change from either side, with the note; `notch.action`
+  is taken only from a paired phone, with the same kinds as on a Mac (and `note.set`).
+- Scan and Voice typing (`pc-type`): the text and keys are the usual `input`, typed by the PC's input (not under
+  Wayland, as for the touchpad).
+- Document scan (`pc-scan`): a file from a paired phone with `kind: "scan"` is saved in Documents/DyskLink/Scans (the
+  XDG documents folder on Linux), shown in a notification, and opened when it's a PDF. The PC adds no text layer: the
+  phone already sends the text it read separately, as for a Mac.
+
+### This PC's screen on a phone
+
+A PC that lists `pc-screen-out` answers the messages of "This Mac's screen on a phone", with these differences:
+
+- `macscreen.started` adds `format: "jpeg"`, and keeps `screen` (long side up to 1600), `text` (the display's name),
+  `displays` (`id`, `name`, `main`) and `displayId`. It's sent again when the picture's size changes. `macscreen.frame`
+  has `format: "jpeg"` and one whole JPEG (raw in a binary frame to a `bin1` phone, else base64 in `video`), no
+  `keyFrame`. The phone shows a frame as JPEG only when it says `format: "jpeg"`; anything else (a Mac) stays H.264.
+- Pacing is the same as for JPEG frames from the phone (below): at most 15 a second, one waiting, quality 80 down to 35
+  and then the rate down to 5 when the network is behind, over 760 KiB dropped. A picture equal to the last one that went
+  out (a hash of every pixel of the scaled picture) isn't sent; a still screen sends nothing. A dropped picture is tried
+  again. `macscreen.sync` sends the current picture again.
+- Off until "Let phones see this screen" is on (default off); then `macscreen.start` gets `macscreen.stopped` with
+  `error` saying so. Under Wayland it's always refused with `error` "Viewing this PC's screen isn't supported on Wayland
+  yet. Log in with an X11 (Xorg) session on the PC to use it." `text: "extend"` is refused with `error` (see `pc-display`).
+- One phone at a time; a second one takes over and the first gets `macscreen.stopped` with `error`. `macscreen.start`
+  again from the same phone with another `displayId` switches displays. The PC always shows a notice and, on every page
+  of its window, "<phone> is viewing this screen" with Stop. Stop, the switch going off, and the disconnect end it
+  (`macscreen.stopped` with `error` while the phone is still connected); `macscreen.stop` from the phone too.
+- `macscreen.pointer` (`move`, `down`, `drag`, `up`, `click`, `double`, `right`) is taken only from the phone viewing,
+  and only while "Phones can control this PC" is on and the PC can post input (not under Wayland), as `info.inputTrusted`
+  says. `x` and `y` (0 to 1) map onto the shown display's current bounds in desktop pixels. Typing, keys, and scrolling
+  are the usual `input` messages.
+- Capture is java.awt.Robot (GDI on Windows, XGetImage on X11), scaled down with the pointer drawn in.
+- `pc-display` (the phone as an extra display) is defined but no PC lists it: Windows can only add a monitor through an
+  indirect display driver (IddCx), and X11 only with a virtual output from the graphics driver or a server restart
+  (`xrandr --setmonitor` names part of an existing framebuffer and adds no space). The phone shows Second display only
+  for a Mac or a PC that lists it.
+
+### JPEG frames
+
+H.264 needs a native decoder on the JVM, so a PC gets whole JPEG pictures instead. Toward a PC that listed
+`pc-screen` (screen) or `pc-camera` (camera):
+
+| Type | Content |
+|---|---|
+| `screen.started` / `camera.started` | as for the Mac (`screen` size; for the camera `text` lens and `rotation`), plus `format: "jpeg"`. The camera also sends `cameraState` with `flash` and `torch` |
+| `screen.frame` / `camera.frame` | `format: "jpeg"`; the payload is one complete JPEG (raw in a binary frame to a `bin1` peer, otherwise base64 in `video`); no `keyFrame` |
+
+- The picture's long side is at most 1280 (the screen is captured at that size; the camera uses a YUV size near
+  1280×720). The camera picture isn't turned on the phone: `rotation` says how far to turn it, as for the Mac.
+- At most 15 frames a second. The phone encodes only when a frame is due and keeps one frame waiting while one is
+  written; a newer frame that finds the queue full is dropped. Drops lower the JPEG quality (80 down to 35) and, below
+  that, the frame rate (down to 5); 30 frames in a row that went out raise the rate again, then the quality. A frame
+  over 760 KiB is dropped and lowers the quality more, so it always fits a 1 MiB frame, even as base64.
+- Every frame stands alone, so a dropped frame costs nothing and `screen.sync`/`camera.sync` have nothing to do. A still
+  screen sends nothing new; the last picture stays.
+- The PC only takes frames for a screen or camera it asked for and hasn't stopped. It stops the screen when its tab is
+  left (unless the screen was popped out to its own window), when that window or the main window closes, and on
+  disconnect; the camera window stops the camera when closed.
+

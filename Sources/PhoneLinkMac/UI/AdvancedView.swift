@@ -579,7 +579,7 @@ struct AdvancedView: View {
                     Text(mac.isConnected ? "Connected" : "Not connected").font(.system(size: 12)).foregroundStyle(Theme.textFaint)
                 }
             }
-            sharedInputContent(paired.filter(\.isMac))
+            sharedInputContent(paired.filter(\.takesSharedInput))
             Toggle("Merge Clipboard History when the Macs connect", isOn: Bindable(model).sharesClipboardHistory)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
             Text("Copies, including pictures, go straight between the computers, encrypted, and never through the internet. A paired computer can share copies and files and ring this Mac. It can only use the mouse and keyboard here while that's allowed below, and never run commands.")

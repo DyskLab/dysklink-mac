@@ -24,8 +24,12 @@ struct Peer: Identifiable, Equatable {
     var isConnected: Bool
     var info: DeviceInfo?
     var lastSeen: Date?
+    /// What the device listed in `hello.caps` on this connection. Empty while offline.
+    var caps: [String] = []
 
     var isMac: Bool { platform == "macos" }
+    /// A Mac, or a Windows or Linux PC whose DyskLink accepts this Mac's mouse and keyboard.
+    var takesSharedInput: Bool { isMac || (isComputer && caps.contains("pc-shared-input")) }
     /// A Mac or a Windows or Linux PC, which only share the clipboard, files, and ringing.
     var isComputer: Bool { PhoneLinkProtocol.computers.contains(platform) }
 }
@@ -1059,7 +1063,11 @@ final class AppModel {
         case MessageType.remoteExit:
             // Always taken, even from a device unpaired meanwhile: it only lets go of control.
             handleRemote(envelope, from: id, session: session)
-        case MessageType.remoteEnter, MessageType.remoteInput, MessageType.remoteLeave:
+        case MessageType.remoteLeave:
+            // A Mac or a PC this Mac is controlling hands the pointer back.
+            guard let platform = records[id]?.platform, PhoneLinkProtocol.computers.contains(platform) else { return }
+            handleRemote(envelope, from: id, session: session)
+        case MessageType.remoteEnter, MessageType.remoteInput:
             // Only a Mac, by its pairing record, may use this Mac's mouse and keyboard.
             guard records[id]?.platform == "macos" else { return }
             handleRemote(envelope, from: id, session: session)
@@ -2660,7 +2668,8 @@ final class AppModel {
                 isPaired: record != nil,
                 isConnected: sessions[id] != nil,
                 info: infos[id],
-                lastSeen: lastSeen[id]
+                lastSeen: lastSeen[id],
+                caps: hello?.caps ?? []
             ))
         }
         peers = result.sorted {
