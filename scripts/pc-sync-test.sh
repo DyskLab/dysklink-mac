@@ -1,6 +1,8 @@
 #!/bin/bash
 # Runs a debug Mac app with Other computers on, and the Windows/Linux computer side (ComputerHub) against it from the
-# JVM tests. Checks pairing by code, text and pictures both ways, files, and ringing. Touches no real clipboard.
+# JVM tests. Checks pairing by code, text and pictures both ways, files, and ringing; then a fake PC as the source
+# of the mouse and keyboard (enter, a move, a key, pushed back until the Mac sends remote.leave) and a PC without
+# pc-shared-input-source being refused. Touches no real clipboard, and moves no real pointer (dry run).
 set -uo pipefail
 
 MAC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,14 +18,15 @@ PORT=47993
 RESULT=0
 
 PHONELINK_DATA_DIR="$WORK/data" PHONELINK_PORT=$PORT PHONELINK_DOWNLOAD_DIR="$WORK/dl" PHONELINK_TEST_AUTO_ACCEPT=1 \
-PHONELINK_TEST_DRY_RUN=1 PHONELINK_TEST_MAC_SYNC=1 PHONELINK_TEST_SHARE_CLIPBOARD="dari-mac" \
+PHONELINK_TEST_DRY_RUN=1 PHONELINK_TEST_MAC_SYNC=1 PHONELINK_TEST_REMOTE_ACCEPT=1 PHONELINK_TEST_SHARE_CLIPBOARD="dari-mac" \
 PHONELINK_TEST_SHARE_IMAGE="$WORK/pic.png" "$BIN" > "$WORK/mac.log" 2>&1 &
 M=$!
 for _ in $(seq 1 30); do nc -z 127.0.0.1 $PORT 2>/dev/null && break; /bin/sleep 0.5; done
 
 cd "$ANDROID_DIR"
 DYSKLINK_IT_MAC_PORT=$PORT JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 17)}" \
-    ./gradlew -q :core:test --tests '*ComputerHubTest.aPcPairsAndSyncsWithTheMacApp' --rerun-tasks > "$WORK/pc.log" 2>&1
+    ./gradlew -q :core:test --tests '*ComputerHubTest.aPcPairsAndSyncsWithTheMacApp' --tests '*ComputerHubTest.aPcSourceDrivesTheMacApp' \
+    --rerun-tasks > "$WORK/pc.log" 2>&1
 PC_EXIT=$?
 kill $M 2>/dev/null; wait $M 2>/dev/null
 
@@ -35,7 +38,7 @@ check() { # present|absent, text
     fi
 }
 
-if [ $PC_EXIT = 0 ]; then echo "OK  PC side: paired, got the Mac's text and picture"; else
+if [ $PC_EXIT = 0 ]; then echo "OK  PC side: paired, got the Mac's text and picture, remote.leave, and the refusal"; else
     echo "FAILED PC side:"; grep -E "AssertionError|Exception|FAILED" "$WORK/pc.log" | head -5
     python3 - "$ANDROID_DIR/core/build/test-results/test" <<'PY'
 import glob,sys,xml.etree.ElementTree as E
@@ -53,6 +56,13 @@ check present "RING start"
 # The PC lists bin1 like the real desktop app, so pictures and files went in binary frames both ways.
 check present "BINARY_IN file.chunk"
 check present "BINARY_OUT file.chunk"
+# The PC as the source: taken (it lists pc-shared-input-source), moved, typed, and handed back past the left edge.
+check present "REMOTE_ENTER left"
+check present "REMOTE move"
+check present "REMOTE key 0"
+check present "REMOTE_LEAVE left"
+# The second PC, without the cap, is refused.
+check present "REMOTE_REFUSED"
 if ls "$WORK/dl" | grep -q "^dari-pc.*\.txt$"; then echo "OK  Mac: the PC's file is in Downloads"; else echo "FAILED the PC's file didn't arrive"; RESULT=1; fi
 cd "$ANDROID_DIR" && ./gradlew --stop -q >/dev/null 2>&1
 exit $RESULT

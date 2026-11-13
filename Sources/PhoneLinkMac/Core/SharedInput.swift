@@ -165,6 +165,35 @@ enum RemoteLimits {
     }
 }
 
+/// Who may move their pointer into this Mac: a Mac, or a Windows or Linux PC whose DyskLink is a source
+/// (`pc-shared-input-source` in its hello), and only while "Let paired computers use their mouse and keyboard
+/// here" is on. The kind of device comes from its pairing record, never from its hello.
+enum RemoteGate {
+    static let pcSourceCap = "pc-shared-input-source"
+
+    enum Decision: Equatable { case accept, refuse, ignore }
+
+    /// Whether a device paired as `platform`, with `caps` in its hello, may send `remote.enter` and `remote.input`.
+    static func isSender(platform: String?, caps: [String]) -> Bool {
+        guard let platform else { return false }
+        if platform == "macos" { return true }
+        return PhoneLinkProtocol.computers.contains(platform) && caps.contains(pcSourceCap)
+    }
+
+    /// What happens to `remote.enter`. A paired computer that may not is answered with `remote.exit`, so its
+    /// pointer comes home; anything else is dropped.
+    static func enter(platform: String?, caps: [String], accepts: Bool, macSync: Bool, trusted: Bool,
+                      busy: Bool, edge: String?) -> Decision {
+        guard let platform, PhoneLinkProtocol.computers.contains(platform) else { return .ignore }
+        guard isSender(platform: platform, caps: caps), accepts, macSync, trusted, !busy,
+              edge.flatMap(ScreenEdge.init(rawValue:)) != nil else { return .refuse }
+        return .accept
+    }
+
+    /// `remote.input` reaches the target only from a sender; the target itself checks it's the one in control.
+    static func input(platform: String?, caps: [String]) -> Bool { isSender(platform: platform, caps: caps) }
+}
+
 // MARK: - The Mac whose mouse and keyboard are in use
 
 @MainActor
@@ -369,6 +398,8 @@ final class SharedInputTarget {
     private var lastClick: (time: TimeInterval, point: CGPoint, button: Int, count: Int64)?
     private var scrollRest = CGPoint.zero
     private var pushes = 0
+    /// In a dry run (tests) the pointer isn't moved; this is where it would be, so going home can be tested.
+    private var dryCursor: CGPoint?
 
     private var cursor: CGPoint { CGEvent(source: nil)?.location ?? .zero }
 
@@ -382,14 +413,16 @@ final class SharedInputTarget {
         guard let display = EdgeMath.outermost(edge, displays: displays) else { return }
         let point = EdgeMath.point(on: edge, of: display, at: at)
         TestEnv.log("REMOTE_ENTER \(edge.rawValue) \(String(format: "%.2f", at))")
-        if !TestEnv.isDryRun { CGWarpMouseCursorPosition(point) }
+        if TestEnv.isDryRun { dryCursor = point } else { CGWarpMouseCursorPosition(point) }
         onChange?(peer)
     }
 
     func handle(_ event: RemoteEvent, from peer: String) {
         guard controller == peer, let event = RemoteLimits.sanitize(event) else { return }
         if TestEnv.isDryRun {
-            return TestEnv.log("REMOTE \(event.kind) \(event.keyCode.map(String.init) ?? "") \(event.button.map(String.init) ?? "")")
+            TestEnv.log("REMOTE \(event.kind) \(event.keyCode.map(String.init) ?? "") \(event.button.map(String.init) ?? "")")
+            if event.kind == "move" { dryMove(dx: event.dx ?? 0, dy: event.dy ?? 0) }
+            return
         }
         switch event.kind {
         case "move": move(dx: event.dx ?? 0, dy: event.dy ?? 0)
@@ -424,6 +457,28 @@ final class SharedInputTarget {
         flags = []
         if controller != nil { onChange?(nil) }
         controller = nil
+    }
+
+    /// The edge check of `move`, on `dryCursor`, posting nothing.
+    private func dryMove(dx: Double, dy: Double) {
+        guard let from = dryCursor else { return }
+        let displays = DeviceInput.activeDisplayBounds()
+        if homeEdge.pushes(dx: dx, dy: dy), let hit = EdgeMath.hit(from, edge: homeEdge, displays: displays) {
+            pushes += 1
+            if pushes >= 2, let controller {
+                var envelope = Envelope(type: MessageType.remoteLeave)
+                envelope.remote = RemoteEvent(kind: "leave", edge: homeEdge.rawValue, at: hit.at)
+                send(controller, envelope)
+                TestEnv.log("REMOTE_LEAVE \(homeEdge.rawValue)")
+                pushes = 0
+                dryCursor = nil
+                release()
+                return
+            }
+        } else {
+            pushes = 0
+        }
+        dryCursor = DeviceInput.keepOnDisplays(CGPoint(x: from.x + dx, y: from.y + dy), from: from, displays: displays)
     }
 
     private func move(dx: Double, dy: Double) {

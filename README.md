@@ -78,9 +78,11 @@ Accessibility, Screen Recording, and notifications again, and turn **Open at log
   500 text copies in Clipboard History are merged too. Files can be sent between them, and each can ring the other.
   Everything goes straight between the Macs, encrypted. A paired computer can't run commands.
 - **One mouse and keyboard:** under **Mouse and keyboard** in Other computers, choose which side of this Mac another
-  Mac sits on, and turn on **Let paired Macs use their mouse and keyboard here** on that Mac (off by default). Push the
+  Mac sits on, and turn on **Let paired computers use their mouse and keyboard here** on that Mac (off by default). Push the
   pointer past that edge to use the other Mac, and back to come home; Control-Option-Command brings it home at once.
-  Both Macs need Accessibility. Copy and paste works across through the shared clipboard.
+  Both Macs need Accessibility. Copy and paste works across through the shared clipboard. A Windows PC, or a Linux PC
+  on X11, with DyskLink can push its own mouse and keyboard into this Mac the same way ("Use this PC's mouse and
+  keyboard on a Mac" in its Settings, Computers), while that switch is on here.
 
 Phone data, screen, and control are off until you turn them on from the phone. The Mac keeps phone data in memory
 only. It's cleared when a feature is turned off or the devices unpair. Contacts reach the disk only if you press

@@ -319,11 +319,15 @@ final class AppModel {
     var macSyncEnabled = UserDefaults.standard.bool(forKey: "macs.sync") || TestEnv.value("PHONELINK_TEST_MAC_SYNC") == "1" {
         didSet { UserDefaults.standard.set(macSyncEnabled, forKey: "macs.sync"); applyMacSync() }
     }
-    /// Paired Macs may use their mouse and keyboard on this Mac. Off by default.
+    /// Paired Macs, and PCs listing pc-shared-input-source, may use their mouse and keyboard on this Mac. Off by default.
     var acceptsRemoteInput = UserDefaults.standard.bool(forKey: "remote.accept") || TestEnv.value("PHONELINK_TEST_REMOTE_ACCEPT") == "1" {
         didSet {
             UserDefaults.standard.set(acceptsRemoteInput, forKey: "remote.accept")
-            if !acceptsRemoteInput { remoteTarget.release() }
+            // The computer in control is told, so its pointer comes home instead of moving nothing here.
+            if !acceptsRemoteInput, let controller = remoteTarget.controller {
+                remoteTarget.release()
+                sessions[controller]?.send(Envelope(type: MessageType.remoteExit))
+            }
             broadcastInfo()
         }
     }
@@ -1082,8 +1086,9 @@ final class AppModel {
             guard let platform = records[id]?.platform, PhoneLinkProtocol.computers.contains(platform) else { return }
             handleRemote(envelope, from: id, session: session)
         case MessageType.remoteEnter, MessageType.remoteInput:
-            // Only a Mac, by its pairing record, may use this Mac's mouse and keyboard.
-            guard records[id]?.platform == "macos" else { return }
+            // Only a Mac, or a PC that says it's a source, by its pairing record, may use this Mac's mouse and
+            // keyboard. A paired PC without the cap is refused (`remote.exit`) by handleRemote.
+            guard let platform = records[id]?.platform, PhoneLinkProtocol.computers.contains(platform) else { return }
             handleRemote(envelope, from: id, session: session)
         case MessageType.notchAction:
             guard records[id] != nil, let action = envelope.notchAction else { return }
@@ -1373,14 +1378,20 @@ final class AppModel {
     private func handleRemote(_ envelope: Envelope, from id: String, session: PeerSession) {
         switch envelope.type {
         case MessageType.remoteEnter:
-            // While this Mac's mouse is on another Mac, taking control here too would pass input in a loop.
-            guard acceptsRemoteInput, macSyncEnabled, DeviceInput.isTrusted || TestEnv.isDryRun, sharedInput.activePeer == nil,
-                  let edge = envelope.remote?.edge.flatMap(ScreenEdge.init(rawValue:)) else {
+            // While this Mac's mouse is on another computer, taking control here too would pass input in a loop.
+            let decision = RemoteGate.enter(
+                platform: records[id]?.platform, caps: session.hello?.caps ?? [], accepts: acceptsRemoteInput,
+                macSync: macSyncEnabled, trusted: DeviceInput.isTrusted || TestEnv.isDryRun,
+                busy: sharedInput.activePeer != nil, edge: envelope.remote?.edge
+            )
+            guard decision == .accept, let edge = envelope.remote?.edge.flatMap(ScreenEdge.init(rawValue:)) else {
+                guard decision == .refuse else { return }
                 TestEnv.log("REMOTE_REFUSED")
                 return session.send(Envelope(type: MessageType.remoteExit))
             }
             remoteTarget.enter(from: id, edge: edge, at: envelope.remote?.at ?? 0.5)
         case MessageType.remoteInput:
+            guard RemoteGate.input(platform: records[id]?.platform, caps: session.hello?.caps ?? []) else { return }
             if let remote = envelope.remote { remoteTarget.handle(remote, from: id) }
         case MessageType.remoteLeave:
             sharedInput.pointerReturned(from: id, at: envelope.remote?.at)

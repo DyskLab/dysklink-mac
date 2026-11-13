@@ -276,21 +276,24 @@ A copied picture goes to paired computers as a file with `kind: "clipboard"` (PN
 on its clipboard instead of saving it, and doesn't list it as a transfer.
 
 ### One mouse and keyboard
-Each Mac chooses which side of it a paired Mac sits on. A Mac accepts input only while **Let paired Macs use their
-mouse and keyboard here** is on, which its `info.remoteControl` reports. When the pointer is pushed past the chosen
+Each Mac chooses which side of it a paired Mac sits on. A Mac accepts input only while **Let paired computers use
+their mouse and keyboard here** is on, which its `info.remoteControl` reports. When the pointer is pushed past the chosen
 outer edge twice in a row, the Mac in use sends `remote.enter`, hides and holds its pointer, and forwards input as
 `remote.input` until the pointer comes home. The other Mac posts the input as if its own mouse and keyboard were used.
 
 | Type | `remote` | Direction |
 |---|---|---|
-| `remote.enter` | `edge` where the pointer appears, `at` 0–1 along it | Mac in use → other Mac |
-| `remote.input` | `kind`: `move` (`dx`, `dy`), `down`/`up` (`button` 0 left, 1 right, 2+ other), `scroll` (`dx`, `dy` in pixels), `key` (`keyCode`, `keyDown`, `flags`), `flags` (`keyCode`, `flags`) | Mac in use → other Mac |
+| `remote.enter` | `edge` where the pointer appears, `at` 0–1 along it | Mac (or PC source) in use → other Mac |
+| `remote.input` | `kind`: `move` (`dx`, `dy`), `down`/`up` (`button` 0 left, 1 right, 2+ other), `scroll` (`dx`, `dy` in pixels), `key` (`keyCode`, `keyDown`, `flags`), `flags` (`keyCode`, `flags`) | Mac (or PC source) in use → other Mac |
 | `remote.leave` | `edge`, `at`: the pointer was pushed back past the edge facing the Mac in use | other Mac → Mac in use |
 | `remote.exit` | none: control ended (Control-Option-Command, the setting turned off, or refused) | either way |
 
 The other Mac lets go of held keys and buttons on `remote.exit`, `remote.leave`, when the connection drops, and when
 either side unpairs. `remote.exit` is accepted even from a device that is no longer paired, since it only ends
-control. Only a device paired as `macos` may send `remote.enter`, `remote.input`, and `remote.leave`.
+control. Only a device paired as `macos` may send `remote.leave`. `remote.enter` and `remote.input` come from a device
+paired as `macos`, or from one paired as `windows` or `linux` whose `hello.caps` on this connection has
+`pc-shared-input-source` (see What a PC serves); a paired PC without it is answered `remote.exit`. Turning the switch
+off sends `remote.exit` to the computer in control, so its pointer comes home.
 
 The receiving Mac checks every number: key codes outside 0–127 and buttons outside 0–31 are dropped, `dx`/`dy`
 are clamped to ±4000, and non-finite numbers drop the event. A Mac whose pointer is on another Mac refuses
@@ -681,12 +684,14 @@ The desktop app also lists caps for what it serves, which phones don't list (the
 | `pc-sound-out` | answers `audio.listen` with its own sound, as a Mac does (see Sound sharing) | shows Hear the PC |
 | `pc-commands` | sends `commands.list` and answers `command.run` with `command.result` | shows PC commands; drops `commands.list` and `command.result` from a PC without it |
 | `pc-terminal` | answers the `terminal.*` messages, as a Mac does (see Terminal) | shows Terminal; drops `terminal.opened`, `terminal.output`, `terminal.closed` from a PC without it |
-| `pc-shared-input` | takes a Mac's `remote.*` (see One mouse and keyboard), as the target only | - |
+| `pc-shared-input` | takes a Mac's `remote.*` (see One mouse and keyboard), as the target | - |
+| `pc-shared-input-source` | sends its own mouse and keyboard to a Mac as `remote.enter`/`remote.input`; only on Windows and X11; a Mac takes these from a PC only with it | - |
 | `pc-screen-out` | answers `macscreen.start` with its own screen as JPEG frames (see This PC's screen on a phone) | shows PC screen; drops `macscreen.started`, `macscreen.frame`, `macscreen.stopped` from a PC without it |
 | `pc-deck` | takes the deck's `input` `shortcut` keys with Mac names and maps them (see Deck, tools, scans, and typing on a PC) | shows Stream Deck |
 | `pc-notch` | keeps the notch's Todo, water, and Pomodoro, sends `notch.state`, and answers `notch.action`, as a Mac does | shows PC tools; drops `notch.state` from a PC without it |
 | `pc-type` | types the `input` text and keys of Scan and Voice typing, as a Mac does | shows Scan and Voice typing |
 | `pc-scan` | takes a file with `kind: "scan"` into Documents/DyskLink/Scans, notifies, and opens the PDF | shows Document scan; sends a scan to a PC without it as a plain file (no `kind`) |
+| `pc-display` | answers `macscreen.start` with `text: "extend"` by adding a monitor of the phone's shape (see The phone as a PC's second display); listed only while this PC has a way to add one, so the hello changes | shows Second display for a PC only with it |
 
 - Older desktop builds (`["bin1"]`, or the four `pc-*` phone caps only) refused `audio.listen` with `audio.stopped`
   and `error`, and never sent commands or terminal messages; the phone shows none of this for them. A Mac is served
@@ -718,16 +723,40 @@ The desktop app also lists caps for what it serves, which phones don't list (the
   past the edge it came in by sends `remote.leave` with `edge` and `at`. Mac key codes are mapped to PC keys by US
   position; `flags` press and release Shift, Ctrl (Control, and Command unless "Use Command as Ctrl" is off, when
   Command is the Windows or Super key), and Alt (Option); Caps Lock taps once per change; scroll pixels become wheel
-  notches. A PC never sends `remote.enter`: it isn't a source.
+  notches. As the target, a PC takes `remote.enter` only while its own pointer isn't on a Mac (see the source below).
 - The Mac side: to choose a PC in Mouse and keyboard, a Mac must list paired PCs whose `hello.caps` has
   `pc-shared-input`, and accept `remote.leave` (only that) from a device paired as `windows` or `linux`. Macs that don't
   yet do this still end control with Control-Option-Command (`remote.exit` is taken from anyone).
-- A PC as the source (its mouse and keyboard moving onto a Mac) isn't built. It needs a global low-level hook on
-  Windows (`WH_MOUSE_LL`/`WH_KEYBOARD_LL`) or an X11 grab, which can't be checked here and would leave the PC without
-  input if it stuck. A Mac that wants it later takes `remote.enter` and `remote.input` from a device paired as
-  `windows` or `linux` whose `hello.caps` has `pc-shared-input-source`, only while "Let paired Macs use their mouse and
-  keyboard here" is on, with the same checks as for a Mac, and answers `remote.exit` to anyone else. No PC lists that
-  cap yet.
+- A PC as the source, its own mouse and keyboard moving onto a Mac (`pc-shared-input-source`, listed only on Windows
+  and on Linux under X11, not in the fixed PC caps): "Use this PC's mouse and keyboard on a Mac" (off by default)
+  with a paired Mac and the side of the PC it sits on. The PC sends exactly what a Mac sends: pushing the pointer
+  twice in a row past that outer edge (a push that moves nothing while pressed against it counts; inner edges between
+  monitors never do) sends `remote.enter` with the Mac's facing `edge` and `at`, then `remote.input` (`move` deltas in
+  PC pixels, buttons 0–4, `scroll` 40 pixels per wheel notch, Mac key codes by US position from the scan code, and
+  `flags` for modifiers, with the CGEventFlags left and right bits). With "Use Ctrl as Command" (on by default) Ctrl
+  is Command and the Windows or Super key is Control; otherwise Ctrl is Control and Windows or Super is Command. Alt
+  is Option. It only goes to a Mac that is connected and reports `info.remoteControl` true, and never while a Mac is
+  using the PC (which refuses `remote.enter` while its own pointer is on a Mac).
+  - Coming home: `remote.leave` from that Mac (the pointer goes back where it left, `at` along the edge), `remote.exit`
+    from it, Ctrl+Alt+Win (or Ctrl+Alt+Shift+Escape) on the PC, Bring back in the app, the switch going off, the Mac
+    no longer allowing it, the disconnect, and quitting. In every case but the Mac ending it, the PC sends key-ups
+    for keys held on the Mac, `flags` 0, button-ups, then `remote.exit`.
+  - Heartbeat: while the pointer is on the Mac the PC sends `ping` every 0.5 s; any message from that Mac (its `pong`)
+    counts, and none for 2 s takes the PC's input back.
+  - Windows: `WH_MOUSE_LL` and `WH_KEYBOARD_LL` on a thread with a message loop; the hooks decide and queue only, and
+    swallow input (return 1) while crossed. The pointer is held in a 1-pixel `ClipCursor` rect up to 200 pixels
+    inside the edge, put back there on each tick, and moves are measured from it. Injected input is ignored while not
+    crossed (DyskLink's own, as a target, never crosses). A probe (`SendInput` marked in `dwExtraInfo`) every second
+    must come back through both hooks within a second, or control ends and the hooks are installed again (Windows
+    removes hooks that pass LowLevelHooksTimeout without a word). Monitors come from `EnumDisplayMonitors`.
+  - X11: XInput2 raw events on the root window (motion, keys, buttons) for the edge; while crossed `XGrabPointer`
+    and `XGrabKeyboard` on the root with a blank cursor, the pointer warped back after each move. A grab another app
+    holds means no crossing. The X server drops the grabs if the app dies.
+  - Wayland: not supported. It needs the InputCapture portal (GNOME 45+, KDE 6.1+) and libei to read its EIS events,
+    which DyskLink doesn't bundle; the app says so under the switch.
+  - The escape combo is checked inside the hook before the event is swallowed, and stops swallowing at once. Keys and
+    buttons go back to the side they went down on: one held on the PC before crossing is let go on the PC; one
+    pressed on the Mac has its release swallowed on the PC after coming home, so no stray Windows key opens Start.
 
 ### Deck, tools, scans, and typing on a PC
 
@@ -773,7 +802,7 @@ A PC that lists `pc-screen-out` answers the messages of "This Mac's screen on a 
   again. `macscreen.sync` sends the current picture again.
 - Off until "Let phones see this screen" is on (default off); then `macscreen.start` gets `macscreen.stopped` with
   `error` saying so. Under Wayland it's always refused with `error` "Viewing this PC's screen isn't supported on Wayland
-  yet. Log in with an X11 (Xorg) session on the PC to use it." `text: "extend"` is refused with `error` (see `pc-display`).
+  yet. Log in with an X11 (Xorg) session on the PC to use it." `text: "extend"` is the second display (below).
 - One phone at a time; a second one takes over and the first gets `macscreen.stopped` with `error`. `macscreen.start`
   again from the same phone with another `displayId` switches displays. The PC always shows a notice and, on every page
   of its window, "<phone> is viewing this screen" with Stop. Stop, the switch going off, and the disconnect end it
@@ -783,10 +812,37 @@ A PC that lists `pc-screen-out` answers the messages of "This Mac's screen on a 
   says. `x` and `y` (0 to 1) map onto the shown display's current bounds in desktop pixels. Typing, keys, and scrolling
   are the usual `input` messages.
 - Capture is java.awt.Robot (GDI on Windows, XGetImage on X11), scaled down with the pointer drawn in.
-- `pc-display` (the phone as an extra display) is defined but no PC lists it: Windows can only add a monitor through an
-  indirect display driver (IddCx), and X11 only with a virtual output from the graphics driver or a server restart
-  (`xrandr --setmonitor` names part of an existing framebuffer and adds no space). The phone shows Second display only
-  for a Mac or a PC that lists it.
+
+### The phone as a PC's second display
+
+A PC lists `pc-display` in `hello.caps` only while it has a way to add a monitor, or one that needs a setup it can
+explain (GStreamer missing, the Windows driver not installed); it's not in the static list, and a later hello may add
+or drop it. The phone shows Second display for a PC only when it's listed (always for a Mac).
+
+- `macscreen.start` with `text: "extend"` (or `"extend-large"`) and `screen` (the phone's size in points, as for a
+  Mac). The monitor is that size at 1x, so the PC's pixels are the phone's points: the short side 450 to 1440 (360 for
+  `extend-large`, which the phone sends for larger text), the long side at most 3840, at most 4:1, the width a
+  multiple of 8 and the height even. Refused with `macscreen.stopped` and `error` when "Let phones see this screen" is
+  off, when the size can't be used, or when no way works here (the error says what to set up).
+- `macscreen.started` has `format: "jpeg"`, `screen` (the picture, long side up to 1920), and `text` (the phone's
+  name), and no `displays` or `displayId`: the phone shows only its own monitor. Frames are paced as for the PC's
+  screen. The same size asked again sends `macscreen.started` again; another size (the phone turned) removes the
+  monitor and adds a new one. Stop on the PC, the switch going off, `macscreen.stop`, and the disconnect remove it.
+  Adding can take seconds (the PC may ask the user); a stop meanwhile wins and the monitor is removed when it's made.
+- `macscreen.pointer` needs "Phones can control this PC". On Wayland it goes through the same portal or Mutter
+  session to the monitor's own stream (absolute motion in the monitor's pixels, then the left or right button); on X11
+  and Windows `x` and `y` map onto the monitor's place in desktop pixels, as for the PC's screen.
+- Ways, best first. Linux Wayland: the screen cast portal with a virtual source (`SelectSources` `types` 4, inside a
+  RemoteDesktop session when control is on; GNOME 46+ and KDE Plasma 6.1+), then GNOME's
+  `org.gnome.Mutter.ScreenCast` `RecordVirtual` linked to an `org.gnome.Mutter.RemoteDesktop` session (GNOME 40+). The
+  compositor sizes the monitor from the reader's caps, so GStreamer reads `pipewiresrc` at the phone's size (or
+  as it comes, scaled, when that's refused). Ending the session removes the monitor. Linux X11: only a driver's
+  `VIRTUAL` output (xf86-video-intel), turned on with a `cvt` mode named `DyskLink-WxH` right of the main output and
+  taken off again; otherwise not offered, and DyskLink does no root changes. Windows (experimental, behind a switch
+  off by default): the open-source Virtual Display Driver (IddCx, MikeTheTech, MIT), installed from the app with one
+  administrator prompt. DyskLink writes the phone's size as the only mode in `C:\VirtualDisplayDriver\vdd_settings.xml`,
+  reloads the driver through its pipe, attaches the monitor right of the others, captures it with Robot, and detaches it
+  again on stop (and at the next start if DyskLink was closed while extending). macOS is unchanged.
 
 ### JPEG frames
 

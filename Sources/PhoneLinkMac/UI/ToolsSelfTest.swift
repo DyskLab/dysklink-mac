@@ -230,6 +230,24 @@ enum ToolsSelfTest {
         check("a bad button event is dropped", RemoteLimits.sanitize(RemoteEvent(kind: "down", button: -1)) == nil)
         check("a huge scroll is clamped", RemoteLimits.sanitize(RemoteEvent(kind: "scroll", dx: 1e12, dy: -5))?.dx == RemoteLimits.maxScroll)
         check("an unknown event kind is dropped", RemoteLimits.sanitize(RemoteEvent(kind: "teleport")) == nil)
+        // A PC as the source: only with pc-shared-input-source, only while the switch is on, as for a Mac.
+        let src = [RemoteGate.pcSourceCap]
+        func enter(_ platform: String?, _ caps: [String], accepts: Bool = true, macSync: Bool = true, trusted: Bool = true,
+                   busy: Bool = false, edge: String? = "left") -> RemoteGate.Decision {
+            RemoteGate.enter(platform: platform, caps: caps, accepts: accepts, macSync: macSync, trusted: trusted, busy: busy, edge: edge)
+        }
+        check("a Mac may enter as before", enter("macos", []) == .accept && RemoteGate.input(platform: "macos", caps: []))
+        check("a Windows PC with the source cap may enter", enter("windows", src) == .accept && RemoteGate.input(platform: "windows", caps: src))
+        check("a Linux PC with the source cap may enter", enter("linux", src + ["bin1"]) == .accept)
+        check("a PC without the source cap is refused", enter("windows", ["pc-shared-input"]) == .refuse
+            && !RemoteGate.input(platform: "linux", caps: ["pc-shared-input"]))
+        check("a PC is refused while the switch is off", enter("windows", src, accepts: false) == .refuse && enter("linux", src, macSync: false) == .refuse)
+        check("a Mac is refused while the switch is off", enter("macos", [], accepts: false) == .refuse)
+        check("a PC is refused without Accessibility, while this Mac is elsewhere, or with a bad edge",
+              enter("windows", src, trusted: false) == .refuse && enter("windows", src, busy: true) == .refuse
+                && enter("windows", src, edge: "middle") == .refuse && enter("windows", src, edge: nil) == .refuse)
+        check("a phone or an unpaired device is ignored, cap or not", enter("android", src) == .ignore && enter(nil, src) == .ignore
+            && !RemoteGate.input(platform: "android", caps: src) && !RemoteGate.input(platform: nil, caps: src))
 
         check("pairing cooldown doubles", PairingGuard.cooldown(lockouts: 1) == 60 && PairingGuard.cooldown(lockouts: 2) == 120
             && PairingGuard.cooldown(lockouts: 3) == 240)

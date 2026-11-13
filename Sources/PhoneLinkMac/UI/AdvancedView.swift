@@ -612,7 +612,7 @@ struct AdvancedView: View {
                 .labelsHidden().frame(width: 170)
             }
             if model.remoteArrangement[mac.id] != nil, mac.info?.remoteControl != true {
-                Text("Turn on \"Let paired Macs use their mouse and keyboard here\" on \(mac.name) too.")
+                Text("Turn on \"Let paired computers use their mouse and keyboard here\" on \(mac.name) too.")
                     .font(.system(size: 11.5)).foregroundStyle(Theme.amber)
             }
         }
@@ -625,12 +625,12 @@ struct AdvancedView: View {
                 accessibilityRow("Following the pointer to the edge needs Accessibility for DyskLink in Privacy & Security.")
             }
         }
-        Toggle("Let paired Macs use their mouse and keyboard here", isOn: Bindable(model).acceptsRemoteInput)
+        Toggle("Let paired computers use their mouse and keyboard here", isOn: Bindable(model).acceptsRemoteInput)
             .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
         if model.acceptsRemoteInput && !model.isInputTrusted {
             accessibilityRow("Needs Accessibility for DyskLink in Privacy & Security.")
         } else {
-            Text("Off by default. While it's on, a paired Mac can move the pointer and type here, as if its mouse and keyboard were plugged in.")
+            Text("Off by default. While it's on, a paired Mac, or a Windows or Linux PC with DyskLink that has \"Use this PC's mouse and keyboard on a Mac\" on, can move the pointer and type here, as if its mouse and keyboard were plugged in. Pushing the pointer back past the edge facing it hands control back.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
         }
