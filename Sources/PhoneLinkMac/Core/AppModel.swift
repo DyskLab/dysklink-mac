@@ -118,6 +118,14 @@ final class AppModel {
     var historyFilter = FileHistoryView.Filter.all
     private(set) var commands: [SavedCommand] = []
     private(set) var isInputTrusted = DeviceInput.isTrusted
+    /// Screen Recording, for showing this Mac's screen and sending its sound. Checked again on the trust timer.
+    private(set) var isScreenCaptureAllowed = TestEnv.isDryRun || CGPreflightScreenCaptureAccess()
+    /// True once macOS says DyskLink's notifications are turned off, so phone notifications can't show here.
+    private(set) var notificationsDenied = false
+    /// True when macOS refused Bonjour because Local Network access is off for DyskLink.
+    private(set) var localNetworkDenied = false
+    /// Read while no device is connected: a firewall that blocks DyskLink looks like phones that never show up.
+    private(set) var firewallProblem: FirewallCheck.Problem?
     var newCommandName = ""
     var newCommandScript = ""
     var clipboardEnabled = UserDefaults.standard.object(forKey: "clipboardEnabled") as? Bool ?? true {
@@ -560,12 +568,18 @@ final class AppModel {
 
     private func startInfoTimer() {
         infoTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.broadcastInfo() }
+            MainActor.assumeIsolated {
+                self?.broadcastInfo()
+                self?.refreshFirewall()
+            }
         }
+        refreshFirewall()
         // The permission can change in Settings at any time, and the phone needs to know quickly.
         trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.isInputTrusted != DeviceInput.isTrusted else { return }
+                guard let self else { return }
+                self.refreshPermissions()
+                guard self.isInputTrusted != DeviceInput.isTrusted else { return }
                 self.isInputTrusted = DeviceInput.isTrusted
                 self.broadcastInfo()
             }
@@ -1930,6 +1944,36 @@ final class AppModel {
         onNeedsAttention?()
     }
 
+    func refreshFirewall() {
+        guard !TestEnv.isDryRun, sessions.isEmpty || firewallProblem != nil else { return }
+        Task.detached(priority: .utility) {
+            let problem = FirewallCheck.problem()
+            await MainActor.run { [weak self] in
+                guard let self, self.firewallProblem != problem else { return }
+                self.firewallProblem = problem
+            }
+        }
+    }
+
+    /// Permissions that can change in System Settings at any time, so the hints for them come and go on their own.
+    private func refreshPermissions() {
+        guard !TestEnv.isDryRun else { return }
+        let capture = CGPreflightScreenCaptureAccess()
+        if capture != isScreenCaptureAllowed { isScreenCaptureAllowed = capture }
+        notifier.isDenied { [weak self] denied in
+            MainActor.assumeIsolated {
+                guard let self, self.notificationsDenied != denied else { return }
+                self.notificationsDenied = denied
+            }
+        }
+    }
+
+    /// macOS asks only the first time; after that the switch is in System Settings, so that opens too.
+    func allowScreenCapture() {
+        if !CGRequestScreenCaptureAccess() { SystemPane.open(SystemPane.screenRecording) }
+        refreshPermissions()
+    }
+
     func allowInput() {
         DeviceInput.requestTrust { [weak self] in
             guard let self else { return }
@@ -2592,6 +2636,16 @@ final class AppModel {
                 self.dialMacs()
             }
         }
+        browser.stateUpdateHandler = { [weak self] state in
+            MainActor.assumeIsolated {
+                // kDNSServiceErr_PolicyDenied: Local Network access is off for DyskLink in Privacy & Security.
+                switch state {
+                case .waiting(.dns(-65570)), .failed(.dns(-65570)): self?.localNetworkDenied = true
+                case .ready: self?.localNetworkDenied = false
+                default: break
+                }
+            }
+        }
         browser.start(queue: .main)
         self.browser = browser
     }
@@ -2719,6 +2773,16 @@ final class AppModel {
                 Transfer(id: "2", peerId: $0.id, name: "vacation-photo.jpg", size: 3_000_000, transferred: 3_000_000, outgoing: false, status: .done),
             ]
         } ?? []
+    }
+
+    /// Turns on the hints for things blocked outside DyskLink, to render them.
+    func loadSnapshotHints(addresses: [String]? = nil) {
+        if let addresses { self.addresses = addresses }
+        firewallProblem = .blocksAll
+        localNetworkDenied = true
+        notificationsDenied = true
+        isScreenCaptureAllowed = false
+        isInputTrusted = false
     }
     #endif
 }

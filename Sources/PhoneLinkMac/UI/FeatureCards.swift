@@ -17,6 +17,7 @@ struct FeatureCards: View {
             }
             if part != .transfers {
                 if !model.isInputTrusted { accessibilityCard }
+                if model.notificationsDenied, !peer.isComputer { notificationsCard }
                 clipboardCard
                 codesCard
                 if !peer.isComputer { autoLockCard }
@@ -86,6 +87,30 @@ struct FeatureCards: View {
                 Spacer()
                 Button("Allow") { model.allowInput() }.buttonStyle(PrimaryButtonStyle())
             }
+        }
+    }
+
+    private var notificationsCard: some View {
+        Card {
+            HStack(spacing: 14) {
+                Image(systemName: "bell.slash.fill").font(.system(size: 19)).foregroundStyle(Theme.amber)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Notifications are off for DyskLink").font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("The phone's notifications, calls, and SMS can't pop up on this Mac. Turn on Allow notifications for DyskLink in System Settings › Notifications.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Open Settings") { SystemPane.open(SystemPane.notifications) }.buttonStyle(PrimaryButtonStyle())
+            }
+        }
+    }
+
+    /// Screen Recording, which showing the screen and sending the sound both need.
+    @ViewBuilder private func screenRecordingHint(_ text: String) -> some View {
+        if !model.isScreenCaptureAllowed {
+            HintRow(text: text) { model.allowScreenCapture() }
         }
     }
 
@@ -280,6 +305,9 @@ struct FeatureCards: View {
                     Toggle("", isOn: Binding(get: { model.audioShareEnabled }, set: { model.audioShareEnabled = $0 }))
                         .labelsHidden().toggleStyle(.switch).tint(Theme.mint)
                 }
+                if model.audioShareEnabled {
+                    screenRecordingHint("Screen Recording is off for DyskLink, so phones can't hear this Mac. Turn on DyskLink in Privacy & Security › Screen & System Audio Recording.")
+                }
                 if listening {
                     HStack {
                         StatusPill(text: "\(peer.name) is listening", color: Theme.mint)
@@ -316,6 +344,9 @@ struct FeatureCards: View {
                     }
                     Spacer(minLength: 0)
                     Toggle("", isOn: $model.screenShareEnabled).labelsHidden().toggleStyle(.switch).tint(Theme.violet)
+                }
+                if model.screenShareEnabled {
+                    screenRecordingHint("Screen Recording is off for DyskLink, so phones can't see this screen. Turn on DyskLink in Privacy & Security › Screen & System Audio Recording.")
                 }
                 if viewing {
                     HStack {

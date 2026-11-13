@@ -26,6 +26,7 @@ enum Snapshots {
         let prompt = PairingPrompt(peerId: "demo-3", peerName: "New Phone", code: "482915", startedByPeer: true)
 
         save([], nil, "1-empty", folder)
+        save([], nil, "1b-empty-blocked", folder) { $0.loadSnapshotHints(addresses: []) }
         save([phone, offline, fresh], nil, "2-devices", folder)
         save([fresh, phone], nil, "3-new", folder)
         save([fresh, phone], prompt, "4-pairing", folder)
@@ -72,6 +73,7 @@ enum Snapshots {
         save([phone], nil, "7d-messages-picked", folder, phone: demo, tab: .messages) { $0.smsThread = nil; $0.smsAddress = "081200000002"; $0.smsDraft = "Halo Budi" }
         save([phone], nil, "5b-overview-commands", folder, phone: demo, tab: .overview) { $0.newCommandName = "Sleep" }
         save([phone], nil, "5c-overview-narrow", folder, phone: demo, tab: .overview)
+        save([phone], nil, "5d-overview-blocked", folder, phone: demo, tab: .overview) { $0.loadSnapshotHints() }
         save([phone], nil, "7e-messages-narrow", folder, phone: demo, tab: .messages)
         save([phone], nil, "8c-contacts-narrow", folder, phone: demo, tab: .contacts)
         save([phone], nil, "9-files", folder, phone: demo, tab: .files)
@@ -414,6 +416,10 @@ enum Snapshots {
         cleaner.cleanSelected = Set(cleaner.cleanGroups.filter { $0.key.selectedByDefault }.flatMap { $0.value.map(\.id) })
         cleaner.cleanScanned = true
         render(cleaner, "40-care-cleaner", height: 1500)
+        cleaner.blockedFolders = ["Downloads", "Desktop"]
+        cleaner.message = "2 items couldn't be moved: allow DyskLink to control Finder in System Settings › Privacy & Security › Automation, then try again."
+        cleaner.messageNeedsAutomation = true
+        render(cleaner, "40b-care-blocked", height: 700)
 
         let dups = MacCareModel(home: home)
         dups.tab = .duplicates
@@ -514,7 +520,7 @@ enum Snapshots {
         let model = AppModel()
         model.loadSnapshotState(peers, prompt: prompt, addresses: ["192.168.1.20"], phone: phone, tab: tab)
         setup(model)
-        let tall = name == "2-devices" || name == "5-overview" || name == "5b-overview-commands"
+        let tall = name == "2-devices" || name == "5-overview" || name == "5b-overview-commands" || name == "5d-overview-blocked"
         let narrow = name.hasSuffix("-narrow")
         let view = MainView(model: model, animated: false).frame(width: narrow ? 860 : 980, height: tall ? 1280 : 800)
         let renderer = ImageRenderer(content: view)

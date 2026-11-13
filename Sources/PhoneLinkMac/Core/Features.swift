@@ -238,6 +238,15 @@ final class MacNotifier: NSObject, UNUserNotificationCenterDelegate {
         center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
 
+    /// Calls back on the main queue with whether the person turned DyskLink's notifications off in System Settings.
+    func isDenied(_ done: @escaping @Sendable (Bool) -> Void) {
+        guard isPrepared, let center else { return }
+        center.getNotificationSettings { settings in
+            let denied = settings.authorizationStatus == .denied
+            DispatchQueue.main.async { done(denied) }
+        }
+    }
+
     func remove(id: String) {
         center?.removeDeliveredNotifications(withIdentifiers: [id])
     }

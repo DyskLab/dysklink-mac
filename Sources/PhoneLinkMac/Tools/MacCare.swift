@@ -40,6 +40,22 @@ enum MacCare {
 
     static func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 
+    /// Folders that are there but macOS wouldn't let DyskLink list, as with Files and Folders turned off for
+    /// Downloads, Documents, or Desktop. Their files are missing from a scan without any error.
+    static func unreadable(_ folders: [URL]) -> [URL] {
+        folders.filter { folder in
+            guard exists(folder) else { return false }
+            do {
+                _ = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+                return false
+            } catch let error as CocoaError {
+                return error.code == .fileReadNoPermission
+            } catch {
+                return false
+            }
+        }
+    }
+
     /// The newest of when it was changed and when it was last opened.
     static func lastUsed(_ url: URL) -> Date? {
         let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .contentAccessDateKey, .addedToDirectoryDateKey])

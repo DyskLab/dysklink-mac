@@ -617,19 +617,23 @@ struct AdvancedView: View {
             }
         }
         if !model.remoteArrangement.isEmpty {
-            Text(model.sharedInput.isWatching
-                 ? "Move the pointer past that edge to use the other Mac, and back to come home. Control-Option-Command brings it home at once. Copy and paste works across, through the shared clipboard."
-                 : "Needs Accessibility for DyskLink in System Settings > Privacy & Security, to follow the pointer to the edge.")
-                .font(.system(size: 12)).foregroundStyle(model.sharedInput.isWatching ? Theme.textSecondary : Theme.amber)
-                .fixedSize(horizontal: false, vertical: true)
+            if model.sharedInput.isWatching {
+                Text("Move the pointer past that edge to use the other Mac, and back to come home. Control-Option-Command brings it home at once. Copy and paste works across, through the shared clipboard.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                accessibilityRow("Following the pointer to the edge needs Accessibility for DyskLink in Privacy & Security.")
+            }
         }
         Toggle("Let paired Macs use their mouse and keyboard here", isOn: Bindable(model).acceptsRemoteInput)
             .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
-        Text(model.acceptsRemoteInput && !DeviceInput.isTrusted
-             ? "Needs Accessibility for DyskLink in System Settings > Privacy & Security."
-             : "Off by default. While it's on, a paired Mac can move the pointer and type here, as if its mouse and keyboard were plugged in.")
-            .font(.system(size: 12)).foregroundStyle(model.acceptsRemoteInput && !DeviceInput.isTrusted ? Theme.amber : Theme.textFaint)
-            .fixedSize(horizontal: false, vertical: true)
+        if model.acceptsRemoteInput && !model.isInputTrusted {
+            accessibilityRow("Needs Accessibility for DyskLink in Privacy & Security.")
+        } else {
+            Text("Off by default. While it's on, a paired Mac can move the pointer and type here, as if its mouse and keyboard were plugged in.")
+                .font(.system(size: 12)).foregroundStyle(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         Divider().overlay(Theme.stroke)
     }
 
@@ -729,7 +733,7 @@ struct AdvancedView: View {
                         .font(.system(size: 12)).foregroundStyle(Theme.amber)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    Button("Allow") { CGRequestScreenCaptureAccess() }.buttonStyle(SecondaryButtonStyle())
+                    Button("Allow") { Shared.model.allowScreenCapture() }.buttonStyle(SecondaryButtonStyle())
                 }
             }
             Text("Lists windows on the current Space and minimized windows. Pictures stay in memory while the preview is open.")
@@ -876,7 +880,11 @@ struct AdvancedView: View {
                     .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if notch.readsDetails, let problem = notch.detailsProblem {
-                    Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                    if problem.contains("› Automation") {
+                        HintRow(text: problem + " If it was turned down before, switch it on there.") { SystemPane.open(SystemPane.automation) }
+                    } else {
+                        Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 FirefoxExtensionRow(heard: notch.extensionHeard).padding(.top, 4)
             }
@@ -1094,11 +1102,7 @@ struct AdvancedView: View {
     }
 
     private func accessibilityRow(_ text: String) -> some View {
-        HStack {
-            Text(text).font(.system(size: 12)).foregroundStyle(Theme.amber)
-            Spacer()
-            Button("Allow") { Shared.model.allowInput() }.buttonStyle(SecondaryButtonStyle())
-        }
+        HintRow(text: text, button: "Allow") { Shared.model.allowInput() }
     }
 
     private var supportCard: some View {

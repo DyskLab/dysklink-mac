@@ -65,6 +65,7 @@ enum ToolsSelfTest {
         testSharedInputEdges()
         testCoreSafety()
         testProcessRunner()
+        testFirewallCheck()
         CpaceSelfTest.run(check)
         BinaryFrameSelfTest.run(check)
         // A laptop with a monitor above it, offset to the left, like a common desk.
@@ -1214,6 +1215,15 @@ enum ToolsSelfTest {
 
         reloaded.clearUnpinned()
         check("clearing keeps pinned entries", reloaded.entries.map(\.text) == ["kedua"])
+    }
+
+    private static func testFirewallCheck() {
+        check("firewall: block all on", FirewallCheck.parse(blockAll: "Firewall has block all state set to enabled.", app: "") == .blocksAll)
+        check("firewall: older block all wording", FirewallCheck.parse(blockAll: "Block all INCOMING connections ENABLED!", app: "") == .blocksAll)
+        check("firewall: block all off", FirewallCheck.parse(blockAll: "Firewall has block all state set to disabled.", app: "Incoming connection to /Applications/DyskLink.app is permitted.") == nil)
+        check("firewall: app blocked", FirewallCheck.parse(blockAll: "Firewall has block all state set to disabled.", app: "Incoming connection to /Applications/DyskLink.app is blocked.") == .blocksApp)
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("dysk-none-\(UUID().uuidString)")
+        check("a missing folder isn't reported as blocked", MacCare.unreadable([missing, FileManager.default.temporaryDirectory]).isEmpty)
     }
 
     private static func testDecisions() {

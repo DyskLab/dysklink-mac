@@ -679,13 +679,14 @@ struct ScreenTab: View {
                 if let error = model.cameraError[peer.id] {
                     Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
                 }
+                CameraInAppsGuide(windowTitle: "\(peer.name) camera")
             }
         }
     }
 
     private var cameraStatus: String {
         if model.camera?.peerId == peer.id {
-            return "Showing in a separate window. For Zoom or Meet, capture that window in OBS and start OBS Virtual Camera."
+            return "Showing in a separate window."
         }
         if model.cameraRequests.contains(peer.id) { return "Tap the notification on the phone to start the camera." }
         return "Use the phone as a camera on this Mac. It starts only after you tap the notification on the phone, and can also be started from the phone."
@@ -709,6 +710,46 @@ struct ScreenTab: View {
                 // One phone screen is shown at a time.
                 .disabled(model.screen != nil)
                 .help(model.screen.map { "\($0.peerName)'s screen is open. Close it first." } ?? "")
+        }
+    }
+}
+
+
+/// How to use the phone camera window in OBS, Zoom, Meet, or Teams. DyskLink can't be a system camera itself: that
+/// needs a Camera Extension signed with an Apple Developer certificate.
+private struct CameraInAppsGuide: View {
+    let windowTitle: String
+    private static let obsId = "com.obsproject.obs-studio"
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 6) {
+                step(1, "In OBS: Sources › + › macOS Screen Capture, set Method to Window Capture, and pick \u{201C}\(windowTitle)\u{201D}.")
+                step(2, "In the camera window, turn on the clean view (or press ⌘B) so only the picture is captured.")
+                step(3, "For Zoom, Meet, or Teams: click Start Virtual Camera in OBS, then choose OBS Virtual Camera as the camera in the meeting app.")
+                Text("DyskLink can't appear as a camera by itself: macOS only allows that for apps signed with an Apple Developer certificate.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.textFaint).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    if let obs = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.obsId) {
+                        Button("Open OBS") { NSWorkspace.shared.openApplication(at: obs, configuration: .init()) }
+                            .buttonStyle(SecondaryButtonStyle())
+                    } else {
+                        Button("Get OBS") { NSWorkspace.shared.open(URL(string: "https://obsproject.com/download")!) }
+                            .buttonStyle(SecondaryButtonStyle())
+                    }
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            Text("Use it in OBS, Zoom, Meet, or Teams").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    private func step(_ n: Int, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("\(n)").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.mint).frame(width: 14)
+            Text(text).font(.system(size: 12)).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

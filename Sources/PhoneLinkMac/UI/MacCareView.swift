@@ -20,10 +20,20 @@ struct MacCareView: View {
                             Text(message).font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
+                            if care.messageNeedsAutomation {
+                                Button("Open Settings") { SystemPane.open(SystemPane.automation) }.buttonStyle(SecondaryButtonStyle())
+                            }
                             IconButton(icon: "xmark", help: "Hide") { care.message = nil }
                         }
                         .padding(12)
                         .background(Theme.mint.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    }
+                    if !care.blockedFolders.isEmpty, care.tab == .cleaner || care.tab == .duplicates {
+                        HintRow(text: "macOS didn't let DyskLink look in \(ListFormatter.localizedString(byJoining: care.blockedFolders)), so files there are missing. Turn on Full Disk Access for DyskLink (or those folders under Files and Folders), then scan again.") {
+                            SystemPane.open(SystemPane.fullDiskAccess)
+                        }
+                        .padding(12)
+                        .background(Theme.amber.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                     }
                     switch care.tab {
                     case .cleaner: cleaner

@@ -321,3 +321,38 @@ enum LocalFormat {
         dayParser.date(from: text)?.formatted(date: .abbreviated, time: .omitted) ?? text
     }
 }
+
+/// System Settings pages that a hint sends people to when macOS blocks something DyskLink needs.
+enum SystemPane {
+    static let accessibility = "com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
+    static let screenRecording = "com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+    static let automation = "com.apple.settings.PrivacySecurity.extension?Privacy_Automation"
+    static let fullDiskAccess = "com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+    static let localNetwork = "com.apple.settings.PrivacySecurity.extension?Privacy_LocalNetwork"
+    static let firewall = "com.apple.Network-Settings.extension?Firewall"
+    static let wifi = "com.apple.wifi-settings-extension"
+    static var notifications: String {
+        "com.apple.Notifications-Settings.extension" + (Bundle.main.bundleIdentifier.map { "?id=\($0)" } ?? "")
+    }
+
+    @MainActor
+    static func open(_ pane: String) {
+        if let url = LauncherSettings.url(pane) { NSWorkspace.shared.open(url) }
+    }
+}
+
+/// A short amber line saying what macOS is blocking, with a button that goes where it's fixed.
+struct HintRow: View {
+    let text: String
+    var button = "Open Settings"
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(text).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button(button, action: action).buttonStyle(SecondaryButtonStyle())
+        }
+    }
+}

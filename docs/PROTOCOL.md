@@ -580,6 +580,9 @@ No new messages. With USB debugging on, the Mac runs `adb reverse tcp:47823 tcp:
 The phone keeps trying `127.0.0.1:47823`; a connection there is the same TLS connection as over Wi-Fi. When it reaches
 a Mac that is already connected over Wi-Fi, the phone closes the Wi-Fi connection and keeps the USB one, and the Mac
 replaces the old session as it does for any newer hello. The Mac sees USB sessions as coming from a loopback address.
+The Windows/Linux app does the same: `adb reverse tcp:47823 tcp:<its port>` (47821, or `DYSKLINK_PORT`), and a phone
+whose connection comes from a loopback address counts as USB. Turning USB off there also runs
+`adb reverse --remove tcp:47823` and hangs up on phones on the cable, so they come back over Wi-Fi.
 
 ## Game keys (several fingers)
 
@@ -589,6 +592,17 @@ replaces the old session as it does for any newer hello. The Mac sees USB sessio
 The Mac gives fingers 0–7 to its keys (joysticks, taps, skills, swipes), 8 to the click spot and 9 to the mouse or
 look finger. Swipes and combos are plain `tdown`, `tmove` about every 16 ms, and `tup` on one finger; auto-fire and
 combos may lift and press the same finger again within tens of milliseconds. Nothing new is sent.
+
+A Windows or Linux PC sends the same messages only when its hello lists `pc-gamekeys` (with `pc-screen`), and only to a
+phone that lists `pc-gamekeys`; the phone drops `tdown`, `tmove`, and `tup` from a PC without it (plain `down`, `drag`,
+`up`, `key`, and `text` stay under `pc-screen`), so older desktop builds are unaffected. A Mac sends them whatever its
+caps say. The PC uses the Mac's layout model, finger numbers, timing (a new finger's `tdown` alone, its first `tmove`
+at least 20 ms later; held fingers repeated every 1.5 seconds), and the Mac's virtual key codes in its profiles, kept as
+the Mac's JSON (`[GameProfile]`, per phone, in its data folder); a profile exported from the PC is one `GameProfile`
+object that the Mac's decoder reads, and the PC imports one profile or the Mac's whole list. Looking with the mouse
+holds and hides the pointer through Robot on Windows and X11 (` or Esc lets go); under Wayland, where an app can't
+move the pointer, the right mouse button is held and dragged to look instead. Every finger is lifted when the window
+loses focus, game keys are turned off or edited, the Screen tab is left, the screen stops, or the phone goes.
 
 ## Phone as an extra display
 
@@ -641,13 +655,14 @@ its gallery, and its SMS, as a Mac does. Each is opened by a cap in `hello.caps`
 | `pc-sms` | `sms.list`, `sms.send`; the phone also pushes `sms.new` to it | - |
 | `pc-contacts` | `contacts.list` (the phone answers with `contacts`) | - |
 | `pc-files` | `fs.list`, `fs.get` (the phone answers with `fs.listing` and a file transfer) | - |
+| `pc-gamekeys` | `control` with `tdown`, `tmove`, `tup` (several fingers, see Game keys); needs `pc-screen` too | - |
 
-- The desktop app lists all six (with `bin1`); `pc-contacts` and `pc-files` came later than the first four, and the
-  rules below are the same for them. The phone drops these messages from a PC whose hello doesn't list the
+- The desktop app lists all seven (with `bin1`); `pc-contacts`, `pc-files`, and later `pc-gamekeys` came after the
+  first four, and the rules below are the same for them. The phone drops these messages from a PC whose hello doesn't list the
   matching cap, and pushes `sms.new` only to Macs and to PCs with `pc-sms`, so older desktop builds (`["bin1"]` or no
   `caps`) get exactly what they got before. Macs never list `pc-*` and are served as before, H.264 included; a Mac
   passes these messages whatever its caps say.
-- The phone lists the same four caps, meaning it serves them to PCs. The desktop app shows "Update DyskLink on the
+- The phone lists the same caps, meaning it serves them to PCs. The desktop app shows "Update DyskLink on the
   phone" for a phone that doesn't list one. A phone that doesn't know PCs may still answer `gallery.*` and `sms.*`
   (it never checked), and may send H.264 for the screen: the PC refuses video without `format: "jpeg"` (see below),
   sends `screen.stop`/`camera.stop`, and shows the update hint.

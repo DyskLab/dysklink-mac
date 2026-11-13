@@ -164,7 +164,7 @@ struct MainView: View {
                 NewPeerState(peer: peer, onPair: { model.requestPairing(with: peer.id) })
             }
         } else {
-            EmptyState(addresses: model.addresses, animated: animated)
+            EmptyState(model: model, addresses: model.addresses, animated: animated)
         }
     }
 }
@@ -413,8 +413,22 @@ private struct PeerDetail: View {
 }
 
 private struct EmptyState: View {
+    let model: AppModel
     let addresses: [String]
     let animated: Bool
+
+    /// What outside DyskLink can keep phones from finding this Mac, each with where it's fixed.
+    private var hints: [(text: String, pane: String)] {
+        var list: [(String, String)] = []
+        if addresses.isEmpty {
+            list.append(("This Mac isn't on a network. Turn on Wi-Fi and join the same network as the phone.", SystemPane.wifi))
+        }
+        if let problem = model.firewallProblem { list.append((problem.message, SystemPane.firewall)) }
+        if model.localNetworkDenied {
+            list.append(("Local Network access is off for DyskLink, so it can't find devices nearby. Turn on DyskLink in Privacy & Security › Local Network.", SystemPane.localNetwork))
+        }
+        return list
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -436,8 +450,16 @@ private struct EmptyState: View {
                 .overlay(Capsule().strokeBorder(Theme.stroke))
                 .padding(.top, 8)
             }
+            ForEach(hints, id: \.text) { hint in
+                HintRow(text: hint.text) { SystemPane.open(hint.pane) }
+                    .padding(12)
+                    .frame(maxWidth: 520)
+                    .background(Theme.amber.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+            .padding(.top, 4)
         }
         .padding(30)
+        .onAppear { model.refreshFirewall() }
     }
 }
 

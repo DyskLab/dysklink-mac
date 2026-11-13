@@ -49,6 +49,10 @@ final class MacCareModel {
     let home: URL
     /// A short line after each removal, such as "Moved 12 items, 3.4 GB, to the Trash."
     var message: String?
+    /// The last removal stopped because the Finder may not be controlled (Automation), so the message gets a button.
+    var messageNeedsAutomation = false
+    /// Folders macOS kept from the last scan, named for the hint that says how to allow them.
+    var blockedFolders: [String] = []
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.home = home
@@ -70,7 +74,9 @@ final class MacCareModel {
         let home = home
         Task.detached(priority: .userInitiated) {
             let groups = Cleaner.scan(home: home) { step in Task { @MainActor in self.cleanStep = step } }
+            let blocked = MacCare.unreadable(MacCareModel.defaultFolders(home: home)).map(\.lastPathComponent)
             await MainActor.run {
+                self.blockedFolders = blocked
                 self.cleanGroups = groups
                 self.cleanSelected = Set(groups.filter { $0.key.selectedByDefault }.flatMap { $0.value.map(\.id) })
                 self.isCleaning = false
@@ -103,7 +109,7 @@ final class MacCareModel {
     var dupScanned = false
     @ObservationIgnored private var dupTask: Task<Void, Never>?
 
-    static func defaultFolders(home: URL) -> [URL] {
+    nonisolated static func defaultFolders(home: URL) -> [URL] {
         ["Downloads", "Documents", "Desktop"].map { home.appendingPathComponent($0) }
     }
 
@@ -138,8 +144,10 @@ final class MacCareModel {
                                          progress: { count in Task { @MainActor in self.dupChecked = count } },
                                          cancelled: { Task.isCancelled })
             let stopped = Task.isCancelled
+            let blocked = MacCare.unreadable(folders).map(\.lastPathComponent)
             await MainActor.run {
                 if !stopped {
+                    self.blockedFolders = blocked
                     self.dupGroups = groups
                     self.dupSelected = Set(groups.flatMap { $0.files.dropFirst().map(\.id) })
                     self.dupScanned = true
@@ -444,6 +452,7 @@ final class MacCareModel {
                 text += (text.isEmpty ? "" : " ") + why
             }
             self.message = text.isEmpty ? nil : text
+            self.messageNeedsAutomation = !failed.isEmpty && problem == .finderNotAllowed
             done(ids)
         }
     }

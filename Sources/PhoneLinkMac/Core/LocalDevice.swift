@@ -227,3 +227,37 @@ enum LocalDevice {
         return (values?.volumeAvailableCapacityForImportantUsage, values?.volumeTotalCapacity.map(Int64.init))
     }
 }
+
+/// Whether the macOS firewall keeps phones from reaching DyskLink. `socketfilterfw` answers these without admin rights.
+enum FirewallCheck {
+    enum Problem: Equatable, Sendable {
+        /// Network › Firewall › Options › Block all incoming connections.
+        case blocksAll
+        /// DyskLink is set to Block incoming connections in the firewall options.
+        case blocksApp
+
+        var message: String {
+            switch self {
+            case .blocksAll: "The Mac's firewall blocks all incoming connections, so phones can't reach DyskLink. Turn off Block all incoming connections in Firewall Options."
+            case .blocksApp: "The Mac's firewall blocks incoming connections to DyskLink. In Firewall Options, set DyskLink to Allow incoming connections."
+            }
+        }
+    }
+
+    static func parse(blockAll: String, app: String) -> Problem? {
+        let all = blockAll.lowercased()
+        if all.contains("block all") && all.contains("enabled") { return .blocksAll }
+        if app.lowercased().contains("is blocked") { return .blocksApp }
+        return nil
+    }
+
+    /// Runs the tool, so call it off the main thread.
+    static func problem(appPath: String = Bundle.main.bundlePath) -> Problem? {
+        let tool = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return nil }
+        let all = ProcessRunner.run(tool, ["--getblockall"], timeout: 3)?.text ?? ""
+        // A debug build isn't an app bundle, and the firewall only knows apps.
+        let app = appPath.hasSuffix(".app") ? ProcessRunner.run(tool, ["--getappblocked", appPath], timeout: 3)?.text ?? "" : ""
+        return parse(blockAll: all, app: app)
+    }
+}
