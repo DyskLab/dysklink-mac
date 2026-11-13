@@ -86,6 +86,14 @@ enum Theme {
     /// The dimmed layer behind a dialog.
     static let scrim = Color(dark: 0x000000, darkAlpha: 0.62, light: 0x0B1220, lightAlpha: 0.32)
     static let shadow = Color(dark: 0x000000, darkAlpha: 0.45, light: 0x0B1220, lightAlpha: 0.12)
+    /// An outline only light mode needs: a raised fill on the background is too close to it to see.
+    static let lightOutline = Color(dark: 0xFFFFFF, darkAlpha: 0, light: 0x0B1220, lightAlpha: 0.10)
+    /// The drawn switch: a darker track when off, and a white knob in light mode.
+    static let switchOffTrack = Color(dark: 0x1A2230, light: 0xC9D0DA)
+    static let switchOffKnob = Color(dark: 0x98A3B3, light: 0xFFFFFF)
+    static let switchOnKnob = Color(dark: 0x090D13, light: 0xFFFFFF)
+    /// A knob shadow only in light mode.
+    static let knobShadow = Color(dark: 0x000000, darkAlpha: 0, light: 0x0B1220, lightAlpha: 0.25)
 
     static let accentGradient = LinearGradient(
         colors: [mint, sky, violet],
@@ -197,15 +205,21 @@ extension Color {
 }
 
 struct AuroraBackground: View {
+    /// The glows read strongly on the soft grey of light mode, so they are fainter there.
+    private static let violetGlow = Color(dark: 0x8B7BFF, darkAlpha: 0.22, light: 0x6A5AE0, lightAlpha: 0.07)
+    private static let mintGlow = Color(dark: 0x5EF2C2, darkAlpha: 0.13, light: 0x0FA67A, lightAlpha: 0.06)
+
     var body: some View {
         ZStack {
             Theme.background
-            Circle().fill(Theme.violet.opacity(0.22)).frame(width: 520, height: 520)
+            Circle().fill(Self.violetGlow).frame(width: 520, height: 520)
                 .blur(radius: 130).offset(x: 300, y: -260)
-            Circle().fill(Theme.mint.opacity(0.13)).frame(width: 460, height: 460)
+            Circle().fill(Self.mintGlow).frame(width: 460, height: 460)
                 .blur(radius: 130).offset(x: -260, y: 280)
         }
         .clipped()
+        // Under the title bar too, or the band holding the window buttons shows the plain window colour.
+        .ignoresSafeArea()
     }
 }
 

@@ -79,6 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         MainActor.assumeIsolated { AppearanceStore.shared.apply() }
         #if DEBUG
+        if let scenario = ProcessInfo.processInfo.environment["DYSKLINK_LIVE_WINDOW"] {
+            MainActor.assumeIsolated { LiveWindows.open(scenario) }
+            return
+        }
         if CommandLine.arguments.contains("--tools-smoke") {
             MainActor.assumeIsolated { ToolsSelfTest.smoke() }
             return

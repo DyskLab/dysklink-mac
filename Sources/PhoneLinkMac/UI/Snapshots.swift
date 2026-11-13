@@ -38,6 +38,34 @@ enum Snapshots {
         save([fresh, phone], PairingPrompt(peerId: "demo-3", peerName: "New Phone", code: "", startedByPeer: false), "4b-pairing-enter", folder)
         save([fresh, phone], PairingPrompt(peerId: "demo-3", peerName: "New Phone", code: "", startedByPeer: false,
                                            error: "That code isn't right. Check the code on New Phone and try again."), "4c-pairing-wrong", folder)
+        let demo = demoPhone()
+        saveHistory(folder)
+        saveCare(folder)
+        var off = PhoneSnapshot()
+        off.apply(features: [])
+        save([phone], nil, "5-overview", folder, phone: demo, tab: .overview)
+        save([phone], nil, "6-notifications", folder, phone: demo, tab: .notifications)
+        save([phone], nil, "7-messages", folder, phone: demo, tab: .messages)
+        save([phone], nil, "8-contacts", folder, phone: demo, tab: .contacts)
+        save([phone], nil, "8b-contacts-search", folder, phone: demo, tab: .contacts) { $0.contactQuery = "0812" }
+        save([phone], nil, "7b-messages-search", folder, phone: demo, tab: .messages) { $0.smsQuery = "leaving" }
+        save([phone], nil, "7c-messages-new", folder, phone: demo, tab: .messages) { $0.smsThread = nil; $0.smsAddress = "a" }
+        save([phone], nil, "7d-messages-picked", folder, phone: demo, tab: .messages) { $0.smsThread = nil; $0.smsAddress = "081200000002"; $0.smsDraft = "Halo Budi" }
+        save([phone], nil, "5b-overview-commands", folder, phone: demo, tab: .overview) { $0.newCommandName = "Sleep" }
+        save([phone], nil, "5c-overview-narrow", folder, phone: demo, tab: .overview)
+        save([phone], nil, "5d-overview-blocked", folder, phone: demo, tab: .overview) { $0.loadSnapshotHints() }
+        save([phone], nil, "7e-messages-narrow", folder, phone: demo, tab: .messages)
+        save([phone], nil, "8c-contacts-narrow", folder, phone: demo, tab: .contacts)
+        save([phone], nil, "9-files", folder, phone: demo, tab: .files)
+        save([phone], nil, "11-screen", folder, phone: demo, tab: .screen)
+        save([phone], nil, "10-off", folder, phone: off, tab: .messages)
+        renderTools(to: folder)
+        renderTurns(to: folder)
+        renderGameKeys(to: folder)
+    }
+
+    /// The sample phone the snapshots and the live windows show.
+    static func demoPhone() -> PhoneSnapshot {
         var demo = PhoneSnapshot()
         demo.apply(features: ["notifications", "sms", "calls", "contacts", "files", "screen", "control", "screentime"])
         demo.usage = UsageReport(since: 0, totalMs: 4 * 3_600_000 + 12 * 60_000, apps: [
@@ -64,29 +92,7 @@ enum Snapshots {
             FsEntry(name: "Photos", isDirectory: true, size: 0, modified: now - 86_400_000),
             FsEntry(name: "laporan.pdf", isDirectory: false, size: 2_400_000, modified: now - 3_600_000),
         ]
-        saveHistory(folder)
-        saveCare(folder)
-        var off = PhoneSnapshot()
-        off.apply(features: [])
-        save([phone], nil, "5-overview", folder, phone: demo, tab: .overview)
-        save([phone], nil, "6-notifications", folder, phone: demo, tab: .notifications)
-        save([phone], nil, "7-messages", folder, phone: demo, tab: .messages)
-        save([phone], nil, "8-contacts", folder, phone: demo, tab: .contacts)
-        save([phone], nil, "8b-contacts-search", folder, phone: demo, tab: .contacts) { $0.contactQuery = "0812" }
-        save([phone], nil, "7b-messages-search", folder, phone: demo, tab: .messages) { $0.smsQuery = "leaving" }
-        save([phone], nil, "7c-messages-new", folder, phone: demo, tab: .messages) { $0.smsThread = nil; $0.smsAddress = "a" }
-        save([phone], nil, "7d-messages-picked", folder, phone: demo, tab: .messages) { $0.smsThread = nil; $0.smsAddress = "081200000002"; $0.smsDraft = "Halo Budi" }
-        save([phone], nil, "5b-overview-commands", folder, phone: demo, tab: .overview) { $0.newCommandName = "Sleep" }
-        save([phone], nil, "5c-overview-narrow", folder, phone: demo, tab: .overview)
-        save([phone], nil, "5d-overview-blocked", folder, phone: demo, tab: .overview) { $0.loadSnapshotHints() }
-        save([phone], nil, "7e-messages-narrow", folder, phone: demo, tab: .messages)
-        save([phone], nil, "8c-contacts-narrow", folder, phone: demo, tab: .contacts)
-        save([phone], nil, "9-files", folder, phone: demo, tab: .files)
-        save([phone], nil, "11-screen", folder, phone: demo, tab: .screen)
-        save([phone], nil, "10-off", folder, phone: off, tab: .messages)
-        renderTools(to: folder)
-        renderTurns(to: folder)
-        renderGameKeys(to: folder)
+        return demo
     }
 
     /// The screen window editing game keys: every kind on a landscape picture, with the side panel.

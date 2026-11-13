@@ -501,7 +501,7 @@ struct PairingOverlay: View {
 
     var body: some View {
         ZStack {
-            Theme.scrim
+            Theme.scrim.ignoresSafeArea()
             VStack(spacing: 18) {
                 LogoMark(size: 46)
                 if prompt.outdated {

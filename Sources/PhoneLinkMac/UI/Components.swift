@@ -269,6 +269,7 @@ struct TabPill: View {
             .foregroundStyle(isSelected ? Theme.onAccent : Theme.textPrimary)
             .padding(.horizontal, 11).frame(height: 30)
             .background(isSelected ? Theme.mint : Theme.panelRaised, in: Capsule())
+            .overlay(Capsule().strokeBorder(isSelected ? Color.clear : Theme.lightOutline))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)

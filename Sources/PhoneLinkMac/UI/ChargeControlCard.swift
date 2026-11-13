@@ -195,8 +195,9 @@ private struct Switch: View {
     var body: some View {
         Button { withAnimation(.easeOut(duration: 0.15)) { isOn.toggle() } } label: {
             ZStack(alignment: isOn ? .trailing : .leading) {
-                Capsule().fill(isOn ? Theme.mint : Theme.panelRaised)
-                Circle().fill(isOn ? Theme.onAccent : Theme.textSecondary).padding(3)
+                Capsule().fill(isOn ? Theme.mint : Theme.switchOffTrack)
+                Circle().fill(isOn ? Theme.switchOnKnob : Theme.switchOffKnob).padding(3)
+                    .shadow(color: Theme.knobShadow, radius: 1, y: 0.5)
             }
             .frame(width: 40, height: 23)
         }
@@ -273,6 +274,8 @@ private struct CalibrationSteps: View {
 /// An upright battery with a sign: plus to charge, minus to discharge, pause to hold.
 private struct BatteryGlyph: View {
     enum Kind { case charge, drain, drainTop, hold }
+    /// A light casing on dark, and a mid grey on light rather than a near-black block.
+    private static let casing = Color(dark: 0xF2F5F9, darkAlpha: 0.9, light: 0xB7C0CC)
     let kind: Kind
 
     var body: some View {
@@ -285,7 +288,7 @@ private struct BatteryGlyph: View {
         VStack(spacing: 1.5) {
             RoundedRectangle(cornerRadius: 1.5).fill(Theme.textSecondary).frame(width: 7, height: 2.5)
             ZStack(alignment: .bottom) {
-                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.textPrimary.opacity(0.9))
+                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Self.casing)
                 RoundedRectangle(cornerRadius: 4, style: .continuous).fill(fill.opacity(0.75))
                     .frame(height: 25 * level).padding(2)
                 Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.onAccent)
