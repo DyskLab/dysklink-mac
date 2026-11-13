@@ -12,7 +12,7 @@ struct BatteryDashboard: View {
 
     enum Part { case limit, status, flow, apps, level, details, power }
 
-    private static let sky = Color(hex: 0x6EB6FF)
+    private static let sky = Theme.sky
     private var text: CGFloat { compact ? 12 : 13.5 }
 
     var body: some View {
@@ -70,7 +70,7 @@ struct BatteryDashboard: View {
                         Image(systemName: control.topUp ? "xmark" : "plus").font(.system(size: compact ? 9.5 : 11, weight: .semibold))
                     }
                     .font(font)
-                    .foregroundStyle(control.topUp ? Theme.mint : Theme.textSecondary)
+                    .foregroundStyle(control.topUp ? Theme.mintText : Theme.textSecondary)
                     .padding(.horizontal, compact ? 9 : 11).frame(height: height)
                     .background(control.topUp ? Theme.mint.opacity(0.14) : Theme.panelRaised.opacity(0.55), in: Capsule())
                     .overlay(Capsule().strokeBorder(Theme.textFaint.opacity(0.18)))
@@ -149,7 +149,7 @@ struct BatteryDashboard: View {
                             Text(app.name).font(.system(size: compact ? 12 : 13)).foregroundStyle(Theme.textPrimary)
                             Spacer()
                             Text(String(format: "%.0f", app.impact)).font(.system(size: 13, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(app.impact >= 50 ? Theme.coral : Theme.amber)
+                                .foregroundStyle(app.impact >= 50 ? Theme.coralText : Theme.amberText)
                         }
                     }
                 }
@@ -235,7 +235,7 @@ private struct BatteryBar: View {
 
     /// Amber on battery, mint while charging, quiet gray otherwise.
     static func color(charging: Bool, onBattery: Bool) -> Color {
-        onBattery ? Theme.amber : charging ? Theme.mint : Color(hex: 0x8C96A8)
+        onBattery ? Theme.amber : charging ? Theme.mint : Color(dark: 0x8C96A8, light: 0x6B7686)
     }
 
     private var height: CGFloat { compact ? 22 : 26 }
@@ -255,10 +255,10 @@ private struct BatteryBar: View {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: compact ? 6 : 7, style: .continuous)
                     .fill(Theme.panelRaised.opacity(0.8))
-                    .overlay(RoundedRectangle(cornerRadius: compact ? 6 : 7, style: .continuous).strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: compact ? 6 : 7, style: .continuous).strokeBorder(Theme.contrast.opacity(0.18), lineWidth: 1))
                     .frame(width: bodyW, height: h)
                 UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0, bottomTrailingRadius: 1.5, topTrailingRadius: 1.5, style: .continuous)
-                    .fill(Color.white.opacity(0.22))
+                    .fill(Theme.contrast.opacity(0.22))
                     .frame(width: nub, height: h * 0.4)
                     .offset(x: bodyW + 1.5, y: h * 0.3)
                 fillShape.fill(color)
@@ -296,7 +296,7 @@ private struct BatteryBar: View {
                         .font(.system(size: compact ? 9.5 : 11, weight: .semibold))
                     Text("\(percent)%").font(.system(size: compact ? 11.5 : 13, weight: .semibold).monospacedDigit())
                 }
-                .foregroundStyle(inside ? Theme.ink.opacity(0.85) : Theme.textPrimary)
+                .foregroundStyle(inside ? Theme.onAccent.opacity(0.9) : Theme.textPrimary)
                 .frame(height: h)
                 .offset(x: inside ? inset + 7 : inset + fillW + 6)
             }
@@ -379,8 +379,8 @@ private struct PowerFlow: View {
     var onCharger = false
     var compact = false
 
-    private static let orchid = Color(hex: 0xD58BF0)
-    private static let sky = Color(hex: 0x6EB6FF)
+    private static let orchid = Color(dark: 0xD58BF0, light: 0xA24FC4)
+    private static let sky = Theme.sky
 
     private struct Row: Identifiable {
         let icon: String

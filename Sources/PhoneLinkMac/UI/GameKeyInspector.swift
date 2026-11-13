@@ -24,7 +24,7 @@ struct GameKeysPanel: View {
                 }
                 Spacer()
                 Button("Done") { game.editing = false; ScreenWindow.focusSurface() }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
             .padding(.horizontal, 12).frame(height: 40)
             Divider().overlay(Theme.stroke)
@@ -46,7 +46,7 @@ struct GameKeysPanel: View {
                 HStack {
                     Spacer()
                     Button("Clear all") { game.clear() }
-                        .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.coral)
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.coralText)
                 }
                 .padding(.horizontal, 12).frame(height: 30)
             }
@@ -86,7 +86,7 @@ struct GameKeysPanel: View {
                             Spacer(minLength: 0)
                         }
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(on ? Theme.ink : Theme.textPrimary)
+                        .foregroundStyle(on ? Theme.onAccent : Theme.textPrimary)
                         .padding(.horizontal, 8).frame(height: 26)
                         .background(on ? Theme.mint : Theme.panelRaised, in: RoundedRectangle(cornerRadius: 6))
                     }
@@ -95,7 +95,7 @@ struct GameKeysPanel: View {
             }
             Text(game.placing != nil ? "Now click the picture to place it. Esc cancels."
                  : "Pick one, then click the picture. Shortcuts: click + key, drag + key (swipe), ⌥/⇧/⌘-click.")
-                .font(.system(size: 10)).foregroundStyle(game.placing != nil ? Theme.amber : Theme.textFaint)
+                .font(.system(size: 10)).foregroundStyle(game.placing != nil ? Theme.amberText : Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -179,7 +179,7 @@ struct GameKeyInspector: View {
             Button { game.remove(key.id); refocus() } label: {
                 Label("Delete this control", systemImage: "trash").font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.plain).foregroundStyle(Theme.coral).padding(.top, 2)
+            .buttonStyle(.plain).foregroundStyle(Theme.coralText).padding(.top, 2)
         }
         .padding(10)
         .background(Theme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
@@ -242,9 +242,9 @@ struct GameKeyInspector: View {
             Button { game.capture = waiting ? nil : .key(key.id); refocus() } label: {
                 Text(waiting ? "Press a key…" : key.label)
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(waiting ? Theme.amber : Theme.textPrimary)
+                    .foregroundStyle(waiting ? Theme.amberText : Theme.textPrimary)
                     .frame(width: 110, height: 22)
-                    .background(Theme.ink, in: RoundedRectangle(cornerRadius: 5))
+                    .background(Theme.background, in: RoundedRectangle(cornerRadius: 5))
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(waiting ? Theme.amber : Theme.stroke))
             }
             .buttonStyle(.plain)
@@ -263,7 +263,7 @@ struct GameKeyInspector: View {
                 Text("Custom").tag(GameKey.KeySet.custom)
             }
             if case .stickKeys(let id, let codes, _) = game.capture, id == key.id {
-                Text("Press the key for \(["up", "left", "down", "right"][codes.count])… Esc stops.").foregroundStyle(Theme.amber)
+                Text("Press the key for \(["up", "left", "down", "right"][codes.count])… Esc stops.").foregroundStyle(Theme.amberText)
             } else if key.keySet == .custom {
                 HStack {
                     Text(key.directionLabels.joined(separator: " ")).font(.system(size: 11, weight: .bold))
@@ -395,7 +395,7 @@ struct GameKeyInspector: View {
     }
 
     private func note(_ text: String, color: Color = Theme.textSecondary) -> some View {
-        Text(text).font(.system(size: 10)).foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
+        Text(text).font(.system(size: 10)).foregroundStyle(Theme.text(color)).fixedSize(horizontal: false, vertical: true)
     }
 
     private func binding<T>(_ path: WritableKeyPath<GameKey, T>) -> Binding<T> {

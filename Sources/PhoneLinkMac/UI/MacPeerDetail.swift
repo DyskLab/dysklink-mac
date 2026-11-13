@@ -32,7 +32,7 @@ struct MacPeerDetail: View {
                     .font(.system(size: 46, weight: .medium))
                     .foregroundStyle(peer.isConnected ? AnyShapeStyle(Theme.accentGradient) : AnyShapeStyle(Theme.textFaint))
                     .frame(width: 110, height: 110)
-                    .background(Color.white.opacity(0.05), in: Circle())
+                    .background(Theme.contrast.opacity(0.05), in: Circle())
                 VStack(alignment: .leading, spacing: 9) {
                     StatusPill(text: peer.isConnected ? "Connected" : "Not connected",
                                color: peer.isConnected ? Theme.mint : Theme.textFaint)

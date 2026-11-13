@@ -5,8 +5,13 @@ import SwiftUI
 /// Renders PNGs of the main screens: `PhoneLinkMac --snapshot <folder>`.
 @MainActor
 enum Snapshots {
+    /// `DYSKLINK_SNAPSHOT_APPEARANCE=light` draws every snapshot in the light theme.
+    static let scheme: ColorScheme = ProcessInfo.processInfo.environment["DYSKLINK_SNAPSHOT_APPEARANCE"] == "light" ? .light : .dark
+
     static func render(to folder: String) {
         CareIcons.loadsSynchronously = true
+        AppearanceStore.shared.override = scheme == .light ? .light : .dark
+        AppearanceStore.shared.apply()
         let phone = Peer(
             id: "demo-1", name: "Sample Phone", platform: "android", model: "Android 36",
             isPaired: true, isConnected: true,
@@ -111,7 +116,7 @@ enum Snapshots {
             view.game = game
             view.layout()
             let height: CGFloat = 760
-            let host = NSHostingView(rootView: GameKeysPanel(game: game, scrolls: false).frame(height: height).preferredColorScheme(.dark))
+            let host = NSHostingView(rootView: GameKeysPanel(game: game, scrolls: false).frame(height: height).snapshotScheme())
             host.frame = CGRect(x: 0, y: 0, width: GameKeysPanel.width, height: height)
             host.layoutSubtreeIfNeeded()
             guard let panel = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
@@ -203,29 +208,29 @@ enum Snapshots {
         AdvancedLayout.shared.persists = false
         AdvancedLayout.shared.category = .overview
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1300, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "12-advanced", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12-advanced", folder)
         AdvancedLayout.shared.category = .productivity
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1900, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "12b-advanced-productivity", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12b-advanced-productivity", folder)
         AdvancedLayout.shared.category = .screen
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1900, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "12c-advanced-screen", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12c-advanced-screen", folder)
         AdvancedLayout.shared.category = .general
         let release = UpdateChecker.Release(version: "0.1.4", url: UpdateChecker.pageURL)
         UpdateChecker.versionOverride = "0.1.3"
         Shared.updates.showForSnapshot(release)
         // The General page down to the updates card, which is near the bottom.
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1700, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "25-updates", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "25-updates", folder)
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1500, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "29-advanced-top", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "29-advanced-top", folder)
         tools.isNotchOn = true
         AdvancedLayout.shared.category = .notch
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 2300, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "30-advanced-notch-collapsed", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "30-advanced-notch-collapsed", folder)
         AdvancedLayout.shared.setOpen(["pages", "music", "pomodoro", "prayer", "weather", "battery", "screen"])
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 2300, alignment: .top)
-            .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), "22-advanced-notch", folder)
+            .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "22-advanced-notch", folder)
         tools.isNotchOn = false
         let notch = NotchModel(directory: directory)
         notch.isOpen = true
@@ -248,7 +253,7 @@ enum Snapshots {
                                                      size: 100, transferred: 62, outgoing: true)] },
                       sendFile: { _, _ in }, scrolls: false).frame(width: 640, height: 292)
                 .overlay(alignment: .top) { Rectangle().fill(Color(hex: 0xC2185B)).frame(width: 179, height: 32) }
-                .background(Color(hex: 0x3A4658)).preferredColorScheme(.dark)
+                .background(Color(hex: 0x3A4658)).snapshotScheme()
         }
         write(notchFrame(notch), "14-notch-music", folder)
         notch.page = .shelf
@@ -357,7 +362,7 @@ enum Snapshots {
         tools.isAwakeOn = true
         menu.setShown(.awake, true)
         write(MenuBarView(model: AppModel(), layout: menu, tools: tools, scrolls: false).fixedSize(), "50-menubar-custom", folder)
-        write(MenuBarSettings(layout: menu).frame(width: 640).padding(20).background(Theme.ink).preferredColorScheme(.dark),
+        write(MenuBarSettings(layout: menu).frame(width: 640).padding(20).background(Theme.background).snapshotScheme(),
               "51-menubar-settings", folder)
         // Every part turned off.
         MenuBarLayout.Section.allCases.forEach { menu.setShown($0, false) }
@@ -366,7 +371,7 @@ enum Snapshots {
     }
 
     private static func write<V: View>(_ view: V, _ name: String, _ folder: String) {
-        let renderer = ImageRenderer(content: view)
+        let renderer = ImageRenderer(content: view.snapshotScheme())
         renderer.scale = 1.5
         guard let image = renderer.cgImage,
               let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
@@ -399,7 +404,7 @@ enum Snapshots {
         func render(_ care: MacCareModel, _ name: String, height: CGFloat = 1100) {
             care.loadsOnShow = false
             write(MacCareView(care: care, scrolls: false).frame(width: 760, height: height, alignment: .top).clipped()
-                .background(Theme.ink).toggleStyle(.dyskSwitch).preferredColorScheme(.dark), name, folder)
+                .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), name, folder)
         }
 
         let cleaner = MacCareModel(home: home)
@@ -510,7 +515,7 @@ enum Snapshots {
         for (filter, name) in [(FileHistoryView.Filter.all, "20-history"), (.received, "21-history-received")] {
             let model = AppModel()
             model.loadSnapshotHistory(records, filter: filter)
-            write(FileHistoryView(model: model, scrolls: false).frame(width: 760).background(Theme.ink), name, folder)
+            write(FileHistoryView(model: model, scrolls: false).frame(width: 760).background(Theme.background), name, folder)
         }
     }
 
@@ -523,12 +528,18 @@ enum Snapshots {
         let tall = name == "2-devices" || name == "5-overview" || name == "5b-overview-commands" || name == "5d-overview-blocked"
         let narrow = name.hasSuffix("-narrow")
         let view = MainView(model: model, animated: false).frame(width: narrow ? 860 : 980, height: tall ? 1280 : 800)
-        let renderer = ImageRenderer(content: view)
+        let renderer = ImageRenderer(content: view.snapshotScheme())
         renderer.scale = 1.5
         guard let image = renderer.cgImage,
               let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
         else { return print("Failed: \(name)") }
         try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+    }
+}
+extension View {
+    /// The theme being drawn: the environment and the window preference both, as a real window would get.
+    func snapshotScheme() -> some View {
+        environment(\.colorScheme, Snapshots.scheme).preferredColorScheme(Snapshots.scheme)
     }
 }
 #endif

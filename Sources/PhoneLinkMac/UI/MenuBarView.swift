@@ -21,7 +21,7 @@ struct MenuBarView: View {
     var body: some View {
         // Taller than the screen, the menu scrolls instead of running off the bottom.
         if scrolls { scrolling } else {
-            content.background(Theme.panel).preferredColorScheme(.dark)
+            content.background(Theme.panel).dyskAppearance()
         }
     }
 
@@ -36,7 +36,7 @@ struct MenuBarView: View {
         .frame(width: width, height: min(MenuMetrics.shared.contentHeight, room))
         .background(Theme.panel)
         .background(MenuWindowAnchor())
-        .preferredColorScheme(.dark)
+        .dyskAppearance()
     }
 
     private var width: CGFloat { layout.visible.filter(isAvailable).contains(.powerFlow) ? 340 : 330 }
@@ -191,7 +191,7 @@ struct MenuBarView: View {
                     Spacer()
                     if peer.isConnected, let percent = peer.info?.batteryPercent {
                         Text("\(percent)%").font(.system(size: 11.5, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.batteryColor(percent))
+                            .foregroundStyle(Theme.text(Theme.batteryColor(percent)))
                     }
                 }
             }
@@ -265,7 +265,7 @@ struct MenuBarView: View {
                         .foregroundStyle(Theme.textPrimary)
                         .padding(.horizontal, 10)
                         .frame(height: 26)
-                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(Theme.contrast.opacity(0.07), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.stroke))
                         .contentShape(Rectangle())
                     }
@@ -279,7 +279,7 @@ struct MenuBarView: View {
                 } label: {
                     Text(awake.isActive ? "Stop" : "Start")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(awake.isActive ? Theme.coral : Theme.ink)
+                        .foregroundStyle(awake.isActive ? Theme.coralText : Theme.onAccent)
                         .frame(width: 64, height: 26)
                         .background(awake.isActive ? Theme.coral.opacity(0.15) : Theme.mint, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .contentShape(Rectangle())
@@ -300,7 +300,7 @@ struct MenuBarView: View {
                 Text(notch.focusText(at: context.date)).font(.system(size: 12.5, weight: .bold).monospacedDigit()).foregroundStyle(Theme.textSecondary)
                 Spacer()
                 Button(notch.isFocusing ? "Pause" : "Start") { notch.togglePomodoro() }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
         }
     }
@@ -327,7 +327,7 @@ struct MenuBarView: View {
                 caption("QUICK NOTE")
                 Spacer()
                 Button("Edit") { NoteEditor.show(note) }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
             Text(note.text.isEmpty ? "Empty" : note.text).font(.system(size: 12.5))
                 .foregroundStyle(note.text.isEmpty ? Theme.textFaint : Theme.textPrimary).lineLimit(4)

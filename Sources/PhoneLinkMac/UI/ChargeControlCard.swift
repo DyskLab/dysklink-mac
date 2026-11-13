@@ -17,7 +17,7 @@ struct ChargeControlCard: View {
                         .opacity(control.installed ? 1 : 0.45)
                 }
                 if let error = control.error {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral).fixedSize(horizontal: false, vertical: true)
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -77,14 +77,14 @@ struct ChargeControlCard: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(hint).font(.system(size: 12)).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
                     Button("Open Battery Settings") { NSWorkspace.shared.open(PowerSettings.batterySettings) }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             } else if control.reason == .held || (control.nativeLimit ?? 100) <= control.settings.limit && control.settings.limiter {
                 Text("macOS's Charge Limit holds the battery at \(control.nativeLimit ?? control.settings.limit)% while the charger runs the Mac.")
-                    .font(.system(size: 12)).foregroundStyle(Theme.mint).fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: 12)).foregroundStyle(Theme.mintText).fixedSize(horizontal: false, vertical: true)
             }
             if control.settings.sailing {
                 panel {
@@ -112,7 +112,7 @@ struct ChargeControlCard: View {
                         Text("Heat protection deactivated.")
                     }
                     Text("Current: \(control.temperature.map(LocalFormat.celsius) ?? "—")")
-                        .foregroundStyle((control.temperature ?? 0) >= control.settings.heatLimit ? Theme.coral : Theme.textPrimary)
+                        .foregroundStyle((control.temperature ?? 0) >= control.settings.heatLimit ? Theme.coralText : Theme.textPrimary)
                 }
             }
         }
@@ -133,7 +133,7 @@ struct ChargeControlCard: View {
             panel { CalibrationSteps(phase: control.calibration, limit: control.settings.limiter ? control.settings.limit : nil) }
             HStack(spacing: 6) {
                 if let warning = control.nativeLimitNote {
-                    Text(warning).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                    Text(warning).font(.system(size: 12)).foregroundStyle(Theme.amberText).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 Text("Last calibration: \(control.lastCalibration.map { $0.formatted(date: .abbreviated, time: .omitted) } ?? "never")")
@@ -196,7 +196,7 @@ private struct Switch: View {
         Button { withAnimation(.easeOut(duration: 0.15)) { isOn.toggle() } } label: {
             ZStack(alignment: isOn ? .trailing : .leading) {
                 Capsule().fill(isOn ? Theme.mint : Theme.panelRaised)
-                Circle().fill(isOn ? Theme.ink : Theme.textSecondary).padding(3)
+                Circle().fill(isOn ? Theme.onAccent : Theme.textSecondary).padding(3)
             }
             .frame(width: 40, height: 23)
         }
@@ -217,7 +217,7 @@ private struct NumberBox: View {
             .font(.system(size: 12.5, weight: .medium).monospacedDigit())
             .foregroundStyle(Theme.textPrimary)
             .frame(width: 46, height: 26)
-            .background(Theme.ink.opacity(0.85), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Theme.background.opacity(0.85), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Theme.textFaint.opacity(0.35)))
     }
 }
@@ -262,7 +262,7 @@ private struct CalibrationSteps: View {
                     BatteryGlyph(kind: step.kind).opacity(current == nil || current == step.id ? 1 : 0.4)
                     Text(step.text).font(.system(size: 11)).multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                        .foregroundStyle(current == step.id ? Theme.mint : Theme.textPrimary)
+                        .foregroundStyle(current == step.id ? Theme.mintText : Theme.textPrimary)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -280,7 +280,7 @@ private struct BatteryGlyph: View {
         case .charge: (Theme.mint, 1, "plus")
         case .drain: (Theme.amber, 0.45, "minus")
         case .drainTop: (Theme.amber, 0.7, "minus")
-        case .hold: (Color(hex: 0x6EB6FF), 1, "pause.fill")
+        case .hold: (Theme.sky, 1, "pause.fill")
         }
         VStack(spacing: 1.5) {
             RoundedRectangle(cornerRadius: 1.5).fill(Theme.textSecondary).frame(width: 7, height: 2.5)
@@ -288,7 +288,7 @@ private struct BatteryGlyph: View {
                 RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.textPrimary.opacity(0.9))
                 RoundedRectangle(cornerRadius: 4, style: .continuous).fill(fill.opacity(0.75))
                     .frame(height: 25 * level).padding(2)
-                Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.ink)
+                Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.onAccent)
                     .frame(maxHeight: .infinity)
             }
             .frame(width: 17, height: 29)

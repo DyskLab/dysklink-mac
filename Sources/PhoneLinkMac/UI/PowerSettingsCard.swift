@@ -24,7 +24,7 @@ struct PowerSettingsCard: View {
                             Button(mode.label) { power.setLowPower(mode) }
                                 .buttonStyle(.plain)
                                 .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(chosen ? Theme.ink : Theme.textPrimary)
+                                .foregroundStyle(chosen ? Theme.onAccent : Theme.textPrimary)
                                 .padding(.horizontal, 9).frame(height: 25)
                                 .background(chosen ? Theme.mint : Theme.panelRaised, in: Capsule())
                                 .disabled(power.busy)
@@ -39,15 +39,15 @@ struct PowerSettingsCard: View {
                         Text("Optimized Battery Charging").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
                         Spacer(minLength: 8)
                         Button("Open Battery Settings") { NSWorkspace.shared.open(PowerSettings.batterySettings) }
-                            .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                            .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
                     }
                     note("macOS learns your routine and may hold charging at 80% until you usually unplug. That can fight DyskLink's charge limit, so turn it off in System Settings › Battery › Battery Health (ⓘ) while you use the limit. macOS doesn't let other apps read or change it.")
                     if let nativeLimit, nativeLimit < 100 {
-                        Text("macOS's own Charge Limit is set to \(nativeLimit)%.").font(.system(size: 12)).foregroundStyle(Theme.amber)
+                        Text("macOS's own Charge Limit is set to \(nativeLimit)%.").font(.system(size: 12)).foregroundStyle(Theme.amberText)
                     }
                 }
                 if let error = power.error {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
                 }
             }
         }

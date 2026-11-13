@@ -66,6 +66,8 @@ struct AdvancedView: View {
                         sectionLabel("UPDATES")
                         updatesCard
                     }
+                    sectionLabel("APPEARANCE")
+                    appearanceCard
                     sectionLabel("START AND MENU BAR")
                     loginCard
                     MenuBarSettings(layout: Shared.menuBar)
@@ -148,6 +150,38 @@ struct AdvancedView: View {
             .padding(.top, 8)
     }
 
+    /// System, Dark, or Light for every window and the menu. The notch and phone video stay dark.
+    private var appearanceCard: some View {
+        let store = AppearanceStore.shared
+        return Card {
+            HStack(spacing: 12) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.mint.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Appearance").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Text("System follows macOS. The notch and phone screens stay dark.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                HStack(spacing: 6) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        let chosen = store.mode == mode
+                        Button(mode.label) { store.mode = mode }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(chosen ? Theme.onAccent : Theme.textPrimary)
+                            .padding(.horizontal, 12).frame(height: 28)
+                            .background(chosen ? Theme.mint : Theme.panelRaised, in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                }
+            }
+        }
+    }
+
     private var loginCard: some View {
         let model = Shared.model
         return Card {
@@ -172,14 +206,14 @@ struct AdvancedView: View {
                 }
                 if model.loginNeedsApproval {
                     HStack {
-                        Text("macOS needs your approval in Login Items.").font(.system(size: 12)).foregroundStyle(Theme.amber)
+                        Text("macOS needs your approval in Login Items.").font(.system(size: 12)).foregroundStyle(Theme.amberText)
                         Spacer()
                         Button("Open Settings") { SMAppService.openSystemSettingsLoginItems() }
                             .buttonStyle(SecondaryButtonStyle())
                     }
                 }
                 if let problem = model.loginProblem {
-                    Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                    Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -222,7 +256,7 @@ struct AdvancedView: View {
                     Text("This is version \(UpdateChecker.currentVersion ?? "unknown").")
                         .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     if let release = updates.available {
-                        Text("\(release.version) is available.").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                        Text("\(release.version) is available.").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
                     } else if let status = updates.status {
                         Text(status).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     }
@@ -385,12 +419,12 @@ struct AdvancedView: View {
             ShortcutRow(tools: tools, slot: .capture, combo: tools.captureShortcut, text: "Drag over part of the screen to copy its text")
             if tools.historyShortcut != .historyDefault || tools.captureShortcut != .captureDefault {
                 Button("Reset shortcuts") { tools.resetShortcuts() }.buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
             Toggle("Control + Option + 1 to 9 pastes the 1st to 9th item", isOn: $tools.isQuickPasteOn)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
             if let problem = tools.shortcutProblem {
-                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText)
             }
             Toggle("Ignore passwords", isOn: Bindable(tools.clipboard).ignoresPasswords)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
@@ -400,7 +434,7 @@ struct AdvancedView: View {
             if tools.clipboard.passwordLikeCount > 0 {
                 HStack {
                     Text("\(tools.clipboard.passwordLikeCount) saved items look like passwords.")
-                        .font(.system(size: 12)).foregroundStyle(Theme.amber)
+                        .font(.system(size: 12)).foregroundStyle(Theme.amberText)
                     Spacer()
                     Button("Remove them") { confirmRemovePasswords() }.buttonStyle(SecondaryButtonStyle(tint: Theme.coral))
                 }
@@ -613,7 +647,7 @@ struct AdvancedView: View {
             }
             if model.remoteArrangement[mac.id] != nil, mac.info?.remoteControl != true {
                 Text("Turn on \"Let paired computers use their mouse and keyboard here\" on \(mac.name) too.")
-                    .font(.system(size: 11.5)).foregroundStyle(Theme.amber)
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.amberText)
             }
         }
         if !model.remoteArrangement.isEmpty {
@@ -646,7 +680,7 @@ struct AdvancedView: View {
             }
             .frame(width: 260)
             if let problem = tools.launcherProblem {
-                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText).fixedSize(horizontal: false, vertical: true)
             }
             Text("Type to find apps, files, and open windows, or a sum such as 12*(3+4), or a unit such as 10 km to mi. Copies show when Clipboard History is on, and saved window layouts when Window Layout is on. Files come from the Spotlight index, so the results match Spotlight. DyskLink doesn't change any macOS settings, so to use Command + Space, turn off Spotlight's shortcut first.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
@@ -662,7 +696,7 @@ struct AdvancedView: View {
         return VStack(alignment: .leading, spacing: 10) {
             if !Shared.model.isInputTrusted { accessibilityRow("Moving windows needs Accessibility.") }
             if let problem = layout.shortcutProblem {
-                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText)
             }
             Text("Press Control + Option with a key to move the front window.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
@@ -672,7 +706,7 @@ struct AdvancedView: View {
                         Text(spot.key.name).font(.system(size: 11.5, weight: .semibold).monospaced())
                             .foregroundStyle(Theme.textPrimary)
                             .frame(minWidth: 52).padding(.vertical, 3)
-                            .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .background(Theme.contrast.opacity(0.07), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         Text(spot.label).font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
                     }
                 }
@@ -724,13 +758,13 @@ struct AdvancedView: View {
             }
             .font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
             if let problem = tools.previews.shortcutProblem {
-                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText)
             }
             if !Shared.model.isInputTrusted { accessibilityRow("Finding windows needs Accessibility.") }
             if !CGPreflightScreenCaptureAccess() {
                 HStack {
                     Text("Pictures of windows need Screen Recording. Without it, you see icons and titles.")
-                        .font(.system(size: 12)).foregroundStyle(Theme.amber)
+                        .font(.system(size: 12)).foregroundStyle(Theme.amberText)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button("Allow") { Shared.model.allowScreenCapture() }.buttonStyle(SecondaryButtonStyle())
@@ -791,7 +825,7 @@ struct AdvancedView: View {
                         }
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(chosen ? Theme.ink : Theme.textPrimary)
+                        .foregroundStyle(chosen ? Theme.onAccent : Theme.textPrimary)
                         .padding(.horizontal, 10).frame(height: 26)
                         .background(chosen ? Theme.mint : Theme.panelRaised, in: Capsule())
                     }
@@ -854,7 +888,7 @@ struct AdvancedView: View {
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
             if !notch.hasData(.prayer) || !notch.hasData(.weather) {
                 Text("Prayer times and Weather can be turned on once you choose a city in their own sections below.")
-                    .font(.system(size: 12)).foregroundStyle(Theme.amber)
+                    .font(.system(size: 12)).foregroundStyle(Theme.amberText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -883,7 +917,7 @@ struct AdvancedView: View {
                     if problem.contains("› Automation") {
                         HintRow(text: problem + " If it was turned down before, switch it on there.") { SystemPane.open(SystemPane.automation) }
                     } else {
-                        Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                        Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 FirefoxExtensionRow(heard: notch.extensionHeard).padding(.top, 4)
@@ -982,7 +1016,7 @@ struct AdvancedView: View {
                 }
                 if water.settings.fromHour >= water.settings.toHour {
                     Text("The end hour must come after the start hour, or no reminder is sent.")
-                        .font(.system(size: 12)).foregroundStyle(Theme.amber)
+                        .font(.system(size: 12)).foregroundStyle(Theme.amberText)
                 }
             }
             Text("Press Drink in the notch each time you drink. A reminder comes when the time you chose has passed since your last drink or reminder, only during those hours, and stops once the goal is reached. Reminders only run while the Notch is on. The last 7 days are kept on this Mac.")
@@ -1007,7 +1041,7 @@ struct AdvancedView: View {
             }
             if todos.list.items.contains(where: \.isDone) {
                 Button("Clear finished tasks") { todos.clearDone() }.buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
             Text("Add, check off, rename, and remove tasks here, in the notch, or from the phone. Up to \(TodoList.maxItems) tasks are kept on this Mac, and tasks finished on an earlier day are removed.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
@@ -1050,7 +1084,7 @@ struct AdvancedView: View {
                 }
             }
             if let problem = prayer.problem {
-                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText)
             }
             Text("Times come from equran.id, for cities in Indonesia. A month is saved on this Mac, so they keep working offline. Notifications only run while the Notch is on.")
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
@@ -1069,7 +1103,7 @@ struct AdvancedView: View {
                 .frame(width: 220)
                 Button("Search") { weather.search(weather.query) }.buttonStyle(SecondaryButtonStyle())
                 if let place = weather.place {
-                    Text(place.label).font(.system(size: 12)).foregroundStyle(Theme.mint).lineLimit(1)
+                    Text(place.label).font(.system(size: 12)).foregroundStyle(Theme.mintText).lineLimit(1)
                 }
             }
             ForEach(weather.results) { place in
@@ -1083,7 +1117,7 @@ struct AdvancedView: View {
                 .buttonStyle(.plain).font(.system(size: 12.5))
             }
             if let note = weather.searchNote {
-                Text(note).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                Text(note).font(.system(size: 12)).foregroundStyle(Theme.amberText)
             }
             Toggle("Show temperatures in Fahrenheit", isOn: Bindable(weather).usesFahrenheit)
                 .font(.system(size: 12.5)).foregroundStyle(Theme.textPrimary).tint(Theme.mint)
@@ -1173,7 +1207,7 @@ private struct ToolIcon: View {
         Image(systemName: icon)
             .font(.system(size: 15, weight: .semibold)).foregroundStyle(isOn ? Theme.mint : Theme.textSecondary)
             .frame(width: 34, height: 34)
-            .background((isOn ? Theme.mint : Color.white).opacity(isOn ? 0.12 : 0.05),
+            .background((isOn ? Theme.mint : Theme.contrast).opacity(isOn ? 0.12 : 0.05),
                         in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
@@ -1201,7 +1235,7 @@ private struct ToolTile: View {
                 Text(isOn ? "Settings" : "Details")
                 Image(systemName: "arrow.right")
             }
-            .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(isOn ? Theme.mint : Theme.textFaint)
+            .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(isOn ? Theme.mintText : Theme.textFaint)
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
@@ -1271,7 +1305,7 @@ private struct Meter: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(Theme.contrast.opacity(0.08))
                 Capsule().fill(Theme.mint).frame(width: max(4, proxy.size.width * fraction))
             }
         }
@@ -1314,7 +1348,7 @@ private struct ShortcutRow: View {
             } label: {
                 Text(isRecording ? "Press keys…" : combo.label)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(isRecording ? Theme.mint : Theme.textPrimary)
+                    .foregroundStyle(isRecording ? Theme.mintText : Theme.textPrimary)
                     .frame(minWidth: 72)
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(Theme.panelRaised, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -1363,7 +1397,7 @@ struct DisplaySliders: View {
                         if display.method == .monitor {
                             Text("DDC").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.textSecondary)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(Color.white.opacity(0.08), in: Capsule())
+                                .background(Theme.contrast.opacity(0.08), in: Capsule())
                         }
                         Spacer(minLength: 0)
                         if showsOptions, display.canUseDDC {
@@ -1371,7 +1405,7 @@ struct DisplaySliders: View {
                                 control.setUsesDDC(display.method != .monitor, for: display.id)
                             }
                             .buttonStyle(.plain)
-                            .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Theme.mint)
+                            .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Theme.mintText)
                         }
                     }
                     sliderRow("sun.max.fill", value: display.brightness) { control.setBrightness($0, for: display.id) }
@@ -1416,7 +1450,7 @@ struct DisplaySliders: View {
                 .fixedSize(horizontal: false, vertical: true)
             if control.needsAccessibility {
                 HStack {
-                    Text("The brightness keys need Accessibility.").font(.system(size: 12)).foregroundStyle(Theme.amber)
+                    Text("The brightness keys need Accessibility.").font(.system(size: 12)).foregroundStyle(Theme.amberText)
                     Spacer()
                     Button("Allow") { Shared.model.allowInput() }.buttonStyle(SecondaryButtonStyle())
                 }
@@ -1513,13 +1547,13 @@ private struct FirefoxExtensionRow: View {
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let heard, Date().timeIntervalSince(heard) < NotchModel.extensionTimeout {
-                Text("Extension connected.").font(.system(size: 12)).foregroundStyle(Theme.mint)
+                Text("Extension connected.").font(.system(size: 12)).foregroundStyle(Theme.mintText)
             } else if state.installed {
                 Text("Helper installed. Waiting for the extension: open a YouTube video in Firefox.")
                     .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
             }
             if let error = state.error {
-                Text(error).font(.system(size: 12)).foregroundStyle(Theme.amber)
+                Text(error).font(.system(size: 12)).foregroundStyle(Theme.amberText)
             }
         }
     }

@@ -574,7 +574,7 @@ struct WindowStrip: View {
         .padding(Self.outerPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .modifier(PanelStyle(style: style))
-        .preferredColorScheme(.dark)
+        .dyskAppearance()
     }
 
     /// A big app icon with the window's title under it, for the icons-only switcher.
@@ -597,7 +597,7 @@ struct WindowStrip: View {
                 .frame(width: cardWidth, height: Self.titleHeight * 2, alignment: .top)
         }
         .padding(Self.cardPadding)
-        .background(isSelected ? Color.white.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(isSelected ? Theme.contrast.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .strokeBorder(isSelected ? Theme.mint : Color.clear, lineWidth: 2))
         .contentShape(Rectangle())
@@ -649,7 +649,7 @@ struct WindowStrip: View {
         Button(action: action) {
             Image(systemName: name).font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.textSecondary)
                 .frame(width: 18, height: 18)
-                .background(Color.white.opacity(0.08), in: Circle())
+                .background(Theme.contrast.opacity(0.08), in: Circle())
         }
         .buttonStyle(.plain)
         .help(label)
@@ -667,7 +667,7 @@ private struct PanelStyle: ViewModifier {
                 content.glassEffect(.regular, in: shape)
             } else {
                 content.background(.ultraThinMaterial, in: shape)
-                    .overlay(shape.strokeBorder(Color.white.opacity(0.18)))
+                    .overlay(shape.strokeBorder(Theme.contrast.opacity(0.18)))
             }
         } else {
             content.background(Theme.panel, in: shape).overlay(shape.strokeBorder(Theme.stroke))

@@ -38,7 +38,7 @@ struct NotificationIcon: View {
                     Image(nsImage: app).resizable().interpolation(.high)
                         .frame(width: size * 0.46, height: size * 0.46)
                         .clipShape(RoundedRectangle(cornerRadius: size * 0.12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: size * 0.12, style: .continuous).strokeBorder(Color.black, lineWidth: 1.5))
+                        .overlay(RoundedRectangle(cornerRadius: size * 0.12, style: .continuous).strokeBorder(Theme.panel, lineWidth: 1.5))
                         .offset(x: 3, y: 3)
                 }
             } else if let app {

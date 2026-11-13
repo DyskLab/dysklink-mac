@@ -770,6 +770,8 @@ final class NotchController {
         panel.ignoresMouseEvents = true
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        // The notch stays dark in every appearance, so it blends with the hardware notch.
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = ClickThroughHostingView(rootView: NotchView(model: model, tools: Shared.tools))
         self.panel = panel
         layout()

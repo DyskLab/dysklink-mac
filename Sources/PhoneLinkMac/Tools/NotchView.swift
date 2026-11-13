@@ -59,7 +59,7 @@ struct NotchView: View {
                 .mask(shape)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .preferredColorScheme(.dark)
+        .environment(\.colorScheme, .dark).preferredColorScheme(.dark)
     }
 
     private var statusRow: some View {

@@ -747,7 +747,7 @@ struct LauncherView: View {
         .frame(width: 640, height: 452)
         .background(Theme.panel.opacity(0.97), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Theme.stroke))
-        .preferredColorScheme(.dark)
+        .dyskAppearance()
     }
 
     private func row(_ item: LauncherItem, selected: Bool) -> some View {

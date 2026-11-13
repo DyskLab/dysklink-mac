@@ -4,6 +4,7 @@ import AppKit
 import Compression
 import CoreText
 import SQLite3
+import SwiftUI
 
 /// Tests the Advanced tools without touching the real clipboard: `PhoneLinkMac --tools-selftest`.
 @MainActor
@@ -19,6 +20,7 @@ enum ToolsSelfTest {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("dysk-tools-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
         testHistory(folder)
+        testLightContrast()
         testDecisions()
         testAssertion()
         testMonitor()
@@ -156,6 +158,51 @@ enum ToolsSelfTest {
                 exit(failures == 0 ? 0 : 1)
             }
         }
+    }
+
+    /// Every text colour of the light look reads at 4.5:1 or more on each light surface, and the dark ink on
+    /// each solid accent fill; the bright accents still reach 3:1 on the panel for icons and rings.
+    private static func testLightContrast() {
+        let light = Theme.LightValues.self
+        check("contrast formula: black on white is 21:1", abs(Theme.contrastRatio(0x000000, 0xFFFFFF) - 21) < 0.01)
+        let surfaces: [(String, UInt32)] = [("panel", light.panel), ("panelRaised", light.panelRaised),
+                                            ("background", light.background), ("sidebar", light.sidebar)]
+        for (name, text) in light.text {
+            for (surface, background) in surfaces {
+                let ratio = Theme.contrastRatio(text, background)
+                check("light \(name) on \(surface) is \(String(format: "%.2f", ratio)):1, needs 4.5", ratio >= 4.5)
+            }
+        }
+        for (name, fill) in light.fills {
+            let ratio = Theme.contrastRatio(light.onAccent, fill)
+            check("light onAccent on \(name) is \(String(format: "%.2f", ratio)):1, needs 4.5", ratio >= 4.5)
+            let icon = Theme.contrastRatio(fill, light.panel)
+            check("light \(name) icon on panel is \(String(format: "%.2f", icon)):1, needs 3", icon >= 3)
+        }
+        // The table above is what Theme draws in light.
+        func lightHex(_ color: Color) -> UInt32 {
+            var hex: UInt32 = 0
+            NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+                guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
+                hex = UInt32((c.redComponent * 255).rounded()) << 16 | UInt32((c.greenComponent * 255).rounded()) << 8
+                    | UInt32((c.blueComponent * 255).rounded())
+            }
+            return hex
+        }
+        let drawn: [String: Color] = [
+            "textPrimary": Theme.textPrimary, "textSecondary": Theme.textSecondary, "textFaint": Theme.textFaint,
+            "mintText": Theme.mintText, "skyText": Theme.skyText, "violetText": Theme.violetText,
+            "amberText": Theme.amberText, "coralText": Theme.coralText,
+            "mint": Theme.mint, "sky": Theme.sky, "amber": Theme.amber, "coral": Theme.coral,
+        ]
+        for (name, hex) in light.text + light.fills {
+            check("light \(name) in the check matches Theme", drawn[name].map(lightHex) == hex)
+        }
+        check("light panel, raised panel, and onAccent match Theme",
+              lightHex(Theme.panel) == light.panel && lightHex(Theme.panelRaised) == light.panelRaised
+                && lightHex(Theme.background) == light.background && lightHex(Theme.onAccent) == light.onAccent)
+        check("text(for:) maps mint to mintText", Theme.text(Theme.mint) == Theme.mintText)
+        check("text(for:) leaves other colours", Theme.text(Theme.textPrimary) == Theme.textPrimary)
     }
 
     private static func testAudioPCM() {

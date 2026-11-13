@@ -184,7 +184,7 @@ struct ClipboardPanelView: View {
         .frame(width: 540, height: 460)
         .background(Theme.panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
-        .preferredColorScheme(.dark)
+        .dyskAppearance()
     }
 
     private func row(_ entry: ClipEntry, index: Int) -> some View {
@@ -232,7 +232,7 @@ enum HintToast {
             .background(Theme.panelRaised, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.stroke))
             .fixedSize()
-            .preferredColorScheme(.dark))
+            .dyskAppearance())
         let size = view.fittingSize
         let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)

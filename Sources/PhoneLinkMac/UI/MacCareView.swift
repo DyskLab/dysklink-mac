@@ -277,7 +277,7 @@ struct MacCareView: View {
                 }
             }
             if let error = care.startupError {
-                Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
             }
             let mine = care.startupItems.filter { $0.scope == .user }
             SectionLabel("Your background agents")
@@ -404,7 +404,7 @@ struct MacCareView: View {
                 Text(title)
             }
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(on ? Theme.ink : Theme.textSecondary)
+            .foregroundStyle(on ? Theme.onAccent : Theme.textSecondary)
             .padding(.horizontal, 11).padding(.vertical, 6)
             .background(on ? Theme.mint : Theme.panelRaised, in: Capsule())
             .overlay(Capsule().strokeBorder(on ? Color.clear : Theme.stroke))
@@ -565,7 +565,7 @@ private struct CleanGroupCard: View {
                 .padding(.leading, 28)
                 if items.count > 5 {
                     Button(showsAll ? "Show fewer" : "Show all \(items.count)") { care.expandedGroups.formSymmetricDifference([group]) }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint).padding(.leading, 30)
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText).padding(.leading, 30)
                 }
             }
         }
@@ -589,7 +589,7 @@ private struct CareRow: View {
                 HStack(spacing: 6) {
                     Text(item.name).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1).truncationMode(.middle)
                     if let badge {
-                        Text(badge).font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.ink)
+                        Text(badge).font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.onAccent)
                             .padding(.horizontal, 6).padding(.vertical, 1.5).background(badgeColor, in: Capsule())
                     }
                 }

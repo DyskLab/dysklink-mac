@@ -431,10 +431,15 @@ private struct ScreenWindowContent: View {
                     bar
                 }
             }
+            .environment(\.colorScheme, .dark)
             // The window grows by the panel's width while editing, so the picture keeps its size.
+            // The panel follows the Appearance setting; only the picture and its bars stay dark.
             if game.enabled && game.editing {
-                Divider().overlay(Theme.stroke)
-                GameKeysPanel(game: game)
+                Group {
+                    Divider().overlay(Theme.stroke)
+                    GameKeysPanel(game: game)
+                }
+                .environment(\.colorScheme, AppearanceStore.shared.resolvedScheme)
             }
         }
         .preferredColorScheme(.dark)
@@ -444,12 +449,12 @@ private struct ScreenWindowContent: View {
         HStack(spacing: 8) {
             Image(systemName: "gamecontroller.fill").foregroundStyle(Theme.mint)
             Text(gameHelp)
-                .font(.system(size: 11)).foregroundStyle(game.message != nil ? Theme.coral : Theme.textSecondary).lineLimit(3)
+                .font(.system(size: 11)).foregroundStyle(game.message != nil ? Theme.coralText : Theme.textSecondary).lineLimit(3)
             Spacer(minLength: 4)
             if !game.editing {
                 GameProfileMenu(game: game)
                 Button("Edit keys") { game.editing = true; ScreenWindow.focusSurface() }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
         }
         .padding(.horizontal, 12)
@@ -497,7 +502,7 @@ private struct ScreenWindowContent: View {
                 Spacer(minLength: 4)
                 Button { game.enabled.toggle(); ScreenWindow.focusSurface() } label: {
                     Image(systemName: "gamecontroller.fill").font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(game.enabled ? Theme.ink : Theme.textPrimary)
+                        .foregroundStyle(game.enabled ? Theme.onAccent : Theme.textPrimary)
                         .frame(width: 34, height: 28).background(game.enabled ? Theme.mint : Theme.panelRaised, in: Capsule())
                 }
                 .buttonStyle(.plain)
@@ -525,7 +530,7 @@ private struct ScreenWindowContent: View {
                 .help("Rotate right. The phone doesn't rotate.")
                 Button { ScreenWindow.toggleFloat() } label: {
                     Image(systemName: state.floats ? "pin.fill" : "pin").font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(state.floats ? Theme.ink : Theme.textPrimary)
+                        .foregroundStyle(state.floats ? Theme.onAccent : Theme.textPrimary)
                         .frame(width: 34, height: 28).background(state.floats ? Theme.mint : Theme.panelRaised, in: Capsule())
                 }
                 .buttonStyle(.plain)
@@ -537,7 +542,7 @@ private struct ScreenWindowContent: View {
                 .buttonStyle(.plain)
                 .help("Clean view for OBS: hides this bar. Press ⌘B in the window to bring it back.")
                 Button("Stop") { model.stopScreen() }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.coral)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.coralText)
             }
             .padding(.horizontal, 12)
             .frame(height: ScreenWindow.barHeight)
@@ -676,6 +681,8 @@ enum ScreenWindow {
         )
         created.title = "\(name) screen"
         created.isReleasedWhenClosed = false
+        // Video windows stay dark in every appearance, so the picture has a dark frame.
+        created.appearance = NSAppearance(named: .darkAqua)
         created.contentView = NSHostingView(rootView: ScreenWindowContent(model: model, peerId: peerId, surface: view, state: state, game: game))
         created.level = state.floats ? .floating : .normal
         // Skill keys follow the mouse without a button held.

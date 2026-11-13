@@ -236,7 +236,7 @@ struct FeatureCards: View {
                         .disabled(hint != nil || name.isEmpty || script.isEmpty)
                 }
                 if let hint {
-                    Text(hint).font(.system(size: 11.5)).foregroundStyle(Theme.amber)
+                    Text(hint).font(.system(size: 11.5)).foregroundStyle(Theme.amberText)
                 }
             }
         }
@@ -270,7 +270,7 @@ struct FeatureCards: View {
                         Text("About 15 MB from Google, saved in DyskLink's folder.").font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
                     }
                     if let error = usb.downloadError {
-                        Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                        Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
                     }
                 }
             }
@@ -471,9 +471,9 @@ struct TransferRow: View {
                 Spacer()
                 if let location = transfer.location {
                     Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([location]) }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
                 }
-                Text(statusText).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(statusColor)
+                Text(statusText).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Theme.text(statusColor))
             }
             if transfer.status == .active {
                 StorageBar(free: transfer.size - transfer.transferred, total: transfer.size)

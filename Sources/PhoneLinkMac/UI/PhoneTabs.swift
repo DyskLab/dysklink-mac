@@ -106,7 +106,7 @@ struct NotificationsTab: View {
                 NotificationIcon(item: item, size: 38)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text(item.app).font(.system(size: 11.5, weight: .bold)).foregroundStyle(Theme.mint)
+                        Text(item.app).font(.system(size: 11.5, weight: .bold)).foregroundStyle(Theme.mintText)
                         Text(shortTime(item.time)).font(.system(size: 11)).foregroundStyle(Theme.textFaint)
                     }
                     if let title = item.title {
@@ -220,7 +220,7 @@ struct MessagesTab: View {
                     }
                     Text((preview.outgoing ? "You: " : "") + preview.body.replacingOccurrences(of: "\n", with: " "))
                         .font(.system(size: 11.5))
-                        .foregroundStyle(item.match != nil ? Theme.mint.opacity(0.9) : Theme.textSecondary)
+                        .foregroundStyle(item.match != nil ? Theme.mintText.opacity(0.9) : Theme.textSecondary)
                         .lineLimit(item.match != nil ? 2 : 1)
                 }
             }
@@ -270,7 +270,7 @@ struct MessagesTab: View {
                         if canSend, !draft.isEmpty, data.pendingSms == nil { model.sendSms(to: address, on: peer.id) }
                     }
                     Button { model.sendSms(to: address, on: peer.id) } label: {
-                        Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.ink)
+                        Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.onAccent)
                             .frame(width: 36, height: 36)
                             .background(Theme.accentGradient, in: Circle())
                             .opacity(canSend && !draft.isEmpty ? 1 : 0.35)
@@ -363,7 +363,7 @@ struct MessagesTab: View {
                     .background(Theme.panelRaised.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 } else if !model.smsAddress.isEmpty, !PhoneSearch.isNumber(model.smsAddress) {
                     Text(data.contacts.isEmpty ? "Contacts aren't shared from the phone, so type a number." : "No contact with that name. Type a number instead.")
-                        .font(.system(size: 11.5)).foregroundStyle(Theme.amber)
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.amberText)
                 }
             }
         }
@@ -387,10 +387,10 @@ struct MessagesTab: View {
             if item.outgoing { Spacer(minLength: 50) }
             VStack(alignment: item.outgoing ? .trailing : .leading, spacing: 3) {
                 Text(item.body).font(.system(size: 12.5)).textSelection(.enabled)
-                    .foregroundStyle(item.outgoing ? Theme.ink : Theme.textPrimary)
+                    .foregroundStyle(item.outgoing ? Theme.onAccent : Theme.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(date(item.time).formatted(date: .omitted, time: .shortened)).font(.system(size: 9.5))
-                    .foregroundStyle(item.outgoing ? Theme.ink.opacity(0.6) : Theme.textFaint)
+                    .foregroundStyle(item.outgoing ? Theme.onAccent.opacity(0.6) : Theme.textFaint)
             }
             .padding(.horizontal, 11).padding(.vertical, 7)
             .background(item.outgoing ? Theme.mint : Theme.panelRaised,
@@ -403,8 +403,8 @@ struct MessagesTab: View {
     private func statusLine(_ data: PhoneSnapshot) -> some View {
         switch data.smsStatus {
         case .sending: Text("Sending through the phone…").font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary)
-        case .sent: Text("Delivered to the carrier").font(.system(size: 11.5)).foregroundStyle(Theme.mint)
-        case .failed(let message): Text(message).font(.system(size: 11.5)).foregroundStyle(Theme.coral)
+        case .sent: Text("Delivered to the carrier").font(.system(size: 11.5)).foregroundStyle(Theme.mintText)
+        case .failed(let message): Text(message).font(.system(size: 11.5)).foregroundStyle(Theme.coralText)
         case nil: EmptyView()
         }
     }
@@ -507,7 +507,7 @@ struct FilesTab: View {
                 pathBar(data)
                 selectionBar(data)
                 if let error = data.filesError {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
                 }
                 ForEach(model.transfers.filter { $0.peerId == peer.id && !$0.outgoing }) { TransferRow(transfer: $0) }
                 if data.filesLoading && data.entries.isEmpty {
@@ -546,10 +546,10 @@ struct FilesTab: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.ink.opacity(0.45), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(Theme.background.opacity(0.45), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .help(data.folder.isEmpty ? "Internal storage" : data.folder)
             Button("Reload") { model.openPhoneFolder(data.folder, on: peer.id) }
-                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
                 .disabled(!peer.isConnected)
         }
     }
@@ -568,7 +568,7 @@ struct FilesTab: View {
                 Button(data.selectedFiles.count == files.count ? "Clear selection" : "Select all") {
                     model.toggleSelectAllFiles(on: peer.id)
                 }
-                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
             if !data.selectedFiles.isEmpty && peer.isConnected {
                 Button("Download \(data.selectedFiles.count)") { model.downloadSelectedFiles(on: peer.id) }
@@ -598,7 +598,7 @@ struct FilesTab: View {
                 Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.textFaint)
             } else if peer.isConnected {
                 Button("Download") { model.downloadPhoneFile(path, on: peer.id) }
-                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
             }
         }
         .padding(8)
@@ -649,7 +649,7 @@ struct ScreenTab: View {
                     screenButton(data)
                 }
                 if let error = model.screenError[peer.id] {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
                 }
             }
         }
@@ -677,7 +677,7 @@ struct ScreenTab: View {
                     }
                 }
                 if let error = model.cameraError[peer.id] {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
                 }
                 CameraInAppsGuide(windowTitle: "\(peer.name) camera")
             }
@@ -748,7 +748,7 @@ private struct CameraInAppsGuide: View {
 
     private func step(_ n: Int, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("\(n)").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.mint).frame(width: 14)
+            Text("\(n)").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.mintText).frame(width: 14)
             Text(text).font(.system(size: 12)).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
         }
     }

@@ -43,7 +43,7 @@ enum MainWindow {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
-        window.backgroundColor = NSColor(red: 0.035, green: 0.05, blue: 0.075, alpha: 1)
+        window.backgroundColor = NSColor(name: nil) { $0.isDark ? NSColor(hex: 0x090D13) : NSColor(hex: 0xF3F5F8) }
         window.center()
         window.delegate = observer
         return window
@@ -77,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             options: .userInitiatedAllowingIdleSystemSleep,
             reason: "Keeping device connections alive"
         )
+        MainActor.assumeIsolated { AppearanceStore.shared.apply() }
         #if DEBUG
         if CommandLine.arguments.contains("--tools-smoke") {
             MainActor.assumeIsolated { ToolsSelfTest.smoke() }

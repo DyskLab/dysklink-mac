@@ -8,7 +8,7 @@ struct BatteryRing: View {
     var body: some View {
         let color = percent.map(Theme.batteryColor) ?? Theme.textFaint
         ZStack {
-            Circle().stroke(Color.white.opacity(0.07), lineWidth: size * 0.075)
+            Circle().stroke(Theme.contrast.opacity(0.07), lineWidth: size * 0.075)
             Circle()
                 .trim(from: 0, to: CGFloat(percent ?? 0) / 100)
                 .stroke(color, style: StrokeStyle(lineWidth: size * 0.075, lineCap: .round))
@@ -58,7 +58,7 @@ struct RadarView: View {
                 .shadow(color: Theme.mint.opacity(0.5), radius: 22)
             Image(systemName: "iphone.gen3.radiowaves.left.and.right")
                 .font(.system(size: 27, weight: .semibold))
-                .foregroundStyle(Theme.ink)
+                .foregroundStyle(Theme.onAccent)
         }
         .frame(width: 230, height: 230)
     }
@@ -84,7 +84,7 @@ struct StorageBar: View {
         let used = max(0, Double(total - free) / Double(max(total, 1)))
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(Theme.contrast.opacity(0.08))
                 Capsule().fill(Theme.accentGradient).frame(width: max(6, proxy.size.width * used))
             }
         }
@@ -164,7 +164,7 @@ struct DyskField: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
-        .background(Theme.ink.opacity(0.65), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(Theme.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
             .strokeBorder(focused ? Theme.mint.opacity(0.55) : Theme.stroke, lineWidth: focused ? 1.5 : 1))
         .contentShape(Rectangle())
@@ -180,7 +180,7 @@ struct Avatar: View {
     let name: String
     var size: CGFloat = 34
 
-    private static let colors = [Theme.mint, Theme.violet, Theme.amber, Theme.coral, Color(hex: 0x5CB8FF), Color(hex: 0xFF9F5C)]
+    private static let colors = [Theme.mint, Theme.violet, Theme.amber, Theme.coral, Theme.sky, Color(dark: 0xFF9F5C, light: 0xD9661A)]
 
     var body: some View {
         let color = Self.colors[abs(name.unicodeScalars.reduce(0) { $0 &* 31 &+ Int($1.value) }) % Self.colors.count]
@@ -232,7 +232,7 @@ extension View {
             .font(.system(size: 13))
             .foregroundStyle(Theme.textPrimary)
             .padding(.horizontal, compact ? 8 : 12).padding(.vertical, compact ? 5 : 9)
-            .background(Theme.ink.opacity(0.65), in: RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous))
+            .background(Theme.background.opacity(0.65), in: RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous).strokeBorder(Theme.stroke))
     }
 }
@@ -266,7 +266,7 @@ struct TabPill: View {
                 }
             }
             .fixedSize()
-            .foregroundStyle(isSelected ? Theme.ink : Theme.textPrimary)
+            .foregroundStyle(isSelected ? Theme.onAccent : Theme.textPrimary)
             .padding(.horizontal, 11).frame(height: 30)
             .background(isSelected ? Theme.mint : Theme.panelRaised, in: Capsule())
             .contentShape(Capsule())
@@ -276,13 +276,13 @@ struct TabPill: View {
     }
 
     private var countFill: Color {
-        if isSelected { return Theme.ink.opacity(0.18) }
+        if isSelected { return Theme.onAccent.opacity(0.22) }
         return highlightsCount ? Theme.mint : Theme.mint.opacity(0.18)
     }
 
     private var countText: Color {
-        if isSelected { return Theme.ink }
-        return highlightsCount ? Theme.ink : Theme.textPrimary
+        if isSelected { return Theme.onAccent }
+        return highlightsCount ? Theme.onAccent : Theme.textPrimary
     }
 }
 
@@ -349,7 +349,7 @@ struct HintRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(text).font(.system(size: 12)).foregroundStyle(Theme.amber)
+            Text(text).font(.system(size: 12)).foregroundStyle(Theme.amberText)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Button(button, action: action).buttonStyle(SecondaryButtonStyle())

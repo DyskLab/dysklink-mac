@@ -227,6 +227,8 @@ enum TodoQuickAdd {
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
+        // Dark like the notch it opens under.
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = NSHostingView(rootView: TodoQuickAddView(state: state))
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
@@ -307,6 +309,6 @@ struct TodoQuickAddView: View {
         .frame(width: 440, height: 74, alignment: .leading)
         .background(Color.black.opacity(0.94), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.12)))
-        .preferredColorScheme(.dark)
+        .environment(\.colorScheme, .dark).preferredColorScheme(.dark)
     }
 }

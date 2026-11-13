@@ -23,7 +23,7 @@ struct MainView: View {
             }
         }
         .toggleStyle(.dyskSwitch)
-        .preferredColorScheme(.dark)
+        .dyskAppearance()
         .frame(minWidth: 860, minHeight: 600)
         .dropDestination(for: URL.self) { urls, _ in model.sendDroppedFiles(urls) }
     }
@@ -67,7 +67,7 @@ struct MainView: View {
         }
         .padding(.horizontal, 18).padding(.top, 38).padding(.bottom, 18)
         .frame(width: 272)
-        .background(Theme.ink.opacity(0.42))
+        .background(Theme.sidebar)
     }
 
     private var historyButton: some View {
@@ -92,7 +92,7 @@ struct MainView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(isOn ? Theme.mint : Theme.textSecondary)
                 .frame(width: 34, height: 34)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(Theme.contrast.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
             Spacer(minLength: 0)
         }
@@ -112,11 +112,11 @@ struct MainView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(model.showsTools ? Theme.mint : Theme.textSecondary)
                 .frame(width: 34, height: 34)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(Theme.contrast.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             Text("Advanced").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
             Spacer(minLength: 0)
             if hasUpdate {
-                Text("Update").font(.system(size: 10.5, weight: .bold)).foregroundStyle(Theme.ink)
+                Text("Update").font(.system(size: 10.5, weight: .bold)).foregroundStyle(Theme.onAccent)
                     .padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Theme.mint, in: Capsule())
             }
@@ -208,7 +208,7 @@ private struct PeerRow: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(peer.isConnected ? Theme.mint : Theme.textFaint)
                 .frame(width: 34, height: 34)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(Theme.contrast.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text(peer.name).font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary).lineLimit(1).truncationMode(.middle)
@@ -217,7 +217,7 @@ private struct PeerRow: View {
                     Text(subtitle).foregroundStyle(Theme.textSecondary)
                     if let percent = peer.info?.batteryPercent, peer.isConnected, peer.isPaired {
                         Text(" · ").foregroundStyle(Theme.textFaint)
-                        Text("\(percent)%").fontWeight(.bold).foregroundStyle(Theme.batteryColor(percent))
+                        Text("\(percent)%").fontWeight(.bold).foregroundStyle(Theme.text(Theme.batteryColor(percent)))
                     }
                 }
                 .font(.system(size: 11)).lineLimit(1)
@@ -228,7 +228,7 @@ private struct PeerRow: View {
                     Image(systemName: "bell.fill").font(.system(size: 8.5, weight: .bold))
                     Text("\(alerts)").font(.system(size: 10.5, weight: .bold, design: .rounded))
                 }
-                .foregroundStyle(Theme.ink)
+                .foregroundStyle(Theme.onAccent)
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(Theme.mint, in: Capsule())
                 .fixedSize()
@@ -298,7 +298,7 @@ private struct PeerDetail: View {
         if model.phone(peer.id).features.contains("calls") { callMusicCard }
         Button(action: onUnpair) {
             Label("Unpair this phone", systemImage: "link.badge.plus").labelStyle(.titleOnly)
-                .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.coral)
+                .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.coralText)
         }
         .buttonStyle(.plain)
         .padding(.top, 6).padding(.leading, 2)
@@ -442,7 +442,7 @@ private struct EmptyState: View {
                     Text("Manual connection").foregroundStyle(Theme.textFaint)
                     Text("\(address):\(String(PhoneLinkProtocol.port))")
                         .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Theme.mint).textSelection(.enabled)
+                        .foregroundStyle(Theme.mintText).textSelection(.enabled)
                 }
                 .font(.system(size: 12.5))
                 .padding(.horizontal, 14).padding(.vertical, 8)
@@ -501,7 +501,7 @@ struct PairingOverlay: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.62)
+            Theme.scrim
             VStack(spacing: 18) {
                 LogoMark(size: 46)
                 if prompt.outdated {
@@ -559,7 +559,7 @@ struct PairingOverlay: View {
             .frame(width: 440)
             .background(Theme.panel, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(Theme.stroke))
-            .shadow(color: .black.opacity(0.5), radius: 40, y: 18)
+            .shadow(color: Theme.shadow, radius: 40, y: 18)
         }
     }
 
@@ -572,7 +572,7 @@ struct PairingOverlay: View {
     }
 
     private func errorText(_ text: String) -> some View {
-        Text(text).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.coral)
+        Text(text).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.coralText)
             .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
     }
 }

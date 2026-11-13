@@ -51,7 +51,7 @@ private struct CameraWindowContent: View {
                         CameraWindow.setBar(false)
                     }
                     Button("Stop") { model.stopCamera() }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.coral)
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.coralText)
                         .padding(.leading, 4)
                 }
                 .padding(.horizontal, 12)
@@ -59,13 +59,13 @@ private struct CameraWindowContent: View {
                 .background(Theme.panel)
             }
         }
-        .preferredColorScheme(.dark)
+        .environment(\.colorScheme, .dark).preferredColorScheme(.dark)
     }
 
     private func barButton(_ icon: String, _ help: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon).font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(active ? Theme.ink : Theme.textPrimary)
+                .foregroundStyle(active ? Theme.onAccent : Theme.textPrimary)
                 .frame(width: 32, height: 28)
                 .background(active ? Theme.mint : Theme.panelRaised, in: Capsule())
         }
@@ -114,6 +114,8 @@ enum CameraWindow {
                 backing: .buffered, defer: false
             )
             created.isReleasedWhenClosed = false
+            // Video windows stay dark in every appearance, so the picture has a dark frame.
+            created.appearance = NSAppearance(named: .darkAqua)
             created.contentView = NSHostingView(rootView: CameraWindowContent(model: model, surface: view, state: state))
             created.delegate = observer
             observer.onUserClose = { [weak model] in model?.stopCamera() }

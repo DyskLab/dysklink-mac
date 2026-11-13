@@ -175,6 +175,6 @@ struct NoteEditorView: View {
         .padding(.horizontal, 16).padding(.top, 34).padding(.bottom, 14)
         .frame(minWidth: 360, minHeight: 220)
         .background(Theme.panel)
-        .preferredColorScheme(.dark)
+        .dyskAppearance()
     }
 }

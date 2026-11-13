@@ -41,7 +41,7 @@ struct MenuBarSettings: View {
                                 .labelsHidden().toggleStyle(.dyskSwitch).fixedSize()
                         }
                         .padding(.vertical, 5).padding(.horizontal, 8)
-                        .background(layout.dropTarget == section ? Theme.mint.opacity(0.14) : index.isMultiple(of: 2) ? Color.white.opacity(0.025) : Color.clear,
+                        .background(layout.dropTarget == section ? Theme.mint.opacity(0.14) : index.isMultiple(of: 2) ? Theme.contrast.opacity(0.025) : Color.clear,
                                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .contentShape(Rectangle())
                         .draggable(section.rawValue) {

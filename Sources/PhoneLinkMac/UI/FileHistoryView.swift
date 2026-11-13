@@ -103,13 +103,13 @@ struct FileHistoryView: View {
                 .foregroundStyle(record.ok ? (record.outgoing ? Theme.violet : Theme.mint) : Theme.coral)
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Text(subtitle(record)).font(.system(size: 11.5)).foregroundStyle(record.ok ? Theme.textSecondary : Theme.coral)
+                Text(subtitle(record)).font(.system(size: 11.5)).foregroundStyle(record.ok ? Theme.textSecondary : Theme.coralText)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
             if record.ok, exists, let url = record.url {
                 Button("Open") { NSWorkspace.shared.open(url) }.buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mint)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.mintText)
                 Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([url]) }.buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.textPrimary)
             } else if record.ok, record.path != nil {

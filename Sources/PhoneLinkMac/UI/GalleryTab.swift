@@ -22,10 +22,10 @@ struct GalleryTab: View {
                     Button { model.loadGallery(peer.id, reset: true) } label: {
                         Label("Refresh", systemImage: "arrow.clockwise").font(.system(size: 12, weight: .semibold))
                     }
-                    .buttonStyle(.plain).foregroundStyle(Theme.mint)
+                    .buttonStyle(.plain).foregroundStyle(Theme.mintText)
                 }
                 if let error = data.galleryError {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coral)
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.coralText)
                 }
                 ForEach(model.transfers.filter { $0.peerId == peer.id && !$0.outgoing && $0.status == .active }) { TransferRow(transfer: $0) }
                 if data.gallery.isEmpty {
@@ -62,7 +62,7 @@ private struct GalleryCell: View {
 
     var body: some View {
         // A square that never grows: the thumbnail fills it and is cut at the edges, whatever its shape.
-        Color.white.opacity(0.04)
+        Theme.contrast.opacity(0.04)
             .aspectRatio(1, contentMode: .fit)
             .overlay {
                 if let image = GalleryThumbs.slot(item, peerId: peerId).image {
