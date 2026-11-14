@@ -117,7 +117,12 @@ final class AppModel {
     var showsCare = false
     var historyFilter = FileHistoryView.Filter.all
     private(set) var commands: [SavedCommand] = []
-    private(set) var isInputTrusted = DeviceInput.isTrusted
+    private(set) var isInputTrusted = DeviceInput.isTrusted {
+        // The edge watch couldn't start without Accessibility, so it starts now.
+        didSet { if isInputTrusted, !oldValue { sharedInput.refreshTap() } }
+    }
+    /// Whether the edges for Other computers are being watched, for the hint under the arrangement.
+    private(set) var watchingEdges = false
     /// Screen Recording, for showing this Mac's screen and sending its sound. Checked again on the trust timer.
     private(set) var isScreenCaptureAllowed = TestEnv.isDryRun || CGPreflightScreenCaptureAccess()
     /// True once macOS says DyskLink's notifications are turned off, so phone notifications can't show here.
@@ -144,6 +149,10 @@ final class AppModel {
     }
     @ObservationIgnored private var autoLockWork: DispatchWorkItem?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var sleepObservers: [NSObjectProtocol] = []
+    /// Between willSleep and didWake: every connection was closed so phones and computers see this Mac go away at
+    /// once (and show Wake Mac), and none is taken or dialed until it wakes.
+    @ObservationIgnored private var isAsleep = false
     /// Shows one-time codes from the phone's SMS and notifications under the notch.
     var codesEnabled = UserDefaults.standard.object(forKey: "codes.enabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(codesEnabled, forKey: "codes.enabled") }
@@ -476,10 +485,13 @@ final class AppModel {
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, let id = self.autoLockPhone, self.autoLockWork != nil, self.sessions[id] == nil else { return }
+                guard let self else { return }
+                self.wokeUp()
+                guard let id = self.autoLockPhone, self.autoLockWork != nil, self.sessions[id] == nil else { return }
                 self.scheduleAutoLock()
             }
         }
+        observeSleepAndLock()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             loadRecords()
@@ -501,6 +513,49 @@ final class AppModel {
         } catch {
             serverState = .failed(error.localizedDescription)
         }
+    }
+
+    private func observeSleepAndLock() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        sleepObservers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.goingToSleep() }
+        })
+        // Locking the screen, the screen saver, or switching user: shared input ends on both sides, so nothing stays
+        // held and the pointer is back where its user is.
+        sleepObservers.append(workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.endSharedInput(reason: "session") }
+        })
+        let distributed = DistributedNotificationCenter.default()
+        for name in ["com.apple.screenIsLocked", "com.apple.screensaver.didstart"] {
+            sleepObservers.append(distributed.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.endSharedInput(reason: name) }
+            })
+        }
+    }
+
+    /// The pointer comes home and whatever another computer held here is let go, with both sides told.
+    private func endSharedInput(reason: String) {
+        if sharedInput.activePeer != nil || remoteTarget.controller != nil { TestEnv.log("REMOTE_END \(reason)") }
+        sharedInput.comeHome(notify: true)
+        remoteTarget.end()
+    }
+
+    private func goingToSleep() {
+        endSharedInput(reason: "sleep")
+        isAsleep = true
+        // Closed cleanly (TLS close and FIN), so the other side sees it now rather than after its 75 s timeout.
+        dialing.values.forEach { $0.close() }
+        dialing = [:]
+        Array(retained.values).forEach { $0.close() }
+        Array(sessions.values).forEach { $0.close() }
+        print("Going to sleep: closed every connection")
+    }
+
+    private func wokeUp() {
+        guard isAsleep else { return }
+        isAsleep = false
+        // Phones redial on their own; other computers are dialed again here.
+        dialMacs()
     }
 
     private func startListener(identity: LocalIdentity) throws {
@@ -593,6 +648,8 @@ final class AppModel {
     // MARK: - Connections
 
     private func accept(_ connection: NWConnection) {
+        // Asleep: a phone redialing in the last seconds before sleep would think the Mac is still there.
+        if isAsleep { return connection.cancel() }
         let session = PeerSession(connection: connection)
         let address = Self.address(of: connection.endpoint)
         let unpaired = inboundAddress.compactMap { key, address -> String? in
@@ -919,6 +976,9 @@ final class AppModel {
         // Every message except hello only applies to registered connections.
         guard envelope.type == MessageType.hello || sessions[id] === session else { return }
         if isComputer(id, session), !Self.macMessageTypes.contains(envelope.type) { return }
+        // Any message counts as an answer for the shared input heartbeat.
+        sharedInput.heard(from: id)
+        remoteTarget.heard(from: id, ping: envelope.type == MessageType.ping)
         switch envelope.type {
         case MessageType.hello:
             // One hello per connection. A second one could change what the device claims to be.
@@ -1347,6 +1407,7 @@ final class AppModel {
         }
         sharedInput.send = { [weak self] id, envelope in self?.sessions[id]?.send(envelope) }
         sharedInput.onChange = { [weak self] id in self?.usingMac = id }
+        sharedInput.onWatchingChange = { [weak self] watching in self?.watchingEdges = watching }
         remoteTarget.send = { [weak self] id, envelope in self?.sessions[id]?.send(envelope) }
         remoteTarget.onChange = { [weak self] id in
             guard let self else { return }
@@ -2663,7 +2724,7 @@ final class AppModel {
 
     /// Only the Mac with the smaller ID connects, so two Macs never hold two connections to each other.
     private func dialMacs() {
-        guard macSyncEnabled, let identity else { return }
+        guard macSyncEnabled, !isAsleep, let identity else { return }
         for (id, endpoint) in macEndpoints where MacSync.shouldDial(from: identity.deviceId, to: id)
             && sessions[id] == nil && dialing[id] == nil {
             dial(endpoint, key: id)

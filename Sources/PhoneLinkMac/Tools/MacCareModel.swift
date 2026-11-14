@@ -208,18 +208,29 @@ final class MacCareModel {
         let roots = appRoots
         Task.detached(priority: .userInitiated) {
             let list = Uninstaller.apps(in: roots)
-            await MainActor.run {
-                let sizes = Dictionary(self.apps.compactMap { app in app.size.map { (app.id, $0) } }, uniquingKeysWith: { a, _ in a })
-                self.apps = list.map { app in var app = app; app.size = sizes[app.id]; return app }
+            let unsized = await MainActor.run {
+                self.apps = Self.keepingSizes(list, known: self.apps)
+                return self.apps.filter { $0.size == nil }
             }
-            // Sizes come in as they're counted, so the list shows right away.
-            for app in list {
+            // Sizes come in as they're counted, so the list shows right away. Only new or updated apps are counted;
+            // the rest keep the size they had.
+            for app in unsized {
                 let size = MacCare.size(of: app.url)
                 await MainActor.run {
                     if let index = self.apps.firstIndex(where: { $0.id == app.id }) { self.apps[index].size = size }
                 }
             }
             await MainActor.run { self.isLoadingApps = false }
+        }
+    }
+
+    /// The listed apps with the sizes already counted, for the same app at the same version.
+    nonisolated static func keepingSizes(_ list: [InstalledApp], known: [InstalledApp]) -> [InstalledApp] {
+        let sizes = Dictionary(known.compactMap { app in app.size.map { (app.id, (app.version, $0)) } }, uniquingKeysWith: { a, _ in a })
+        return list.map { app in
+            var app = app
+            if let (version, size) = sizes[app.id], version == app.version { app.size = size }
+            return app
         }
     }
 

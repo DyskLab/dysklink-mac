@@ -651,7 +651,7 @@ struct AdvancedView: View {
             }
         }
         if !model.remoteArrangement.isEmpty {
-            if model.sharedInput.isWatching {
+            if model.watchingEdges {
                 Text("Move the pointer past that edge to use the other Mac, and back to come home. Control-Option-Command brings it home at once. Copy and paste works across, through the shared clipboard.")
                     .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)

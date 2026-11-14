@@ -56,8 +56,9 @@ struct MacCareView: View {
         }
         .onDisappear { care.stopBattery() }
         // Back from Finder or an app's own uninstaller: show what's really there now.
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-            guard care.loadsOnShow else { return }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            // Only the main window coming back to the front, not the menu, a popover, or the screen window.
+            guard care.loadsOnShow, MainWindow.isMain(note.object) else { return }
             if care.tab == .uninstall { care.refreshApps() }
             if care.tab == .startup { care.loadStartup() }
         }

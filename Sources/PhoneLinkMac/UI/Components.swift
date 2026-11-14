@@ -39,17 +39,29 @@ struct BatteryRing: View {
     }
 }
 
+/// Whether the radar's window is on screen; the animation pauses while it's minimized, covered, or closed.
+@MainActor
+@Observable
+final class RadarVisibility {
+    static let shared = RadarVisibility()
+    var visible = true
+}
+
 /// Radar animation for the waiting-for-device state.
 struct RadarView: View {
     var animated = true
+    var visibility = RadarVisibility.shared
 
     private static let duration = 2.7
 
     var body: some View {
         ZStack {
             if animated {
-                TimelineView(.animation) { timeline in
+                TimelineView(.animation(paused: !visibility.visible)) { timeline in
                     rings(time: timeline.date.timeIntervalSinceReferenceDate)
+                }
+                .background {
+                    WindowVisibility(occlusion: true) { visible in visibility.visible = visible }
                 }
             } else {
                 rings(time: 1.1)

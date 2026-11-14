@@ -20,6 +20,12 @@ enum MainWindow {
 
     static var isVisible: Bool { window?.isVisible == true }
 
+    /// Whether `window` is the main window, for work that should follow only it becoming key.
+    static func isMain(_ window: Any?) -> Bool {
+        guard let window = window as? NSWindow, let main = self.window else { return false }
+        return window === main
+    }
+
     static func show() {
         let window = window ?? makeWindow()
         self.window = window

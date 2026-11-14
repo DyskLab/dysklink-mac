@@ -383,6 +383,9 @@ final class ChargeControl {
 
     private var timer: Timer?
     private var lastSwitch = Date.distantPast
+    /// Switches in a row that failed, and when the next may be tried, so a broken helper doesn't run sudo every check.
+    private var failures = 0
+    private var retryAfter = Date.distantPast
     private var started = false
     /// Battery changes from IOKit: they record the level and wake the checks without a timer.
     private var powerSource: CFRunLoopSource?
@@ -516,9 +519,20 @@ final class ChargeControl {
         apply(on: decision.reason.adapterOn, urgent: decision.reason.adapterOn)
     }
 
+    /// Seconds to wait after `failures` failed switches in a row: 10, 20, 40, … up to 5 minutes.
+    nonisolated static func backoff(failures: Int) -> TimeInterval {
+        guard failures > 0 else { return 0 }
+        return min(300, 10 * pow(2, Double(min(failures, 10) - 1)))
+    }
+
+    /// Whether a switch may start now: none running (one sudo at a time), and not too soon after failures.
+    nonisolated static func maySwitch(busy: Bool, now: Date, retryAfter: Date) -> Bool {
+        !busy && now >= retryAfter
+    }
+
     private func apply(on: Bool, urgent: Bool) {
-        guard on == adapterOff else { return }
-        // Turning the charger back on for safety never waits.
+        guard on == adapterOff, Self.maySwitch(busy: busy, now: Date(), retryAfter: retryAfter) else { return }
+        // Turning the charger back on for safety never waits for the spacing, only for a failing helper.
         if !urgent, Date().timeIntervalSince(lastSwitch) < Self.minSwitchInterval { return }
         lastSwitch = Date()
         busy = true
@@ -528,14 +542,21 @@ final class ChargeControl {
                 let control = ChargeControl.shared
                 control.busy = false
                 control.error = failure
+                control.switched(ok: failure == nil)
                 control.adapterOff = Adapter.isOff ?? control.adapterOff
             }
         }
     }
 
+    private func switched(ok: Bool) {
+        failures = ok ? 0 : failures + 1
+        retryAfter = Date().addingTimeInterval(Self.backoff(failures: failures))
+    }
+
     /// Asleep, nothing watches the battery. Near the limit, the charger goes off first so the Mac doesn't fill up overnight.
     private func beforeSleep() {
-        guard installed else { return }
+        // A switch already running would mean two sudo at once.
+        guard installed, !busy else { return }
         if ChargePolicy.offBeforeSleep(percent: Battery.now().percent, settings: settings, calibration: calibration,
                                        reason: reason, topUp: topUp, adapterOff: adapterOff) {
             // Asleep there's no time to wait for a background switch; it's only counted when it worked.

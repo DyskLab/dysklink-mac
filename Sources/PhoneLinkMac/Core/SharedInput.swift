@@ -194,6 +194,54 @@ enum RemoteGate {
     static func input(platform: String?, caps: [String]) -> Bool { isSender(platform: platform, caps: caps) }
 }
 
+/// While the pointer is on another computer, the Mac in use pings it every half second; no message from it for 3 s
+/// means it went to sleep or off the network, so the pointer comes home instead of freezing here. The Mac being used
+/// does the same check on the computer in control once that one has pinged it.
+struct RemoteHeartbeat {
+    static let interval: TimeInterval = 0.5
+    static let timeout: TimeInterval = 3
+
+    private(set) var lastHeard: TimeInterval
+
+    init(now: TimeInterval) { lastHeard = now }
+
+    mutating func heard(now: TimeInterval) { lastHeard = max(lastHeard, now) }
+
+    func isSilent(now: TimeInterval) -> Bool { now - lastHeard > Self.timeout }
+}
+
+/// Keys and buttons go back up on the side they went down on. One pressed on the other computer has its release
+/// sent there, also after the pointer came home (when it's swallowed here, since the other side let go already); one
+/// pressed here before crossing is never released over there.
+struct HeldAcross {
+    /// Pressed while crossed, so their releases belong to the other computer.
+    private(set) var remoteButtons = Set<Int>()
+    private(set) var remoteKeys = Set<Int>()
+    /// Pressed over there and still held when the pointer came home: their releases here are swallowed.
+    private(set) var strayButtons = Set<Int>()
+    private(set) var strayKeys = Set<Int>()
+
+    /// While crossed: whether this release goes to the other computer.
+    mutating func forwardUp(button: Int) -> Bool { remoteButtons.remove(button) != nil }
+    mutating func forwardUp(key: Int) -> Bool { remoteKeys.remove(key) != nil }
+    mutating func forwardDown(button: Int) { remoteButtons.insert(button); strayButtons.remove(button) }
+    mutating func forwardDown(key: Int) { remoteKeys.insert(key); strayKeys.remove(key) }
+
+    mutating func cameHome() {
+        strayButtons.formUnion(remoteButtons)
+        strayKeys.formUnion(remoteKeys)
+        remoteButtons = []
+        remoteKeys = []
+    }
+
+    /// At home: whether this local release is left over from the other computer and is swallowed.
+    mutating func swallowsUp(button: Int) -> Bool { strayButtons.remove(button) != nil }
+    mutating func swallowsUp(key: Int) -> Bool { strayKeys.remove(key) != nil }
+    /// At home: a fresh press here means the old one was let go somewhere unseen.
+    mutating func localDown(button: Int) { strayButtons.remove(button) }
+    mutating func localDown(key: Int) { strayKeys.remove(key) }
+}
+
 // MARK: - The Mac whose mouse and keyboard are in use
 
 @MainActor
@@ -205,10 +253,18 @@ final class SharedInputController {
     var send: (String, Envelope) -> Void = { _, _ in }
     /// The Mac being used now, or nil when the pointer is home.
     var onChange: ((String?) -> Void)?
+    /// Whether the edges are watched now, for the settings hint.
+    var onWatchingChange: ((Bool) -> Void)?
+    /// Whether any mouse button is held here; a drag never crosses an edge.
+    var buttonsHeld: () -> Bool = SharedInputController.anyButtonHeld
+    var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     private(set) var activePeer: String?
     /// False when Accessibility is off, so the edges can't be watched.
-    private(set) var isWatching = false
+    private(set) var isWatching = false { didSet { if isWatching != oldValue { onWatchingChange?(isWatching) } } }
+    private var heartbeat = RemoteHeartbeat(now: 0)
+    private var heartbeatTimer: Timer?
+    private var held = HeldAcross()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     /// Where the pointer left, to bring it back to the same place.
@@ -262,14 +318,47 @@ final class SharedInputController {
             return Unmanaged.passUnretained(event)
         }
         guard let peer = activePeer else {
+            if Self.isOwn(event) { return Unmanaged.passUnretained(event) }
+            // A release left over from a press on the other computer is swallowed; that side let go already.
+            if let up = Self.release(type, event) {
+                let swallowed = up.isButton ? held.swallowsUp(button: up.number) : held.swallowsUp(key: up.number)
+                if swallowed { return nil }
+            } else if let down = Self.press(type, event) {
+                if down.isButton { held.localDown(button: down.number) } else { held.localDown(key: down.number) }
+            }
             // Pointer moves this app posted itself, for a Mac or phone controlling this one, never cross an edge,
-            // so control can't loop back to the Mac it came from.
-            if type == .mouseMoved || type == .leftMouseDragged, !Self.isOwn(event) { watchEdges(event) }
+            // so control can't loop back to the Mac it came from. Nor does a drag, whose release would be lost.
+            if Self.watchesEdge(type: type, own: false, buttonsHeld: buttonsHeld()) { watchEdges(event) } else { pushes = 0 }
             return Unmanaged.passUnretained(event)
         }
-        forward(type, event, to: peer)
-        // Everything goes to the other Mac and nothing happens here.
-        return nil
+        // Everything goes to the other Mac and nothing happens here, except the release of a key or button that went
+        // down here before crossing, which goes up here.
+        return forward(type, event, to: peer) ? nil : Unmanaged.passUnretained(event)
+    }
+
+    /// Only a plain move from the real mouse, with no button held, can cross an edge.
+    static func watchesEdge(type: CGEventType, own: Bool, buttonsHeld: Bool) -> Bool {
+        type == .mouseMoved && !own && !buttonsHeld
+    }
+
+    static func anyButtonHeld() -> Bool {
+        (0..<5).contains { CGEventSource.buttonState(.combinedSessionState, button: CGMouseButton(rawValue: $0)!) }
+    }
+
+    private static func press(_ type: CGEventType, _ event: CGEvent) -> (isButton: Bool, number: Int)? {
+        switch type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: (true, Int(event.getIntegerValueField(.mouseEventButtonNumber)))
+        case .keyDown: (false, Int(event.getIntegerValueField(.keyboardEventKeycode)))
+        default: nil
+        }
+    }
+
+    private static func release(_ type: CGEventType, _ event: CGEvent) -> (isButton: Bool, number: Int)? {
+        switch type {
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp: (true, Int(event.getIntegerValueField(.mouseEventButtonNumber)))
+        case .keyUp: (false, Int(event.getIntegerValueField(.keyboardEventKeycode)))
+        default: nil
+        }
     }
 
     private static let ownPid = Int64(getpid())
@@ -304,35 +393,73 @@ final class SharedInputController {
         envelope.remote = RemoteEvent(kind: "enter", edge: edge.opposite.rawValue, at: at)
         send(peer, envelope)
         TestEnv.log("REMOTE_CROSSED \(edge.rawValue)")
+        startHeartbeat()
         onChange?(peer)
     }
 
-    private func forward(_ type: CGEventType, _ event: CGEvent, to peer: String) {
+    /// Any message from the computer in use counts as an answer.
+    func heard(from peer: String) {
+        guard activePeer == peer else { return }
+        heartbeat.heard(now: now())
+    }
+
+    private func startHeartbeat() {
+        heartbeat = RemoteHeartbeat(now: now())
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: RemoteHeartbeat.interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.beat() }
+        }
+    }
+
+    private func beat() {
+        guard let peer = activePeer else { return stopHeartbeat() }
+        if heartbeat.isSilent(now: now()) {
+            print("The computer in use stopped answering; the pointer comes home")
+            TestEnv.log("REMOTE_SILENT")
+            return comeHome(notify: true)
+        }
+        send(peer, Envelope(type: MessageType.ping))
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+    }
+
+    /// False when the event stays here instead.
+    private func forward(_ type: CGEventType, _ event: CGEvent, to peer: String) -> Bool {
         var remote: RemoteEvent
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             remote = RemoteEvent(kind: "move", dx: event.getDoubleValueField(.mouseEventDeltaX),
                                  dy: event.getDoubleValueField(.mouseEventDeltaY))
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            remote = RemoteEvent(kind: "down", button: Int(event.getIntegerValueField(.mouseEventButtonNumber)))
+            let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
+            held.forwardDown(button: button)
+            remote = RemoteEvent(kind: "down", button: button)
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            remote = RemoteEvent(kind: "up", button: Int(event.getIntegerValueField(.mouseEventButtonNumber)))
+            // A button pressed here before crossing is released here, never over there.
+            let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
+            guard held.forwardUp(button: button) else { return false }
+            remote = RemoteEvent(kind: "up", button: button)
         case .scrollWheel:
             remote = RemoteEvent(kind: "scroll", dx: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2),
                                  dy: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1))
         case .keyDown, .keyUp:
-            remote = RemoteEvent(kind: "key", keyCode: Int(event.getIntegerValueField(.keyboardEventKeycode)),
-                                 keyDown: type == .keyDown, flags: event.flags.rawValue)
+            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if type == .keyDown { held.forwardDown(key: code) } else if !held.forwardUp(key: code) { return false }
+            remote = RemoteEvent(kind: "key", keyCode: code, keyDown: type == .keyDown, flags: event.flags.rawValue)
         case .flagsChanged:
-            if EdgeMath.isHomeChord(event.flags) { return comeHome(notify: true) }
+            if EdgeMath.isHomeChord(event.flags) { comeHome(notify: true); return true }
             remote = RemoteEvent(kind: "flags", keyCode: Int(event.getIntegerValueField(.keyboardEventKeycode)),
                                  flags: event.flags.rawValue)
         default:
-            return
+            return true
         }
         var envelope = Envelope(type: MessageType.remoteInput)
         envelope.remote = remote
         send(peer, envelope)
+        return true
     }
 
     /// The other Mac says the pointer went back over the edge, `at` of the way along it.
@@ -347,6 +474,8 @@ final class SharedInputController {
         guard let peer = activePeer else { return }
         if notify { send(peer, Envelope(type: MessageType.remoteExit)) }
         activePeer = nil
+        stopHeartbeat()
+        held.cameHome()
         if let departure {
             CGWarpMouseCursorPosition(EdgeMath.point(on: departure.edge, of: departure.display, at: departure.at, inset: 6))
         }
@@ -400,6 +529,11 @@ final class SharedInputTarget {
     private var pushes = 0
     /// In a dry run (tests) the pointer isn't moved; this is where it would be, so going home can be tested.
     private var dryCursor: CGPoint?
+    var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Set once the computer in control pings (Macs and PCs that send a heartbeat), so one that never does is
+    /// never timed out while its user just holds still.
+    private var heartbeat: RemoteHeartbeat?
+    private var silenceTimer: Timer?
 
     private var cursor: CGPoint { CGEvent(source: nil)?.location ?? .zero }
 
@@ -408,6 +542,11 @@ final class SharedInputTarget {
         release()
         controller = peer
         homeEdge = edge
+        heartbeat = nil
+        silenceTimer?.invalidate()
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: RemoteHeartbeat.interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.checkSilence() }
+        }
         let at = RemoteLimits.fraction(at)
         let displays = DeviceInput.activeDisplayBounds()
         guard let display = EdgeMath.outermost(edge, displays: displays) else { return }
@@ -435,8 +574,37 @@ final class SharedInputTarget {
         }
     }
 
+    /// Any message from the computer in control; a ping turns on the silence check.
+    func heard(from peer: String, ping: Bool) {
+        guard controller == peer else { return }
+        if heartbeat == nil { if ping { heartbeat = RemoteHeartbeat(now: now()) } } else { heartbeat?.heard(now: now()) }
+    }
+
+    /// The computer in control went quiet (asleep, off the network): what it held is let go, and it's told control
+    /// ended in case it comes back. True when control ended.
+    @discardableResult
+    func checkSilence() -> Bool {
+        guard let controller else { return false }
+        guard let heartbeat, heartbeat.isSilent(now: now()) else { return false }
+        print("The computer in control stopped answering; its keys and buttons are let go")
+        TestEnv.log("REMOTE_TARGET_SILENT")
+        release()
+        send(controller, Envelope(type: MessageType.remoteExit))
+        return true
+    }
+
+    /// Ends control and tells the computer in control, for sleep and the screen locking.
+    func end() {
+        guard let controller else { return }
+        release()
+        send(controller, Envelope(type: MessageType.remoteExit))
+    }
+
     /// Lets go of anything still held, so no key or button stays down after control ends.
     func release() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        heartbeat = nil
         guard !TestEnv.isDryRun else {
             if controller != nil { TestEnv.log("REMOTE_RELEASED") }
             controller = nil

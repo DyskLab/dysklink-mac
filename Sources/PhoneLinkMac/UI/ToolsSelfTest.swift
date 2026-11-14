@@ -65,6 +65,7 @@ enum ToolsSelfTest {
         testGallerySnapshot()
         testAudioPCM()
         testSharedInputEdges()
+        testAuditFixes()
         testCoreSafety()
         testProcessRunner()
         testFirewallCheck()
@@ -385,6 +386,104 @@ enum ToolsSelfTest {
         let event = RemoteEvent(kind: "key", keyCode: 0, keyDown: true, flags: CGEventFlags.maskCommand.rawValue)
         let back = try? JSONDecoder().decode(RemoteEvent.self, from: JSONEncoder().encode(event))
         check("a key survives the trip as JSON", back == event)
+    }
+
+    private static func testAuditFixes() {
+        // A drag never crosses an edge, so its mouse-up isn't lost.
+        check("a plain move may cross an edge", SharedInputController.watchesEdge(type: .mouseMoved, own: false, buttonsHeld: false))
+        check("no edge crossing with a button held",
+              !SharedInputController.watchesEdge(type: .mouseMoved, own: false, buttonsHeld: true)
+              && !SharedInputController.watchesEdge(type: .leftMouseDragged, own: false, buttonsHeld: true)
+              && !SharedInputController.watchesEdge(type: .leftMouseDragged, own: false, buttonsHeld: false))
+        check("this app's own moves never cross", !SharedInputController.watchesEdge(type: .mouseMoved, own: true, buttonsHeld: false))
+        var held = HeldAcross()
+        check("a release whose press happened here isn't forwarded", !held.forwardUp(button: 0) && !held.forwardUp(key: 56))
+        held.forwardDown(button: 0)
+        held.forwardDown(key: 0)
+        check("a release whose press went over is forwarded", held.forwardUp(key: 0))
+        held.cameHome()
+        check("a release left over from the other computer is swallowed once", held.swallowsUp(button: 0) && !held.swallowsUp(button: 0))
+        held.forwardDown(button: 1)
+        held.cameHome()
+        held.localDown(button: 1)
+        check("a fresh press here clears the leftover", !held.swallowsUp(button: 1))
+
+        // Heartbeat: 0.5 s pings, 3 s of silence ends control.
+        var beat = RemoteHeartbeat(now: 100)
+        check("a heartbeat isn't silent within 3 s", !beat.isSilent(now: 102.9))
+        check("a heartbeat is silent after 3 s", beat.isSilent(now: 103.1))
+        beat.heard(now: 103)
+        check("an answer resets the heartbeat", !beat.isSilent(now: 105.5))
+        setenv("PHONELINK_TEST_DRY_RUN", "1", 1)
+        if TestEnv.isDryRun {
+            var clock: TimeInterval = 1000
+            var sent: [String] = []
+            let target = SharedInputTarget()
+            target.now = { clock }
+            target.send = { _, envelope in sent.append(envelope.type) }
+            target.enter(from: "pc", edge: .left, at: 0.5)
+            clock += 10
+            check("a controller that never pings isn't timed out", !target.checkSilence() && target.controller == "pc")
+            target.heard(from: "pc", ping: true)
+            clock += 2
+            target.heard(from: "pc", ping: false)
+            clock += 2.5
+            check("a controller heard 2.5 s ago keeps control", !target.checkSilence() && target.controller == "pc")
+            clock += 1
+            check("a silent controller loses control and is told", target.checkSilence() && target.controller == nil
+                  && sent == [MessageType.remoteExit])
+            target.enter(from: "mac", edge: .right, at: 0.2)
+            sent = []
+            target.end()
+            check("sleep or lock ends control and tells the controller", target.controller == nil && sent == [MessageType.remoteExit])
+        } else {
+            check("dry run could be turned on for the target test", false)
+        }
+        unsetenv("PHONELINK_TEST_DRY_RUN")
+
+        // Typed text goes out in pieces of at most 20 UTF-16 units, never splitting a character.
+        let long = String(repeating: "abcdefghij", count: 4)
+        let pieces = DeviceInput.unicodeChunks(long)
+        check("40 letters go in two pieces of 20", pieces.map(\.count) == [20, 20])
+        let emoji = String(repeating: "a", count: 19) + "😀b"
+        let emojiPieces = DeviceInput.unicodeChunks(emoji)
+        check("an emoji isn't split across pieces", emojiPieces.map(\.count) == [19, 3])
+        let mixed = "Line one\n\tTab 👨‍👩‍👧‍👦 🇮🇩 café e\u{301} " + String(repeating: "😀", count: 15) + " done"
+        let mixedPieces = DeviceInput.unicodeChunks(mixed)
+        func whole(_ units: [UniChar]) -> Bool {
+            guard let first = units.first, let last = units.last else { return false }
+            return !UTF16.isTrailSurrogate(first) && !UTF16.isLeadSurrogate(last)
+        }
+        check("pieces are at most 20 and never split a surrogate pair",
+              mixedPieces.allSatisfy { $0.count <= 20 && whole($0) })
+        check("pieces put back together are the text, newline and tab included",
+              String(utf16CodeUnits: mixedPieces.flatMap { $0 }, count: mixedPieces.reduce(0) { $0 + $1.count }) == mixed)
+        let characterBoundaries = mixedPieces.allSatisfy { piece in
+            let text = String(utf16CodeUnits: piece, count: piece.count)
+            return text.unicodeScalars.first.map { !($0.properties.isGraphemeExtend || $0.value == 0x200D) } ?? false
+        }
+        check("pieces start at a character, not inside a joined emoji or accent", characterBoundaries)
+        check("empty text sends nothing", DeviceInput.unicodeChunks("").isEmpty)
+        let huge = String(repeating: "👍🏽", count: 1) + String(repeating: "\u{301}", count: 30)
+        check("one character longer than 20 is split between scalars", DeviceInput.unicodeChunks(huge).allSatisfy { $0.count <= 20 && whole($0) })
+
+        // Charge control: no overlapping sudo, and backing off after a failing helper.
+        let now = Date()
+        check("no switch while one runs", !ChargeControl.maySwitch(busy: true, now: now, retryAfter: .distantPast))
+        check("no switch before the backoff ends", !ChargeControl.maySwitch(busy: false, now: now, retryAfter: now.addingTimeInterval(5)))
+        check("a switch once the backoff ended", ChargeControl.maySwitch(busy: false, now: now, retryAfter: now))
+        check("backoff doubles and stops at 5 minutes",
+              ChargeControl.backoff(failures: 0) == 0 && ChargeControl.backoff(failures: 1) == 10 && ChargeControl.backoff(failures: 2) == 20
+              && ChargeControl.backoff(failures: 6) == 300 && ChargeControl.backoff(failures: 500) == 300)
+
+        // Mac care: only new or updated apps are measured again.
+        let old = [InstalledApp(url: URL(fileURLWithPath: "/Applications/A.app"), name: "A", bundleId: "a", version: "1", size: 10),
+                   InstalledApp(url: URL(fileURLWithPath: "/Applications/B.app"), name: "B", bundleId: "b", version: "1", size: 20)]
+        let listed = [InstalledApp(url: URL(fileURLWithPath: "/Applications/A.app"), name: "A", bundleId: "a", version: "1"),
+                      InstalledApp(url: URL(fileURLWithPath: "/Applications/B.app"), name: "B", bundleId: "b", version: "2"),
+                      InstalledApp(url: URL(fileURLWithPath: "/Applications/C.app"), name: "C", bundleId: "c", version: "1")]
+        let kept = MacCareModel.keepingSizes(listed, known: old)
+        check("a known app keeps its size; updated and new apps are measured", kept.map(\.size) == [10, nil, nil])
     }
 
     private static func testGallerySnapshot() {

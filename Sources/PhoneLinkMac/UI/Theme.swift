@@ -149,12 +149,32 @@ final class AppearanceStore {
 
     /// Light or dark as drawn now, with System read from macOS. For views inside a window that stays dark.
     var resolvedScheme: ColorScheme {
-        effective.colorScheme ?? (NSApp?.effectiveAppearance.isDark ?? true ? .dark : .light)
+        effective.colorScheme ?? (appIsDark ? .dark : .light)
+    }
+
+    /// The app's appearance as macOS draws it, kept up to date so System follows macOS switching live; reading
+    /// `NSApp.effectiveAppearance` directly wouldn't redraw anything when it changes.
+    private(set) var appIsDark = true
+    @ObservationIgnored private var appearanceWatch: NSKeyValueObservation?
+
+    private func watchAppAppearance() {
+        guard appearanceWatch == nil, let app = NSApp else { return }
+        appIsDark = app.effectiveAppearance.isDark
+        appearanceWatch = app.observe(\.effectiveAppearance, options: [.new]) { _, _ in
+            // KVO may call from any thread; the value is read again on main.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let dark = NSApp.effectiveAppearance.isDark
+                    if AppearanceStore.shared.appIsDark != dark { AppearanceStore.shared.appIsDark = dark }
+                }
+            }
+        }
     }
 
     /// Sets the appearance of every window, the menu bar popover included. Windows that must stay dark,
     /// such as the notch, set their own.
     func apply() {
+        defer { watchAppAppearance() }
         switch effective {
         case .system: NSApp?.appearance = nil
         case .dark: NSApp?.appearance = NSAppearance(named: .darkAqua)

@@ -404,13 +404,41 @@ enum DeviceInput {
         )?.post(tap: .cghidEventTap)
     }
 
+    /// A key event carries at most 20 UTF-16 units of text (CGEventKeyboardSetUnicodeString); the event itself
+    /// keeps more, but apps only get the first 20, so a long scan or dictation was cut short. Text goes out in
+    /// pieces of up to 20, each a key down and up as before.
+    static let unicodeChunk = 20
+
     private static func type(_ text: String) {
-        for down in [true, false] {
-            let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
-            let units = Array(text.utf16)
-            event?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-            event?.post(tap: .cghidEventTap)
+        for units in unicodeChunks(text) {
+            for down in [true, false] {
+                let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
+                event?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+                event?.post(tap: .cghidEventTap)
+            }
         }
+    }
+
+    /// Splits text into pieces of at most `limit` UTF-16 units, between characters (grapheme clusters), so an emoji,
+    /// a flag, or a letter with its accent stays whole. A single character longer than `limit` (a long joined emoji)
+    /// is split between its Unicode scalars, which never splits a surrogate pair.
+    static func unicodeChunks(_ text: String, limit: Int = unicodeChunk) -> [[UniChar]] {
+        var chunks: [[UniChar]] = []
+        var current: [UniChar] = []
+        func add(_ units: [UniChar]) {
+            if current.count + units.count > limit, !current.isEmpty {
+                chunks.append(current)
+                current = []
+            }
+            current += units
+        }
+        for character in text {
+            let units = Array(String(character).utf16)
+            if units.count <= limit { add(units); continue }
+            for scalar in character.unicodeScalars { add(Array(String(scalar).utf16)) }
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
     }
 
     private static func press(_ key: String) {

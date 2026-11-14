@@ -379,19 +379,24 @@ struct MenuBatterySection: View {
 /// Tells when the window holding this view comes on screen and goes away: ordered in or out, or fully covered.
 /// Each "true" is followed by one "false", also when the view leaves the window.
 struct WindowVisibility: NSViewRepresentable {
+    /// Also false while the window is minimized or fully covered. Off for the menu's window, which can report
+    /// itself occluded while it's open.
+    var occlusion = false
     let changed: @MainActor (Bool) -> Void
 
-    func makeNSView(context: Context) -> WatchView { WatchView(changed: changed) }
+    func makeNSView(context: Context) -> WatchView { WatchView(changed: changed, occlusion: occlusion) }
     func updateNSView(_ view: WatchView, context: Context) { view.changed = changed }
     static func dismantleNSView(_ view: WatchView, coordinator: ()) { view.set(false) }
 
     final class WatchView: NSView {
         var changed: @MainActor (Bool) -> Void
+        private let occlusion: Bool
         private var observers: [NSObjectProtocol] = []
         private var isVisible = false
 
-        init(changed: @escaping @MainActor (Bool) -> Void) {
+        init(changed: @escaping @MainActor (Bool) -> Void, occlusion: Bool = false) {
             self.changed = changed
+            self.occlusion = occlusion
             super.init(frame: .zero)
         }
 
@@ -440,7 +445,11 @@ struct WindowVisibility: NSViewRepresentable {
         private func check(closing: Bool) {
             guard let window, !closing else { return set(false) }
             // Ordered in is what counts: a menu window can report itself occluded while it's open.
-            set(window.isVisible)
+            if occlusion {
+                set(window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible))
+            } else {
+                set(window.isVisible)
+            }
         }
 
         func set(_ visible: Bool) {

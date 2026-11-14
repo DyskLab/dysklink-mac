@@ -31,6 +31,11 @@ may report another phone platform.
 Android sends `ping` every 25 seconds. With no data for 75 seconds, the connection counts as dead and Android
 reconnects.
 
+A Mac going to sleep (`NSWorkspace.willSleepNotification`) first ends shared input (see One mouse and keyboard), then
+closes every connection cleanly (TLS close and TCP FIN), so phones and computers see it go away at once and can
+offer Wake Mac instead of waiting out the 75 seconds. Until it wakes (`didWakeNotification`) it takes no new
+connections and dials no computers; after waking, phones redial as usual and the Mac dials other computers again.
+
 ## Transport
 TLS 1.2 or later with certificates on both sides. Certificates are self-signed, so the chain is not checked.
 Trust comes from the fingerprint stored at pairing.
@@ -289,7 +294,19 @@ outer edge twice in a row, the Mac in use sends `remote.enter`, hides and holds 
 | `remote.exit` | none: control ended (Control-Option-Command, the setting turned off, or refused) | either way |
 
 The other Mac lets go of held keys and buttons on `remote.exit`, `remote.leave`, when the connection drops, and when
-either side unpairs. `remote.exit` is accepted even from a device that is no longer paired, since it only ends
+either side unpairs.
+
+- The pointer only crosses with no mouse button held (a drag never crosses), so a mouse-up never goes to the other
+  side of its mouse-down. Keys and buttons go back up on the side they went down on: one held before crossing is
+  released on its own Mac; one pressed over there and still held when the pointer comes home has its release
+  swallowed on the Mac in use.
+- Heartbeat: while the pointer is on another computer the Mac in use sends `ping` every 0.5 s; any message from that
+  computer counts, and none for 3 s brings the pointer home (with `remote.exit`). A Mac being used that has had a
+  `ping` from the computer in control (a Mac, or a PC source, which pings the same way) ends control after 3 s of
+  silence from it: it lets go of held keys and buttons and sends `remote.exit`. One that never pings is not timed out.
+- Sleep, the screen locking (`com.apple.screenIsLocked`), the screen saver starting, and switching user end shared
+  input on that Mac in both roles: the pointer comes home, held keys and buttons are let go, and the other side gets
+  `remote.exit`. `remote.exit` is accepted even from a device that is no longer paired, since it only ends
 control. Only a device paired as `macos` may send `remote.leave`. `remote.enter` and `remote.input` come from a device
 paired as `macos`, or from one paired as `windows` or `linux` whose `hello.caps` on this connection has
 `pc-shared-input-source` (see What a PC serves); a paired PC without it is answered `remote.exit`. Turning the switch
