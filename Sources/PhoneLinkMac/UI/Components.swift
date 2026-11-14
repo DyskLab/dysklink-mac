@@ -369,3 +369,10 @@ struct HintRow: View {
         }
     }
 }
+
+/// Shown when WhatsApp couldn't be opened for "Report a problem", with the number to copy.
+struct ReportFallback: View {
+    var body: some View {
+        HintRow(text: Support.failureMessage, button: "Copy") { Support.shared.copyNumber() }
+    }
+}

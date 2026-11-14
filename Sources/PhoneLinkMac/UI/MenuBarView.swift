@@ -69,11 +69,15 @@ struct MenuBarView: View {
             HStack {
                 Button("Open DyskLink") { MainWindow.show() }
                 Spacer()
+                Button("Report a problem") { Support.shared.report(connectedPhones: model.connectedPhoneCount) }
+                    .help(Support.reportDetail)
+                Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }
             .buttonStyle(.plain)
             .font(.system(size: 12.5, weight: .semibold))
             .foregroundStyle(Theme.textSecondary)
+            if Support.shared.openFailed { ReportFallback() }
         }
         .padding(14)
         // The battery part has a power diagram and charts, so the menu is a little wider with it.

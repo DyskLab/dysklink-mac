@@ -70,6 +70,7 @@ enum ToolsSelfTest {
         testCoreSafety()
         testProcessRunner()
         testFirewallCheck()
+        testReportProblem()
         CpaceSelfTest.run(check)
         BinaryFrameSelfTest.run(check)
         // A laptop with a monitor above it, offset to the left, like a common desk.
@@ -1590,6 +1591,24 @@ enum ToolsSelfTest {
         check("slower scrolling still moves", WheelSettings.scaled(1, by: 0.34) == 1 && WheelSettings.scaled(-1, by: 0.34) == -1)
         check("faster scrolling multiplies", WheelSettings.scaled(2, by: 3) == 6)
         check("wheel direction follows natural scrolling", WheelSettings.direction(of: -3, natural: true) == 1 && WheelSettings.direction(of: 3, natural: false) == 1)
+    }
+
+    private static func testReportProblem() {
+        let facts = Support.Facts(appVersion: "1.5.0", build: "15", osVersion: "macOS 26.1", modelName: "Budi's MacBook Air",
+                                  modelIdentifier: "Mac16,12", connectedPhones: 1, privateNames: ["Budi's MacBook", "budi", "Budi Santoso"])
+        let text = Support.message(facts)
+        check("report has the app version and system", text.contains("DyskLink for Mac 1.5.0 (15)") && text.contains("macOS 26.1")
+            && text.contains("Mac16,12") && text.contains("Connected: 1 phone") && text.hasPrefix("Hi, I found a problem in DyskLink."))
+        check("report leaves out the Mac and user names", !text.contains("Budi") && !text.lowercased().contains("budi"))
+        check("report says phones in plural", Support.message(Support.Facts(appVersion: "1", build: "1", osVersion: "macOS 26.1",
+            modelName: "", modelIdentifier: "Mac16,12", connectedPhones: 2)).contains("Connected: 2 phones"))
+        let live = Support.message(Support.currentFacts(connectedPhones: 0))
+        check("live report has no Mac name, user name, or path", !live.contains(LocalDevice.name) && !live.contains(NSUserName())
+            && !live.contains(NSFullUserName()) && !live.contains("/Users/") && live.contains("macOS "))
+        let url = Support.url(message: "a b\nc&d#e+f").absoluteString
+        check("report link encodes newlines, & and #", url == "https://wa.me/6285117241230?text=a%20b%0Ac%26d%23e%2Bf")
+        check("report link opens the number", Support.url(message: text).absoluteString.hasPrefix("https://wa.me/\(Support.whatsappNumber)?text=Hi%2C%20I%20found")
+            && Support.url(message: text).absoluteString.contains("%0A%0AWhat%20happened%3A"))
     }
 
     private static func testWindowLogic() {

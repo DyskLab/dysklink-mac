@@ -80,6 +80,7 @@ struct AdvancedView: View {
                     }
                     sectionLabel("ABOUT")
                     supportCard
+                    reportCard
                 default:
                     Text(category.detail).font(.system(size: 12.5)).foregroundStyle(Theme.textSecondary)
                     ForEach(entries.filter { $0.category == category }, id: \.id) { entry in
@@ -1197,6 +1198,26 @@ struct AdvancedView: View {
                 Spacer()
                 Button("Buy me a coffee") { NSWorkspace.shared.open(Self.donationURL) }
                     .buttonStyle(SecondaryButtonStyle())
+            }
+        }
+    }
+
+    private var reportCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 14) {
+                    Image(systemName: "exclamationmark.bubble.fill").font(.system(size: 18)).foregroundStyle(Theme.sky)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(Support.reportTitle).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        Text(Support.reportDetail)
+                            .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Open WhatsApp") { Support.shared.report(connectedPhones: Shared.model.connectedPhoneCount) }
+                        .buttonStyle(SecondaryButtonStyle())
+                }
+                if Support.shared.openFailed { ReportFallback() }
             }
         }
     }
