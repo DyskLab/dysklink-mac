@@ -27,6 +27,9 @@ struct AdvancedView: View {
                   detail: "One shortcut opens a search box for apps, files, windows, copies, sums, units, and DyskLink actions.", category: .productivity, isOn: $tools.isLauncherOn),
             Entry(id: "awake", icon: "cup.and.saucer.fill", title: "Keep Awake",
                   detail: "Stops this Mac or its screen from sleeping for as long as you choose.", category: .productivity, isOn: $tools.isAwakeOn),
+            Entry(id: "reachable", icon: "powerplug.fill", title: "Stay reachable while charging",
+                  detail: "While this Mac is on the charger it won't go to sleep, so your phone stays connected and can reach it. The display still turns off. On battery it sleeps as usual.",
+                  category: .productivity, isOn: Bindable(tools.reachable).isOn),
             Entry(id: "macs", icon: "laptopcomputer.and.arrow.down", title: "Other computers",
                   detail: "Pair with other Macs and Windows or Linux PCs on this network to share copies, pictures, and files.", category: .productivity, isOn: Bindable(Shared.model).macSyncEnabled),
             Entry(id: "layout", icon: "rectangle.split.3x1", title: "Window Layout",
@@ -95,6 +98,7 @@ struct AdvancedView: View {
         case "clipboard": clipboardContent
         case "launcher": launcherContent
         case "awake": awakeContent
+        case "reachable": reachableContent
         case "macs": otherMacsContent
         case "layout": layoutContent
         case "previews": previewsContent
@@ -409,6 +413,48 @@ struct AdvancedView: View {
         .font(.system(size: 12.5))
         .foregroundStyle(Theme.textSecondary)
         .tint(Theme.mint)
+    }
+
+    // MARK: Stay Reachable
+
+    private var reachableContent: some View {
+        let reachable = tools.reachable
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle().fill(reachable.isActive ? Theme.mint : reachable.status == .refused ? Theme.coral : Theme.textFaint)
+                    .frame(width: 8, height: 8)
+                Text(reachableStatus(reachable)).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            }
+            if reachable.status == .waiting, ChargeControl.shared.adapterOff {
+                Text("Charge control has switched the charger off for now, so this Mac counts as on battery until it's back on.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("With the lid closed a MacBook still sleeps, unless an external display is attached (clamshell mode). Keep the lid open, or use an external display.")
+                .font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+            if reachable.wakeForNetwork == false {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amberText)
+                    Text("Wake for network access is off, so your phone can't wake this Mac if it does sleep. Turn it on in System Settings › Battery › Options.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.amberText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button("Open") { NSWorkspace.shared.open(PowerSettings.batterySettings) }
+                        .buttonStyle(SecondaryButtonStyle())
+                }
+            }
+        }
+        .onAppear { reachable.refreshWake() }
+    }
+
+    private func reachableStatus(_ reachable: StayReachable) -> String {
+        switch reachable.status {
+        case .active: "Active: on the charger"
+        case .waiting: "Waiting for the charger"
+        case .refused: "macOS refused the request. Turn this off and on to try again."
+        case .off: "Off"
+        }
     }
 
     // MARK: Clipboard History

@@ -287,6 +287,10 @@ struct MenuBarView: View {
                 .buttonStyle(.plain)
                 .disabled(!awake.isActive && !awake.canStart)
             }
+            if tools.reachable.isActive {
+                Text("Stay reachable is on: no sleep while charging.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.textSecondary)
+            }
         }
     }
 

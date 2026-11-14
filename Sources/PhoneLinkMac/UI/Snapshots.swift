@@ -216,6 +216,8 @@ enum Snapshots {
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1300, alignment: .top)
             .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12-advanced", folder)
         AdvancedLayout.shared.category = .productivity
+        tools.reachable.isOn = true
+        tools.reachable.preview(wakeForNetwork: false)
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1900, alignment: .top)
             .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12b-advanced-productivity", folder)
         AdvancedLayout.shared.category = .screen

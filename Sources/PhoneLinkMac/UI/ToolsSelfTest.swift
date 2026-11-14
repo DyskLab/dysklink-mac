@@ -23,6 +23,7 @@ enum ToolsSelfTest {
         testLightContrast()
         testDecisions()
         testAssertion()
+        testStayReachable()
         testMonitor()
         testPrayerAndWeather()
         testRecognition()
@@ -1466,6 +1467,37 @@ enum ToolsSelfTest {
         check("the session has an end", awake.endsAt != nil)
         awake.stop()
         check("the assertion is released on stop", !awake.holdsAssertion && !assertionListed())
+    }
+
+    private static func testStayReachable() {
+        check("reachable: off on battery wants nothing", !ReachableDecision.wantsAssertion(enabled: false, onCharger: false))
+        check("reachable: off on the charger wants nothing", !ReachableDecision.wantsAssertion(enabled: false, onCharger: true))
+        check("reachable: on, on battery wants nothing", !ReachableDecision.wantsAssertion(enabled: true, onCharger: false))
+        check("reachable: on, on the charger holds", ReachableDecision.wantsAssertion(enabled: true, onCharger: true))
+        // A pretend charger and assertion, so the test never keeps this Mac awake.
+        var charger = false
+        let fake = PretendSleepAssertion()
+        let reachable = StayReachable(isInert: true, holder: fake, onCharger: { charger })
+        check("reachable: off by default", !reachable.isOn && reachable.status == .off && !fake.isHeld)
+        reachable.isOn = true
+        check("reachable: waits on battery", reachable.status == .waiting && !fake.isHeld)
+        charger = true
+        reachable.evaluate()
+        check("reachable: holds once plugged in", reachable.status == .active && fake.isHeld && reachable.isActive)
+        charger = false
+        reachable.evaluate()
+        check("reachable: lets go on battery", reachable.status == .waiting && !fake.isHeld)
+        charger = true
+        reachable.evaluate()
+        reachable.isOn = false
+        check("reachable: lets go when turned off", reachable.status == .off && !fake.isHeld)
+        reachable.isOn = true
+        reachable.stop()
+        check("reachable: lets go on quit", reachable.status == .off && !fake.isHeld)
+        fake.refuses = true
+        reachable.evaluate()
+        check("reachable: a refusal is shown", reachable.status == .refused && !fake.isHeld)
+        check("reachable: Keep Awake uses its own assertion", SystemSleepAssertion.name != KeepAwake.assertionName)
     }
 
     private static func testMonitor() {

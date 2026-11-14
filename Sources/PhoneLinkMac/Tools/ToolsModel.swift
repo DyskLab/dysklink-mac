@@ -9,6 +9,7 @@ import Observation
 final class ToolsModel {
     let monitor = SystemMonitor()
     let awake = KeepAwake()
+    let reachable: StayReachable
     let clipboard: ClipboardHistory
     let displays = DisplayControl()
     let mouse = MouseTuner()
@@ -91,6 +92,7 @@ final class ToolsModel {
 
     init(directory: URL = ToolsModel.defaultDirectory, isInert: Bool = false) {
         self.isInert = isInert
+        reachable = StayReachable(isInert: isInert)
         clipboard = ClipboardHistory(directory: directory)
         notch = NotchController(directory: directory)
         layout = WindowLayout(directory: directory)
@@ -119,6 +121,7 @@ final class ToolsModel {
         applyNotch()
         applyLayout()
         applyLauncher()
+        if !isInert { reachable.start() }
     }
 
     private func applyLauncher() {
@@ -141,6 +144,7 @@ final class ToolsModel {
     /// Mouse settings outlive the app unless they are put back. Edits waiting to be saved are written now.
     func shutDown() {
         mouse.stop()
+        reachable.stop()
         guard !isInert else { return }
         clipboard.flush()
         notch.model.note.flush()
