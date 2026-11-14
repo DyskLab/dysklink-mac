@@ -15,15 +15,18 @@
 
 ![Phone notifications on the Mac](docs/screenshots/02-notifications.png)
 
-DyskLink also adds a set of optional tools to the Mac, each off until you turn it on.
+DyskLink also adds a set of optional tools to the Mac, each off until you turn it on, and connects to other Macs
+and to Windows and Linux PCs running [DyskLink for Windows and Linux](https://github.com/DyskLab/dysklink-desktop).
 
 **This is the Mac app. The phone app is [DyskLink for Android](https://github.com/DyskLab/dysklink-android).**
 You need both to use the phone features. The Advanced tools work on the Mac alone.
 
-> DyskLink is in early development, so expect rough edges.
+> DyskLink is still young, so expect rough edges.
 
 ## Download
-You need macOS 15 or later on Apple Silicon. Which features work on which Mac is in [COMPATIBILITY.md](COMPATIBILITY.md) (in Indonesian).
+You need macOS 15 or later on Apple Silicon, and DyskLink for Android 1.5.0 on the phone for everything in this
+version. Pairing a new device needs 1.2.0 or later on both sides. Which features work on which Mac is in
+[COMPATIBILITY.md](COMPATIBILITY.md) (in Indonesian).
 
 1. Download `DyskLink-mac-arm64.zip` from the [latest release](https://github.com/DyskLab/dysklink-mac/releases/latest),
    unzip it, and move **DyskLink** to Applications.
@@ -34,12 +37,14 @@ You need macOS 15 or later on Apple Silicon. Which features work on which Mac is
 This download uses a self-signed certificate, not one from Apple. To run on Intel,
 [build it from source](#build-and-run).
 
+To update, quit DyskLink, replace it in Applications, and open it again. Pairings and settings are kept.
+
 **Updates:** once a day, DyskLink reads the public list of releases on GitHub, for the Mac app and for the Android
-app. When a newer Mac version is out, it sends one notification and shows **Download** in the sidebar and the menu
-bar. **Advanced > Check for updates** also offers **Install and restart**, which downloads the zip, checks that it is
-DyskLink signed with the same certificate as the copy you have, swaps the app, and opens it again. Nothing is
-downloaded until you choose it. A connected phone with an older DyskLink shows a note on its page. You can turn the
-check off or run it now under **Advanced > Check for updates**.
+app. A newer Mac version, and any connected phone with an older DyskLink, show together under
+**Advanced > General > Updates**, with Install, Download, Skip, and Check now. While one is waiting, **Advanced** shows
+an **Update** label and opens straight to it, and a new Mac version sends one notification. **Install and restart**
+downloads the zip, checks that it is DyskLink signed with the same certificate as the copy you have, swaps the app,
+and opens it again. Nothing is downloaded until you choose it. The check can be turned off in the same place.
 
 **Moving from 0.1:** 0.2.0 changes the bundle ID from `id.phonelink.mac` to `id.dysklink.mac`. Pairings, keys, and
 Clipboard History stay, and settings are copied over on the first launch. macOS sees a new app, so allow
@@ -53,44 +58,81 @@ Accessibility, Screen Recording, and notifications again, and turn **Open at log
 
 ## With your phone
 - **Connection:** encrypted pairing, multiple devices, automatic reconnection, and phone status such as battery,
-  storage, and signal.
+  storage, and signal. With USB debugging on, a plugged-in phone moves to the cable within a few seconds. That needs
+  `adb` (Android SDK, Homebrew `android-platform-tools`, or the Download button in a phone's settings).
 - **Files:** send files both ways. Files from the phone go to Downloads/DyskLink.
 - **Clipboard:** copies on the Mac go to the phone, and the phone can send its copies back.
-- **Remote control:** use the phone as a touchpad, keyboard, media remote, or presentation remote, and run Mac
-  commands you've listed in advance.
+- **Remote control:** use the phone as a touchpad, keyboard, air mouse, media remote, presentation remote, or Stream
+  Deck, and run Mac commands you've listed in advance. A terminal on the Mac from the phone works once you allow it
+  here, and the phone asks for its fingerprint or screen lock each time.
+- **Typing from the phone:** barcodes and QR codes the phone scans, and words it hears with voice typing, are typed
+  where the cursor is. Documents scanned on the phone arrive as a PDF with a text layer.
 - **Phone data:** notifications, SMS, call alerts, contacts with vCard export, and read-only access to phone files.
-- **Screen:** see the phone's screen on the Mac and control it with your mouse and keyboard.
-- **Gallery:** browse the phone's photos and videos, newest first, in the phone's Gallery tab. Click one to open it,
-  or right-click to save it to Downloads.
+  One-time codes from SMS and notifications show under the notch with a Copy button.
+- **Phone screen:** see the phone's screen on the Mac, with its sound, and control it with your mouse and keyboard.
+  The controller button maps keyboard keys to spots on the phone screen for games: joysticks (WASD, arrows, or your
+  own keys), skill aim with the mouse, swipes, and keys that hold, auto-fire, or play a combo.
+- **Phone camera:** a phone's camera in its own window, with lens switch, light, mirror, rotate, and keep on top.
+  The phone starts it only after a tap. To use it in Zoom or Meet, add the window to OBS with Window Capture and use
+  OBS Virtual Camera. The screen and camera windows have a clean view without the button bar (Command-B brings it
+  back).
+- **Gallery and photo sync:** browse the phone's photos and videos, newest first, in the phone's Gallery tab. Click
+  one to open it, or right-click to save it to Downloads. With photo sync on, new photos from the phone are saved in
+  Pictures > DyskLink > <phone name>.
 - **Sound:** turn on **Let phones hear this Mac** and a phone can play this Mac's sound, for music on earphones or in
-  another room. The phone can also play its own sound on the Mac (Android 10 or later), and the phone's screen
-  window carries its sound, with a mute button. The sound is about 0.1 to 0.5 seconds behind.
-- **Notch on the phone:** the notch's todo list, water, and Pomodoro show on the phone and can be changed there.
-  The Mac keeps the data.
+  another room. The phone can also play its own sound on the Mac (Android 10 or later). The sound is about 0.1 to
+  0.5 seconds behind.
+- **This screen on the phone:** with **View this screen from the phone** on in a phone's settings, that phone can view
+  this screen and tap, type, and scroll on it. **Second display** on the phone adds it as an extra display of this
+  Mac, which you arrange in System Settings > Displays. Both need Screen Recording, and Accessibility for control.
+- **Notch on the phone:** the notch's todo list, water, Pomodoro, and quick note show on the phone and can be changed
+  there. The Mac keeps the data.
 - **Find each other:** ring the phone from the Mac, even on silent, or ring the Mac from the phone.
 - **Calls:** whatever plays on the Mac pauses when the phone rings and plays again when the call ends. It can be
   turned off on the phone's page.
-- **Quick actions:** the phone's Quick Settings tiles and widget can send the clipboard, lock the Mac, and start or
+- **Quick actions:** the phone's Quick Settings tiles and widgets can send the clipboard, lock the Mac, and start or
   stop Keep Awake.
+- **Lock when the phone goes away:** in a phone's settings. The Mac locks when that phone stays disconnected for the
+  chosen time (30 seconds to 5 minutes). It doesn't lock when the Mac itself is offline.
+- **Waking the Mac:** this Mac disconnects cleanly before it sleeps, so the phone shows **Wake Mac** right away, which sends
+  Wake-on-LAN. A MacBook on Wi-Fi only wakes this way on the charger with an Apple TV or HomePod on the network, or
+  over Ethernet. **Advanced > Productivity > Stay reachable while charging** keeps the Mac from sleeping while it's on
+  the charger, so the phone stays connected. The display still turns off, and on battery it sleeps as usual.
 - **File history:** every file sent or received with any device, under **File history** in the sidebar.
-- **Other computers:** turn on **Advanced > Other computers** on two or more Macs on the same network, pair them with
-  the 6-digit code, and text and pictures you copy on one can be pasted on the others. When they connect, the newest
-  500 text copies in Clipboard History are merged too. Files can be sent between them, and each can ring the other.
-  Everything goes straight between the Macs, encrypted. A paired computer can't run commands.
-- **One mouse and keyboard:** under **Mouse and keyboard** in Other computers, choose which side of this Mac another
-  Mac sits on, and turn on **Let paired computers use their mouse and keyboard here** on that Mac (off by default). Push the
-  pointer past that edge to use the other Mac, and back to come home; Control-Option-Command brings it home at once.
-  Both Macs need Accessibility. Copy and paste works across through the shared clipboard. A Windows PC, or a Linux PC
-  on X11, with DyskLink can push its own mouse and keyboard into this Mac the same way ("Use this PC's mouse and
-  keyboard on a Mac" in its Settings, Computers), while that switch is on here.
 
 Phone data, screen, and control are off until you turn them on from the phone. The Mac keeps phone data in memory
 only. It's cleared when a feature is turned off or the devices unpair. Contacts reach the disk only if you press
 Export vCard, and downloaded files go to Downloads/DyskLink.
 
+## Other computers
+Turn on **Advanced > Productivity > Other computers** on two or more computers on the same network: other Macs, and
+Windows or Linux PCs running [DyskLink for Windows and Linux](https://github.com/DyskLab/dysklink-desktop). Pair them
+with the 6-digit code.
+
+- **Clipboard and files:** text and pictures you copy on one can be pasted on the others. When two Macs connect, the
+  newest 500 text copies in Clipboard History are merged too. Files can be sent between them, and each can ring the
+  other. Everything goes straight between the computers, encrypted. A paired computer can't run commands.
+- **One mouse and keyboard:** under **Mouse and keyboard**, choose which side of this Mac another computer sits on,
+  and turn on **Let paired computers use their mouse and keyboard here** on that computer (off by default). Push the
+  pointer past that edge to use it, and back to come home; Control-Option-Command brings it home at once. This works
+  both ways with Macs and Windows PCs. A Linux PC can take the Mac's mouse and keyboard on Wayland or X11, but can
+  only push its own into the Mac on X11. Control comes back when the other computer sleeps, locks, or stops
+  answering for 3 seconds, and the pointer never crosses in the middle of a drag. Macs need Accessibility. Copy and
+  paste works across through the shared clipboard.
+
 ## Advanced tools
-Open **Advanced** at the bottom of the sidebar. **Open at login** at the top of the page starts DyskLink in the
-menu bar when you log in. If you move the app afterward, turn it off and on again.
+Open **Advanced** at the bottom of the sidebar. Its pages are General, Productivity, Windows, Screen, and Notch.
+**General** holds:
+
+- **Appearance:** System, Dark, or Light. Dark is the default. The notch and the phone screen and camera windows
+  stay dark.
+- **Open at login:** starts DyskLink in the menu bar when you log in. If you move the app afterward, turn it off and
+  on again.
+- **Menu bar:** chooses what the DyskLink menu shows and in what order: devices, brightness and volume, Keep Awake,
+  window layouts, recent copies, ring phone, lock screen, Pomodoro, weather, quick note, and Open at login.
+- **Updates:** see [Download](#download).
+
+The tools:
 
 - **System Monitor:** CPU, memory, disk, network, battery, and the busiest apps. It only samples while the page
   is on screen.
@@ -128,8 +170,8 @@ menu bar when you log in. If you move the app afterward, turn it off and on agai
   Start with `f ` for files only, `d ` for folders only, or `:` (or `e `) for emoji: type a name in English or
   Indonesian, Return types it into the app in front, and Command + Return copies it.
 - **Notch:** point at or click the top of the built-in screen, or a thin bar on the main screen with the lid closed,
-  for music controls, a Pomodoro timer, a todo list, a water reminder, prayer times, weather, Mac and phone batteries, a file shelf, recent
-  copies, and the phone's notifications. Lyrics can show beside the player. They are off by default, because they
+  for music controls, a Pomodoro timer, a todo list, a water reminder, prayer times, weather, Mac and phone batteries, a file shelf, a
+  quick note, recent copies, and the phone's notifications. Lyrics can show beside the player. They are off by default, because they
   send the song's title and artist to [LRCLIB](https://lrclib.net), and the lines only follow the song in Spotify,
   since Music and YouTube don't share the position. Each page can be hidden, and the Pomodoro focus length, breaks, and number of sessions can be changed. Song titles come from Music
   and Spotify, and from YouTube in Firefox, Safari, Chrome, and other browsers: while the panel is open, it reads
@@ -162,11 +204,18 @@ code isn't kept in the clipboard history or sent to phones. Turn it off with Cod
 - **Duplicates:** files saved more than once in the folders you pick. Copies must match byte for byte, and one copy of each is always kept.
 - **Uninstall:** apps in Applications with the settings, caches, and data they left in your Library. Files carrying the app's ID are ticked; ones that only share its name are left for you to check.
 - **Startup:** turn your account's background agents off and on again, or remove them. Agents for all users are shown to check, since changing them needs an administrator. Login items open in System Settings.
+- **Battery:** health as in System Settings, full charge against design, cycles, temperature, power, and a daily
+  history. The menu bar shows where the power goes.
+- **Charging control:** a charge limit with sailing, discharge while on power, heat protection, and calibration,
+  through a small root helper (`dysklink-power`) that can only switch the charger input. Its launchd guard turns the
+  charger back on if DyskLink isn't running or the battery is below 10%. **Remove helper** undoes the install.
 
 ## Permissions
-- **Accessibility:** for the touchpad, keyboard, and remotes from the phone, pasting from Clipboard History, Mouse
-  wheel options (which only look at scroll events), and Window Previews.
-- **Screen Recording:** for reading text from the screen and for window pictures in Window Previews.
+- **Accessibility:** for the touchpad, keyboard, and remotes from the phone, typing scanned or dictated text,
+  control of this screen from the phone, sharing the mouse and keyboard with other computers, pasting from Clipboard
+  History, Mouse wheel options (which only look at scroll events), and Window Previews.
+- **Screen Recording:** for this screen and the second display on the phone, reading text from the screen, and
+  window pictures in Window Previews.
 - **Notifications:** requested the first time the notification, SMS, or call feature turns on.
 
 Builds signed with the certificate below keep the Accessibility grant across rebuilds. An ad-hoc build loses the
@@ -181,7 +230,13 @@ git clone https://github.com/DyskLab/dysklink-mac.git
 cd dysklink-mac
 ```
 
-Create the signing certificate once per Mac:
+For a quick debug build and a check of the Advanced tools:
+```bash
+swift build
+.build/debug/PhoneLinkMac --tools-selftest
+```
+
+To build the app, create the signing certificate once per Mac:
 ```bash
 ./scripts/create-signing-cert.sh
 ```
@@ -192,7 +247,7 @@ The first build that uses it shows a Keychain dialog. Enter your own login passw
 open dist/DyskLink.app
 ```
 
-To remove the certificate:
+`bundle.sh` builds a release `dist/DyskLink.app` with the charging helper inside. To remove the certificate:
 ```bash
 security delete-identity -c "DyskLink Local Signing"
 ```
@@ -205,21 +260,27 @@ network. The phone asks to pair, the Mac shows a 6-digit code, and you type it o
 and only works for that pairing. After that, connecting is automatic.
 
 ## Tests
-The integration test runs the Android core against the debug Mac app over real TLS, with a separate port, folders,
-and clipboard, and without injecting input. It needs JDK 17, the Android SDK, and
-[dysklink-android](https://github.com/DyskLab/dysklink-android) cloned next to this repository, or its location in
-`DYSKLINK_ANDROID_DIR`.
+The test scripts run debug Mac apps with a separate port, folders, and clipboard, without injecting input. Run one
+at a time.
 
 ```bash
-./scripts/integration-test.sh
+./scripts/integration-test.sh   # the Android core against the Mac app over real TLS
+./scripts/pc-sync-test.sh       # the Windows/Linux computer side against the Mac app
+./scripts/mac-sync-test.sh      # two Mac apps pairing and sharing the clipboard
 ```
 
-Phone data in this test is fake. The video decoder is tested with H.264 made by VideoToolbox, not with phone encoder
+`integration-test.sh` and `pc-sync-test.sh` need JDK 17 and
+[dysklink-android](https://github.com/DyskLab/dysklink-android) cloned next to this repository.
+`integration-test.sh` finds it as `dysklink-android` or `android`, or in `DYSKLINK_ANDROID_DIR`, and also needs the
+Android SDK. `pc-sync-test.sh` expects it at `../android`.
+
+Phone data in these tests is fake. The video decoder is tested with H.264 made by VideoToolbox, not with phone encoder
 output.
 
 ## Development
 Debug builds support:
-- `PhoneLinkMac --snapshot <folder>`: renders PNGs of the main screens.
+- `PhoneLinkMac --snapshot <folder>`: renders PNGs of the main screens, in the light theme with
+  `DYSKLINK_SNAPSHOT_APPEARANCE=light`.
 - `PhoneLinkMac --render-icon <file.png>`: renders the 1024x1024 app icon source.
 - `PhoneLinkMac --video-selftest`: tests the video decoder.
 - `PhoneLinkMac --tools-selftest`: tests the Advanced tools.
@@ -250,29 +311,3 @@ DyskLink is free and open source under the [MIT License](LICENSE). If it helps y
 DyskLink is part of [DyskLab](https://dysklab.fanny.dev), alongside
 [DyskFlow](https://github.com/DyskLab/dyskflow), [DyskFiles](https://github.com/DyskLab/dyskfiles), and
 [DyskFocus](https://github.com/DyskLab/dyskfocus).
-
-## Lock, note, battery
-
-- **Lock when the phone goes away:** in a phone's settings on the Mac. The Mac locks when that phone stays disconnected
-  for the chosen time (30 seconds to 5 minutes). It doesn't lock when the Mac itself is offline.
-- **Quick note:** the Note page in the notch and Quick note on the phone's Notch screen hold the same text.
-- **Battery:** Mac care › Battery shows health as in System Settings, full charge against design, cycles, temperature,
-  power, and a daily history.
-- **Menu bar:** Advanced › Menu bar chooses what the DyskLink menu shows and in what order: devices, brightness and volume,
-  Keep Awake, window layouts, recent copies, ring phone, lock screen, Pomodoro, weather, quick note, and Open at login.
-- **Screen on the phone:** with "View this screen from the phone" on (in a phone's settings), paired phones can view this
-  screen and tap, type, and scroll on it. It needs Screen Recording, and Accessibility for control.
-- **Photo sync:** photos the phone sends with photo sync on are saved in Pictures › DyskLink › <phone name>.
-- **Phone camera:** a phone's camera in its own window, with lens switch, light, mirror, rotate, keep on top, and a clean
-  view for OBS Window Capture. Use OBS Virtual Camera to bring it into Zoom or Meet.
-- **OBS:** the phone screen and camera windows have a clean view without the button bar (⌘B brings it back) and a keep on
-  top button. Add them to OBS with Window Capture.
-- **USB:** with USB debugging on, a plugged-in phone connects through the cable instead of Wi-Fi. Needs `adb` (Android SDK,
-  Homebrew `android-platform-tools`, or the Download button in a phone's settings).
-- **Game keys:** in the phone screen window, the controller button maps keyboard keys to spots on the phone screen, plus a
-  WASD joystick. Several keys can be held at once, and the mouse taps as well.
-- **Phone as a second display:** Second display on the phone adds it as an extra display of this Mac. Drag windows onto it
-  and arrange it in System Settings › Displays. Needs "View this screen from the phone" and Screen Recording.
-- **Charging control:** Mac Care › Battery. Charge limit with sailing, discharge on power, heat protection, and calibration,
-  through a small root helper (`dysklink-power`) that can only switch the charger input. Its launchd guard turns the
-  charger back on if DyskLink isn't running or the battery is below 10%. Remove helper undoes the install.
