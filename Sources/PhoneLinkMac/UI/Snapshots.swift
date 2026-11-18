@@ -218,8 +218,10 @@ enum Snapshots {
         AdvancedLayout.shared.category = .productivity
         tools.reachable.isOn = true
         tools.reachable.preview(wakeForNetwork: false)
-        write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1900, alignment: .top)
+        tools.isKeyboardLockOn = true
+        write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 2300, alignment: .top)
             .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12b-advanced-productivity", folder)
+        write(KeyboardLockBadge(lock: tools.keyboardLock).padding(20).background(Theme.background).snapshotScheme(), "12d-keyboard-lock", folder)
         AdvancedLayout.shared.category = .screen
         write(AdvancedView(tools: tools, scrolls: false).frame(width: 708, height: 1900, alignment: .top)
             .background(Theme.background).toggleStyle(.dyskSwitch).snapshotScheme(), "12c-advanced-screen", folder)

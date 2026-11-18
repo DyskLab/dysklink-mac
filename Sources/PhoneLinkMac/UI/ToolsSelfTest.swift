@@ -61,6 +61,7 @@ enum ToolsSelfTest {
         testSameFile()
         testSearchablePDF()
         testLayoutCommands()
+        testKeyboardLock()
         testEmojiExtras()
         testMenuAnchor()
         testGallerySnapshot()
@@ -1060,6 +1061,29 @@ enum ToolsSelfTest {
         check("old profile JSON decodes with defaults", keys.count == 2 && keys[0].keySet == .wasd && keys[0].walk == .off
               && keys[1].mode == .tap && keys[1].rate == 10 && keys[1].steps.isEmpty && keys[1].duration == 120)
         check("new fields round-trip", (try? JSONDecoder().decode(GameKey.self, from: JSONEncoder().encode(combo))) == combo)
+    }
+
+    private static func testKeyboardLock() {
+        let all: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand]
+        check("keyboard lock: the shortcut unlocks", KeyboardLockKeys.isUnlock(keyCode: KeyboardLockKeys.unlockKeyCode, flags: all))
+        check("keyboard lock: U alone or with fewer modifiers doesn't", !KeyboardLockKeys.isUnlock(keyCode: KeyboardLockKeys.unlockKeyCode, flags: [])
+              && !KeyboardLockKeys.isUnlock(keyCode: KeyboardLockKeys.unlockKeyCode, flags: [.maskControl, .maskAlternate]))
+        check("keyboard lock: another key with the modifiers doesn't", !KeyboardLockKeys.isUnlock(keyCode: 0, flags: all))
+        let keys = [CGEventType.keyDown, .keyUp, .flagsChanged].map(\.rawValue)
+        check("keyboard lock: this Mac's keys are held back", keys.allSatisfy { !KeyboardLockKeys.passes(type: $0, isOwn: false, subtype: nil) })
+        check("keyboard lock: keys DyskLink posts for a phone pass", keys.allSatisfy { KeyboardLockKeys.passes(type: $0, isOwn: true, subtype: nil) })
+        check("keyboard lock: media and brightness keys are held back",
+              !KeyboardLockKeys.passes(type: KeyboardLockKeys.systemDefined, isOwn: false, subtype: KeyboardLockKeys.auxKeysSubtype))
+        check("keyboard lock: other system events pass", KeyboardLockKeys.passes(type: KeyboardLockKeys.systemDefined, isOwn: false, subtype: 7)
+              && KeyboardLockKeys.passes(type: CGEventType.leftMouseDown.rawValue, isOwn: false, subtype: nil))
+        let mask = KeyboardLockKeys.mask
+        check("keyboard lock: the tap asks for keys only", mask & (1 << CGEventType.keyDown.rawValue) != 0 && mask & (1 << 14) != 0
+              && mask & (1 << CGEventType.leftMouseDown.rawValue) == 0 && mask & (1 << CGEventType.mouseMoved.rawValue) == 0)
+        let lock = KeyboardLock()
+        check("keyboard lock: no phone command while unlocked", lock.commands.isEmpty && !lock.isLocked)
+        check("keyboard lock: other commands aren't its own", lock.runCommand("layout:x") == nil)
+        check("keyboard lock: the phone hears it isn't locked", lock.runCommand(KeyboardLock.commandID) == "The keyboard isn't locked.")
+        check("keyboard lock: every length has a label", KeyboardLock.durations.contains { $0.minutes == 0 } && KeyboardLock.durations.allSatisfy { !$0.label.isEmpty })
     }
 
     private static func testMenuBarLayout() {

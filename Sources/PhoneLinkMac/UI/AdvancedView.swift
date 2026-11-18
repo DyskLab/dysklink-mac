@@ -27,6 +27,9 @@ struct AdvancedView: View {
                   detail: "One shortcut opens a search box for apps, files, windows, copies, sums, units, and DyskLink actions.", category: .productivity, isOn: $tools.isLauncherOn),
             Entry(id: "awake", icon: "cup.and.saucer.fill", title: "Keep Awake",
                   detail: "Stops this Mac or its screen from sleeping for as long as you choose.", category: .productivity, isOn: $tools.isAwakeOn),
+            Entry(id: "keyboardLock", icon: "keyboard.fill", title: "Keyboard Lock",
+                  detail: "Turn off this Mac's keyboard for a while, to clean it or with a cat or a child about. The mouse and trackpad keep working.",
+                  category: .productivity, isOn: $tools.isKeyboardLockOn),
             Entry(id: "reachable", icon: "powerplug.fill", title: "Stay reachable while charging",
                   detail: "While this Mac is on the charger it won't go to sleep, so your phone stays connected and can reach it. The display still turns off. On battery it sleeps as usual.",
                   category: .productivity, isOn: Bindable(tools.reachable).isOn),
@@ -99,6 +102,7 @@ struct AdvancedView: View {
         case "clipboard": clipboardContent
         case "launcher": launcherContent
         case "awake": awakeContent
+        case "keyboardLock": keyboardLockContent
         case "reachable": reachableContent
         case "macs": otherMacsContent
         case "layout": layoutContent
@@ -410,6 +414,46 @@ struct AdvancedView: View {
                 }
             }
             .frame(width: 330)
+        }
+        .font(.system(size: 12.5))
+        .foregroundStyle(Theme.textSecondary)
+        .tint(Theme.mint)
+    }
+
+    // MARK: Keyboard Lock
+
+    private var keyboardLockContent: some View {
+        let lock = tools.keyboardLock
+        let menu = Shared.menuBar
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                if lock.isLocked {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keyboard locked").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        Text(lock.remainingText).font(.system(size: 12).monospacedDigit()).foregroundStyle(Theme.textSecondary)
+                    }
+                } else {
+                    Picker("Lock for", selection: Bindable(lock).minutes) {
+                        ForEach(KeyboardLock.durations, id: \.minutes) { Text($0.label).tag($0.minutes) }
+                    }
+                    .frame(width: 270)
+                }
+                Spacer()
+                if lock.isLocked {
+                    Button("Unlock") { lock.unlock() }.buttonStyle(SecondaryButtonStyle())
+                } else {
+                    Button("Lock") { lock.lock() }.buttonStyle(PrimaryButtonStyle()).disabled(!Shared.model.isInputTrusted)
+                }
+            }
+            if !Shared.model.isInputTrusted {
+                accessibilityRow("Locking the keyboard needs Accessibility for DyskLink in Privacy & Security.")
+            } else if let problem = lock.problem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amberText)
+            }
+            Text("To unlock: click Unlock in the small window at the bottom of the screen, press \(KeyboardLockKeys.unlockLabel), wait for the time to run out, or choose Unlock the keyboard in Commands on your phone. Locking the screen or sleep unlocks it too. Typing from your phone or another computer still works.")
+                .font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Show in the menu bar", isOn: Binding(get: { menu.isShown(.keyboardLock) }, set: { menu.setShown(.keyboardLock, $0) }))
         }
         .font(.system(size: 12.5))
         .foregroundStyle(Theme.textSecondary)

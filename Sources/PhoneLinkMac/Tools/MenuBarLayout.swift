@@ -5,7 +5,7 @@ import Foundation
 @Observable
 final class MenuBarLayout {
     enum Section: String, CaseIterable, Identifiable {
-        case devices, batteryLimit, batteryStatus, powerFlow, energyApps, batteryLevel, batteryDetails, powerUse, displays, awake, layouts, clipboard, findPhone, sendFile, lock, pomodoro, weather, note, login
+        case devices, batteryLimit, batteryStatus, powerFlow, energyApps, batteryLevel, batteryDetails, powerUse, displays, awake, keyboardLock, layouts, clipboard, findPhone, sendFile, lock, pomodoro, weather, note, login
         var id: String { rawValue }
 
         var label: String {
@@ -20,6 +20,7 @@ final class MenuBarLayout {
             case .powerUse: "Power consumption chart"
             case .displays: "Brightness and volume"
             case .awake: "Keep Awake"
+            case .keyboardLock: "Lock keyboard"
             case .layouts: "Window layouts"
             case .clipboard: "Recent copies"
             case .findPhone: "Ring phone"
@@ -44,6 +45,7 @@ final class MenuBarLayout {
             case .powerUse: "bolt"
             case .displays: "sun.max"
             case .awake: "cup.and.saucer"
+            case .keyboardLock: "keyboard"
             case .layouts: "rectangle.split.3x1"
             case .clipboard: "doc.on.clipboard"
             case .findPhone: "bell.and.waves.left.and.right"
@@ -62,6 +64,7 @@ final class MenuBarLayout {
             case .batteryLimit, .batteryStatus, .powerFlow, .energyApps, .batteryLevel, .batteryDetails, .powerUse: "Shows on Macs with a battery"
             case .displays: "Needs Brightness and Volume"
             case .awake: "Needs Keep Awake"
+            case .keyboardLock: "Needs Keyboard Lock"
             case .layouts: "Needs a saved Window Layout"
             case .clipboard: "Needs Clipboard History"
             case .findPhone, .sendFile: "Shows when a phone is connected"

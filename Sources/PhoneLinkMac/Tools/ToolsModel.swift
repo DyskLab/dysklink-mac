@@ -9,6 +9,7 @@ import Observation
 final class ToolsModel {
     let monitor = SystemMonitor()
     let awake = KeepAwake()
+    let keyboardLock = KeyboardLock()
     let reachable: StayReachable
     let clipboard: ClipboardHistory
     let displays = DisplayControl()
@@ -42,6 +43,9 @@ final class ToolsModel {
     }
     var isClipboardOn: Bool {
         didSet { save(isClipboardOn, "tool.clipboard"); applyClipboard() }
+    }
+    var isKeyboardLockOn: Bool {
+        didSet { save(isKeyboardLockOn, "tool.keyboardLock"); if !isKeyboardLockOn { keyboardLock.unlock() } }
     }
 
     var isDisplaysOn: Bool {
@@ -102,6 +106,7 @@ final class ToolsModel {
         isMonitorOn = defaults.bool(forKey: "tool.monitor")
         isAwakeOn = defaults.bool(forKey: "tool.keepAwake")
         isClipboardOn = defaults.bool(forKey: "tool.clipboard")
+        isKeyboardLockOn = defaults.bool(forKey: "tool.keyboardLock")
         isQuickPasteOn = defaults.bool(forKey: "clipboard.quickPaste")
         isDisplaysOn = defaults.bool(forKey: "tool.displays")
         isMouseOn = defaults.bool(forKey: "tool.mouse")

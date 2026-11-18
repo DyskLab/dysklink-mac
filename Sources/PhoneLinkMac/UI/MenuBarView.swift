@@ -99,6 +99,7 @@ struct MenuBarView: View {
         case .batteryLimit, .batteryStatus, .powerFlow, .energyApps, .batteryLevel, .batteryDetails, .powerUse: Shared.care.hasBattery
         case .displays: tools.isDisplaysOn
         case .awake: tools.isAwakeOn
+        case .keyboardLock: tools.isKeyboardLockOn
         case .layouts: tools.isLayoutOn && !tools.layout.layouts.isEmpty
         case .clipboard: tools.isClipboardOn && !recentCopies.isEmpty
         case .findPhone, .sendFile: !connectedPhones.isEmpty
@@ -120,6 +121,7 @@ struct MenuBarView: View {
         case .powerUse: MenuBatterySection(part: .power)
         case .displays: DisplaySliders(control: tools.displays)
         case .awake: awake
+        case .keyboardLock: keyboardLock
         case .layouts:
             ForEach(tools.layout.layouts) { saved in
                 Button { tools.layout.restore(saved) } label: { row("rectangle.split.3x1", "Restore \(saved.name)") }
@@ -294,6 +296,69 @@ struct MenuBarView: View {
             if tools.reachable.isActive {
                 Text("Stay reachable is on: no sleep while charging.")
                     .font(.system(size: 11)).foregroundStyle(Theme.textSecondary)
+            }
+        }
+    }
+
+    private var keyboardLock: some View {
+        let lock = tools.keyboardLock
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "keyboard").foregroundStyle(lock.isLocked ? Theme.coral : Theme.textFaint).frame(width: 16)
+                Text(lock.isLocked ? "Keyboard is locked" : "Lock keyboard").foregroundStyle(Theme.textPrimary)
+                Spacer()
+                if lock.isLocked {
+                    Text(lock.remainingText).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .font(.system(size: 12.5, weight: .medium))
+            HStack(spacing: 8) {
+                if lock.isLocked {
+                    Spacer()
+                } else {
+                    Menu {
+                        ForEach(KeyboardLock.durations, id: \.minutes) { choice in
+                            Button {
+                                lock.minutes = choice.minutes
+                            } label: {
+                                if choice.minutes == lock.minutes {
+                                    Label(choice.label, systemImage: "checkmark")
+                                } else {
+                                    Text(choice.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(lock.lengthLabel).lineLimit(1)
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.textFaint)
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 26)
+                        .background(Theme.contrast.opacity(0.07), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.stroke))
+                        .contentShape(Rectangle())
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Button { lock.toggle() } label: {
+                    Text(lock.isLocked ? "Unlock" : "Lock")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(lock.isLocked ? Theme.coralText : Theme.onAccent)
+                        .frame(width: 64, height: 26)
+                        .background(lock.isLocked ? Theme.coral.opacity(0.15) : Theme.mint, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if let problem = lock.problem, !lock.isLocked {
+                Text(problem).font(.system(size: 11)).foregroundStyle(Theme.amberText).fixedSize(horizontal: false, vertical: true)
             }
         }
     }

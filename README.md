@@ -129,7 +129,7 @@ Open **Advanced** at the bottom of the sidebar. Its pages are General, Productiv
 - **Open at login:** starts DyskLink in the menu bar when you log in. If you move the app afterward, turn it off and
   on again.
 - **Menu bar:** chooses what the DyskLink menu shows and in what order: devices, brightness and volume, Keep Awake,
-  window layouts, recent copies, ring phone, lock screen, Pomodoro, weather, quick note, and Open at login.
+  Lock keyboard, window layouts, recent copies, ring phone, lock screen, Pomodoro, weather, quick note, and Open at login.
 - **Updates:** see [Download](#download).
 
 The tools:
@@ -139,6 +139,11 @@ The tools:
 - **Keep Awake:** keeps the Mac or its screen awake for a set time or until you stop it, optionally only while
   plugged in, until the battery falls below a limit, or until there's been no activity for a time you choose. It
   holds a macOS power assertion and changes no settings.
+- **Keyboard Lock:** turns off the Mac's own keyboard (and its media and brightness keys) for 1 minute to 1 hour,
+  or until you unlock it, to clean it or with a cat or a child about. The mouse and trackpad keep working. It
+  unlocks with the Unlock button in its small window, **Control + Option + Command + U**, when the time runs out,
+  from a paired phone (Commands > Unlock the keyboard), or when the Mac locks or sleeps. Typing from a phone or
+  another computer still works. Needs Accessibility; it uses an event tap and changes no settings.
 - **Clipboard History:** **Control + Command + V** shows what you copied, and Return pastes it. It can keep up to
   1000 or 5000 items, or everything, and **Control + Option + 1 to 9** can paste the newest items directly. History
   from Ditto (`Ditto.db` from Windows) and CopyQ (a `.cpq` export without a password, or `~/.config/copyq`) can be

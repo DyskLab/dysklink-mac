@@ -142,13 +142,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.onMacScreenWatchers = { names in Shared.tools.notch.model.screenWatchers = names }
             model.onAudioListeners = { names in Shared.tools.notch.model.audioListeners = names }
             // Saved window layouts can be restored from the phone, like a Mac command.
-            model.toolCommands = { Shared.tools.isLayoutOn ? Shared.tools.layout.commands : [] }
+            model.toolCommands = { (Shared.tools.isLayoutOn ? Shared.tools.layout.commands : []) + Shared.tools.keyboardLock.commands }
             model.runToolCommand = { id in
+                if let answer = Shared.tools.keyboardLock.runCommand(id) { return answer }
                 guard id.hasPrefix(WindowLayout.commandPrefix) else { return nil }
                 guard Shared.tools.isLayoutOn else { return "Turn on Window Layouts in DyskLink on the Mac." }
                 return Shared.tools.layout.runCommand(id)
             }
             Shared.tools.layout.onChange = { [weak model] in model?.toolCommandsChanged() }
+            Shared.tools.keyboardLock.onChange = { [weak model] in model?.toolCommandsChanged() }
             model.onCode = { code in
                 guard Shared.tools.isNotchOn else { return }
                 Shared.tools.notch.model.showCode(code)
