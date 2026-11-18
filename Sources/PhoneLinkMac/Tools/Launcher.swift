@@ -521,6 +521,11 @@ enum Launcher {
                 if active { tools.awake.stop() } else if tools.awake.canStart { tools.awake.start() }
             })
         }
+        if tools.isKeyboardLockOn {
+            let lock = tools.keyboardLock
+            result.append(LauncherItem(id: "keyboard-lock", kind: .command, title: lock.isLocked ? "Unlock the keyboard" : "Lock the keyboard",
+                                       subtitle: "For \(lock.lengthLabel.lowercased()); the mouse still works", symbol: "keyboard") { lock.toggle() })
+        }
         let pomodoro = tools.notch.model.pomodoro
         result.append(LauncherItem(id: "pomodoro", kind: .command, title: pomodoro.isRunning ? "Pause Pomodoro" : "Start Pomodoro",
                                    subtitle: "Focus timer", symbol: "timer") { tools.notch.model.togglePomodoro() })
