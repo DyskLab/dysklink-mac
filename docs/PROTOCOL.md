@@ -705,6 +705,7 @@ The desktop app also lists caps for what it serves, which phones don't list (the
 | `pc-shared-input-source` | sends its own mouse and keyboard to a Mac as `remote.enter`/`remote.input`; only on Windows and X11; a Mac takes these from a PC only with it | - |
 | `pc-screen-out` | answers `macscreen.start` with its own screen as JPEG frames (see This PC's screen on a phone) | shows PC screen; drops `macscreen.started`, `macscreen.frame`, `macscreen.stopped` from a PC without it |
 | `pc-deck` | takes the deck's `input` `shortcut` keys with Mac names and maps them (see Deck, tools, scans, and typing on a PC) | shows Stream Deck |
+| `pc-keys` | also takes `input` `shortcut` keys written `pc:` plus `ctrl`, `win`, `alt`, `shift` and a key (for example `pc:win+shift+s`), and presses them as they are, without the Mac mapping | offers Ctrl, Win, Alt, and Shift in the deck editor; for a Mac or a PC without it, a `pc:` button becomes the nearest Mac shortcut (Ctrl as `cmd`, Alt as `opt`, Win dropped) |
 | `pc-notch` | keeps the notch's Todo, water, and Pomodoro, sends `notch.state`, and answers `notch.action`, as a Mac does | shows PC tools; drops `notch.state` from a PC without it |
 | `pc-type` | types the `input` text and keys of Scan and Voice typing, as a Mac does | shows Scan and Voice typing |
 | `pc-scan` | takes a file with `kind: "scan"` into Documents/DyskLink/Scans, notifies, and opens the PDF | shows Document scan; sends a scan to a PC without it as a plain file (no `kind`) |
@@ -792,7 +793,8 @@ The desktop app also lists caps for what it serves, which phones don't list (the
   Windows, PrintScreen and Shift+PrintScreen on Linux), `cmd+q` closes (Alt+F4), `cmd+tab` switches windows (Alt+Tab), `ctrl+cmd+f` is F11, and `opt+space` is
   ignored. Media and text are the normal `media` and `input`; commands are `pc-commands`; OBS goes from the phone
   straight to obs-websocket 5 and never through the PC. Buttons are kept on the phone. There's no button kind to open
-  an app, a link, or a file: the deck sends what a Mac takes, and a PC command does those.
+  an app, a link, or a file: the deck sends what a Mac takes, and a PC command does those. A PC with `pc-keys` also takes `pc:` shortcuts (above),
+  which the editor makes for it; their keys are the Mac's plus `printscreen`.
 - Tools (`pc-notch`): the PC keeps the Mac's data model in its data folder (`notch-todos.json`, `notch-water.json`,
   `notch-pomodoro.json`, `notch-note.json`) and shows it on a Tools page: at most 50 tasks of 80 characters, done tasks
   of an earlier day cleared, water by the day with a goal, glass size, and reminders every so many minutes between two
