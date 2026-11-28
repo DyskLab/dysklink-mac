@@ -407,6 +407,15 @@ struct AdvancedView: View {
                 .font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("Keep the screen on too", isOn: Bindable(awake).keepsDisplayOn)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Keep me shown as active", isOn: Bindable(awake).staysActive)
+                Text("So Discord, Slack, Teams, and similar apps don't mark you as away. After a minute with no input, the pointer moves one point and straight back. Keep those apps open; you show as away once Keep Awake ends.")
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if awake.staysActive, !Shared.model.isInputTrusted {
+                accessibilityRow("Showing you as active needs Accessibility for DyskLink in Privacy & Security.")
+            }
             Toggle("Only while plugged in", isOn: Bindable(awake).onlyOnPower)
             Picker("End when battery falls below", selection: Bindable(awake).stopBelow) {
                 ForEach(KeepAwake.batteryLimits, id: \.self) { limit in

@@ -27,6 +27,24 @@ enum AwakeDecision: Equatable {
     }
 }
 
+/// "Keep me shown as active": chat apps such as Discord, Slack, and Teams mark you away after a few
+/// minutes with no input, so while Keep Awake holds, the pointer is moved one point and straight back
+/// once a minute without input. The nudges reset the system's idle time, so real input is told apart
+/// from them here, and "End after no activity" still counts only what the person did.
+enum ActivityNudge {
+    /// Seconds without input before the next nudge. Chat apps wait five minutes or more.
+    static let after: TimeInterval = 60
+
+    static func isDue(systemIdle: Double) -> Bool { systemIdle >= after }
+
+    /// When the last real input happened, or nil if the latest input the system saw was our own nudge.
+    static func realInput(now: Date, systemIdle: Double, lastNudge: Date?) -> Date? {
+        let inputAt = now.addingTimeInterval(-systemIdle)
+        guard let lastNudge else { return inputAt }
+        return inputAt > lastNudge.addingTimeInterval(2) ? inputAt : nil
+    }
+}
+
 /// Holds a macOS power assertion, so nothing in the system's own settings changes
 /// and the normal behavior returns as soon as it ends or the app quits.
 @MainActor
@@ -57,6 +75,9 @@ final class KeepAwake {
             evaluate()
         }
     }
+    var staysActive: Bool {
+        didSet { defaults.set(staysActive, forKey: "keepAwake.staysActive") }
+    }
     var onlyOnPower: Bool {
         didSet { defaults.set(onlyOnPower, forKey: "keepAwake.onlyOnPower"); evaluate() }
     }
@@ -73,12 +94,16 @@ final class KeepAwake {
     private(set) var note: String?
     private(set) var now = Date()
     private(set) var idleSecondsNow = 0.0
+    /// The pointer couldn't be nudged because DyskLink lacks Accessibility.
+    private(set) var nudgeBlocked = false
 
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var assertion: IOPMAssertionID = 0
     /// The battery was already under the limit when the session began, so the limit is skipped.
     @ObservationIgnored private var skipsBatteryLimit = false
+    @ObservationIgnored private var lastNudge: Date?
+    @ObservationIgnored private var lastRealInput = Date()
 
     init() {
         let stored = UserDefaults.standard
@@ -88,6 +113,7 @@ final class KeepAwake {
         idleChoice = stored.object(forKey: "keepAwake.idle") as? Int ?? 0
         customIdleMinutes = stored.object(forKey: "keepAwake.customIdle") as? Int ?? 20
         keepsDisplayOn = stored.object(forKey: "keepAwake.display") as? Bool ?? true
+        staysActive = stored.bool(forKey: "keepAwake.staysActive")
         onlyOnPower = stored.bool(forKey: "keepAwake.onlyOnPower")
         stopBelow = stored.object(forKey: "keepAwake.stopBelow") as? Int ?? 20
     }
@@ -130,6 +156,8 @@ final class KeepAwake {
     func start() {
         isActive = true
         note = nil
+        lastNudge = nil
+        lastRealInput = Date().addingTimeInterval(-Self.idleSeconds)
         checkBatteryLimit()
         let length = sessionMinutes
         endsAt = length > 0 ? Date().addingTimeInterval(TimeInterval(length * 60)) : nil
@@ -173,7 +201,11 @@ final class KeepAwake {
             }
         }
         now = Date()
-        idleSecondsNow = Self.idleSeconds
+        let systemIdle = Self.idleSeconds
+        if let input = ActivityNudge.realInput(now: now, systemIdle: systemIdle, lastNudge: lastNudge) {
+            lastRealInput = max(lastRealInput, input)
+        }
+        idleSecondsNow = max(0, now.timeIntervalSince(lastRealInput))
         let decision = AwakeDecision.decide(
             now: now, endsAt: endsAt, power: PowerStatus.current(), onlyOnPower: onlyOnPower,
             stopBelow: skipsBatteryLimit ? 0 : stopBelow, idleSeconds: idleSecondsNow, idleLimitMinutes: idleLimitMinutes
@@ -182,6 +214,7 @@ final class KeepAwake {
         case .hold:
             isPaused = false
             hold()
+            if staysActive, ActivityNudge.isDue(systemIdle: systemIdle) { nudge() }
         case .pause:
             isPaused = true
             release()
@@ -202,6 +235,18 @@ final class KeepAwake {
         } else {
             stop(note: "macOS refused the request.")
         }
+    }
+
+    /// Moves the pointer one point and back. macOS drops posted events without Accessibility.
+    private func nudge() {
+        nudgeBlocked = !DeviceInput.isTrusted
+        guard !nudgeBlocked, let here = CGEvent(source: nil)?.location else { return }
+        let source = CGEventSource(stateID: .hidSystemState)
+        for point in [CGPoint(x: here.x + 1, y: here.y), here] {
+            CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
+                .post(tap: .cghidEventTap)
+        }
+        lastNudge = Date()
     }
 
     private func release() {

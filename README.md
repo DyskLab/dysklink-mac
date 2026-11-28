@@ -138,7 +138,9 @@ The tools:
   is on screen.
 - **Keep Awake:** keeps the Mac or its screen awake for a set time or until you stop it, optionally only while
   plugged in, until the battery falls below a limit, or until there's been no activity for a time you choose. It
-  holds a macOS power assertion and changes no settings.
+  holds a macOS power assertion and changes no settings. **Keep me shown as active** also stops Discord, Slack,
+  Teams, and similar apps from marking you away: after a minute with no input it moves the pointer one point and
+  straight back. "End after no activity" still counts only your own input. Needs Accessibility.
 - **Keyboard Lock:** turns off the Mac's own keyboard (and its media and brightness keys) for 1 minute to 1 hour,
   or until you unlock it, to clean it or with a cat or a child about. The mouse and trackpad keep working. It
   unlocks with the Unlock button in its small window, **Control + Option + Command + U**, when the time runs out,
